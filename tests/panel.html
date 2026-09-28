@@ -158,6 +158,8 @@
       return r;
     },
   };
+  // a view definition queued by a script that loaded BEFORE panel.js (registerView's load-order fallback)
+  CMA.panelViewQueue = [{ id: 'queued', label: 'Queued', order: 60, render(ctx) { ctx.body.appendChild(ctx.el('div', { class: 'queued-body' }, 'queued view')); } }];
 })();
 </script>
 <script src="../src/ui/panel.css.js"></script>
@@ -1270,6 +1272,134 @@
       stub.inFlight = null;
       P.setState({ result: null, plan: null, view: 'input' });
       ok(!banner(), 'no decoder banner left');
+    });
+  });
+
+  describe('view registry (CMA.panel.registerView; the TDEE view is the first user)', () => {
+    const calls = [];
+    let unregister = null;
+    const def = {
+      id: 'probe', label: 'Probe',
+      render(ctx) {
+        calls.push(['render', ctx]);
+        ctx.body.appendChild(ctx.el('div', { class: 'probe-body' }, 'hello ', ctx.formatDate({ day: 1, month: 2, year: 2026 })));
+        ctx.footer.appendChild(ctx.btn('Go', () => calls.push(['go'])));
+      },
+      onEvent(name, payload) { calls.push(['event', name, payload]); },
+      diagnostics() { return { rows: 3 }; },
+      unmount() { calls.push(['unmount']); },
+      css: '.probe-body { color: rgb(1, 2, 3); }'
+    };
+    const names = () => calls.map(c => (c[0] === 'event' ? 'event:' + c[1] : c[0]));
+    it('a definition queued before panel.js loaded (CMA.panelViewQueue) was registered at load; unregistering the shown view falls back to Input', () => {
+      ok(P.views().some(v => v.id === 'queued'), 'queued view registered');
+      eq(CMA.panelViewQueue.length, 0, 'queue drained');
+      const tabs = qa('.cma-tab').map(t => t.dataset.view);
+      eq(tabs[tabs.length - 1], 'queued', 'order 60 puts it after Settings');
+      P.open('queued');
+      eq(text(q('.queued-body')), 'queued view');
+      const off = P.registerView({ id: 'queued', label: 'Queued 2', order: 60, render(ctx) { ctx.body.appendChild(ctx.el('div', { class: 'queued-body' }, 'replaced')); } });
+      eq(text(q('.queued-body')), 'replaced', 're-registering the shown view re-renders it in place');
+      eq(q('.cma-tab[aria-selected="true"]').dataset.view, 'queued');
+      eq(text(qa('.cma-tab').find(t => t.dataset.view === 'queued')), 'Queued 2', 'new label');
+      off();
+      ok(!P.views().some(v => v.id === 'queued'), 'unregistered');
+      ok(!qa('.cma-tab').some(t => t.dataset.view === 'queued'), 'tab removed');
+      eq(q('.cma-tab[aria-selected="true"]').dataset.view, 'input');
+      ok(q('textarea.cma-input'), 'Input rendered');
+    });
+    it('registerView adds a tab just before Diagnostics, VIEWS lists it, its css is injected and render gets the ctx helpers', () => {
+      unregister = P.registerView(def);
+      deepEq(qa('.cma-tab').map(t => t.dataset.view), ['input', 'preview', 'results', 'probe', 'diagnostics', 'settings']);
+      eq(text(qa('.cma-tab').find(t => t.dataset.view === 'probe')), 'Probe');
+      deepEq(P.VIEWS, ['input', 'preview', 'results', 'probe', 'diagnostics', 'settings']);
+      P.open('probe');
+      eq(q('.cma-tab[aria-selected="true"]').dataset.view, 'probe');
+      eq(text(q('.probe-body')), 'hello 1 Feb 2026');
+      eq(getComputedStyle(q('.probe-body')).color, 'rgb(1, 2, 3)', 'the view css is live inside the closed shadow root');
+      ok(qa('style').some(s => s.dataset.view === 'probe'), 'its own <style>');
+      const ctx = calls.filter(c => c[0] === 'render').pop()[1];
+      for (const k of ['body', 'footer', 'el', 'btn', 'option', 'clear', 'append', 'notify', 'log', 'redact', 'errText', 'capState', 'sessionFrom', 'readiness',
+        'registryMismatch', 'rebuildInProgress', 'waitForRebuild', 'registryStatus', 'todayDate', 'formatDate', 'formatAgo', 'isoDate', 'parseIsoDate',
+        'copyText', 'storageGet', 'storageSet', 'switchView', 'renderView', 'isActive']) ok(ctx[k] != null, 'ctx.' + k);
+      eq(ctx.isActive(), true);
+      eq(ctx.redact('x ' + window.__NONCE).indexOf(window.__NONCE), -1, 'ctx.redact scrubs the nonce');
+      eq(ctx.registryMismatch(), false);
+      eq(text(q('.cma-footer')), 'Go');
+    });
+    it('capture and registry events reach the view only while it is shown; switching away or closing sends "hidden"', () => {
+      calls.length = 0;
+      CMA.events.emit('state', CMA.capture.state);
+      CMA.events.emit('registry-progress', { phase: 'fetch' });
+      CMA.events.emit('registry', { permutation: 'X' });
+      deepEq(names(), ['event:state', 'event:registry-progress', 'event:registry']);
+      eq(calls[1][2].phase, 'fetch', 'payload forwarded');
+      calls.length = 0;
+      P.open('input');
+      deepEq(names(), ['event:hidden']);
+      calls.length = 0;
+      CMA.events.emit('state', CMA.capture.state);
+      deepEq(names(), [], 'nothing while another view is shown');
+      P.open('probe');
+      calls.length = 0;
+      P.close();
+      deepEq(names(), ['event:hidden']);
+      calls.length = 0;
+      CMA.events.emit('state', CMA.capture.state);
+      deepEq(names(), [], 'nothing while the panel is closed');
+      P.open('probe');
+      deepEq(names(), ['render'], 'reopening renders it again (no second hidden)');
+      eq(calls[0][1].isActive(), true);
+    });
+    it('the dump carries views.<id>; a throwing diagnostics() or render() is reported (redacted), never thrown', () => {
+      deepEq(P.diagnosticsObject().views.probe, { rows: 3 });
+      ok(/"probe": \{\s*"rows": 3\s*\}/.test(P.diagnosticsText()), 'in the text dump');
+      const off = P.registerView({ id: 'broken', label: 'Broken', order: 45, render() { throw new Error('boom ' + window.__NONCE); }, diagnostics() { throw new Error('diag ' + window.__NONCE); } });
+      try {
+        const d = P.diagnosticsObject().views.broken;
+        ok(d && /^diag \[nonce\]$/.test(d.error), 'error recorded and redacted: ' + JSON.stringify(d));
+        P.open('broken');
+        eq(text(q('.cma-body .cma-banner')), 'This view could not be shown: boom [nonce]');
+        ok(P.getState().log.some(l => /view broken render failed/.test(l)), 'logged');
+        ok(P.diagnosticsText().indexOf(window.__NONCE) < 0, 'no nonce anywhere in the dump');
+        P.open('input');
+        ok(q('textarea.cma-input'), 'the panel keeps working');
+      } finally { off(); }
+    });
+    it('invalid definitions are rejected', async () => {
+      await CMA.test.throws(() => P.registerView(null), /definition object/);
+      await CMA.test.throws(() => P.registerView({ id: 'input', render() {} }), /built-in view/);
+      await CMA.test.throws(() => P.registerView({ id: 'Bad Id', render() {} }), /short lower-case word/);
+      await CMA.test.throws(() => P.registerView({ id: 'norender' }), /render\(ctx\) is required/);
+      ok(!P.views().some(v => v.id === 'norender' || v.id === 'Bad Id'));
+    });
+    it('setState({view}) and open(view) accept a registered id and ignore unknown ones', () => {
+      P.setState({ view: 'probe' });
+      eq(P.getState().view, 'probe');
+      P.setState({ view: 'nope' });
+      eq(P.getState().view, 'probe', 'unknown view ignored');
+      P.open('nope');
+      eq(q('.cma-tab[aria-selected="true"]').dataset.view, 'probe');
+    });
+    it('unmount calls the view\'s unmount; a remount brings its tab and css back; unregister removes both', () => {
+      calls.length = 0;
+      P.unmount();
+      deepEq(names(), ['unmount']);
+      P.mount();
+      ok(qa('.cma-tab').some(t => t.dataset.view === 'probe'), 'tab after the remount');
+      ok(qa('style').some(s => s.dataset.view === 'probe'), 'css after the remount');
+      P.open('probe');
+      ok(q('.probe-body'), 'renders after the remount');
+      calls.length = 0;
+      unregister();
+      deepEq(names(), ['unmount'], 'unregister unmounts it');
+      ok(!qa('.cma-tab').some(t => t.dataset.view === 'probe'), 'tab removed');
+      ok(!qa('style').some(s => s.dataset.view === 'probe'), 'css removed');
+      eq(q('.cma-tab[aria-selected="true"]').dataset.view, 'input', 'falls back to Input');
+      ok(P.VIEWS.indexOf('probe') < 0);
+      ok(!('probe' in P.diagnosticsObject().views));
+      unregister();   // a second call is harmless
+      eq(P.views().length, 0);
     });
   });
 

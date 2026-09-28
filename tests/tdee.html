@@ -1,0 +1,344 @@
+<!doctype html><html><head><meta charset="utf-8"><title>tdee</title></head><body><pre id="results"></pre>
+<script src="lib.js"></script>
+<script src="../src/tdee/adaptive-tdee.js"></script>
+<script src="tdee-sim.js"></script>
+<script>
+(function () {
+  const T = CMA.test;
+  const { describe, ok, eq, deepEq } = T;
+
+  // ---------------------------------------------------------------------------------------------------------
+  // The 17 upstream node tests (vendor/adaptive-tdee/adaptive-tdee.test.mjs), ported 1:1:
+  // test -> it, assert.equal -> eq, assert.deepEqual -> deepEq, assert.ok -> ok (node:assert/strict, so eq is
+  // strict equality and deepEq compares JSON). Bodies and names are otherwise verbatim; the name list is
+  // compared with the upstream file below so a new upstream test cannot be silently missed.
+  // ---------------------------------------------------------------------------------------------------------
+  const {
+    runExpenditureModel, weeklyCheckIn, normaliseDays, addDays,
+    parseDailyNutritionCsv, parseBiometricsCsv, activityAwareDailyTarget,
+  } = CMA.tdee;
+  const { makePerson } = CMA.tdeeSim;
+  const ported = [];
+  const it = (name, fn) => { ported.push(name); T.it(name, fn); };
+
+  describe('adaptive-tdee (upstream node tests)', () => {
+const START = '2026-01-01';
+// Noise-free person: eats `intake(t)`, burns `tdee(t)`, weighs exactly their tissue weight.
+function clean({ days = 60, startKg = 80, tdee = () => 2500, intake = () => 2500, weigh = () => true, logFood = () => true, burned = 2500 }) {
+  const recs = []; let W = startKg;
+  for (let t = 0; t < days; t++) {
+    recs.push({ date: addDays(START, t), intakeKcal: logFood(t) ? intake(t) : null, weightKg: weigh(t) ? Math.round(W * 100) / 100 : null, burnedKcal: burned });
+    W += (intake(t) - tdee(t)) / 7700;
+  }
+  return recs;
+}
+
+it('normaliseDays fills gaps, keeps first weigh-in, and treats excluded days as unlogged', () => {
+  const d = normaliseDays([
+    { date: '2026-01-01', intakeKcal: 2000, weightKg: 80 },
+    { date: '2026-01-01', weightKg: 81 },
+    { date: '2026-01-03', intakeKcal: 500, excluded: true },
+  ]);
+  eq(d.length, 3);
+  eq(d[0].weightKg, 80);
+  eq(d[1].intakeKcal, null);
+  eq(d[2].intakeKcal, null);
+});
+
+it('prior comes from Cronometer burned when no manual value is given', () => {
+  const r = runExpenditureModel(clean({ days: 10, burned: 2300 }));
+  eq(r.current.priorKcal, 2300);
+  eq(r.current.priorSource, 'cronometer');
+  eq(r.days[0].status, 'warmup');
+  eq(r.days[0].expenditureKcal, 2300);
+});
+
+it('manual initial estimate overrides Cronometer', () => {
+  const r = runExpenditureModel(clean({ days: 10 }), { initialExpenditureKcal: 2800 });
+  eq(r.current.priorKcal, 2800);
+  eq(r.current.priorSource, 'manual');
+});
+
+it('expenditure is frozen during warm-up', () => {
+  const r = runExpenditureModel(clean({ days: 7, tdee: () => 2900, intake: () => 2200, burned: 2400 }));
+  for (const d of r.days) eq(d.expenditureKcal, 2400);
+});
+
+it('recovers true expenditure from a wrong prior on clean data (maintenance)', () => {
+  const r = runExpenditureModel(clean({ days: 56, tdee: () => 2500, intake: () => 2500, burned: 2100 }));
+  ok(Math.abs(r.current.expenditureKcal - 2500) < 60, `got ${r.current.expenditureKcal}`);
+});
+
+it('recovers true expenditure during a steady deficit', () => {
+  const r = runExpenditureModel(clean({ days: 70, tdee: () => 2600, intake: () => 2100, burned: 2600 }), { config: { glycogenKgPerKcal: 0 } });
+  ok(Math.abs(r.current.expenditureKcal - 2600) < 60, `got ${r.current.expenditureKcal}`);
+  ok(r.current.weeklyTrendChangeKg < -0.3);
+});
+
+it('holds (freezes expenditure) when fewer than 4 of the previous 7 days are logged', () => {
+  const recs = clean({ days: 40, burned: 2500, logFood: (t) => t < 21 || t % 3 === 0 });
+  const r = runExpenditureModel(recs);
+  const late = r.days.filter((d) => d.date >= addDays(START, 30));
+  ok(late.every((d) => d.status === 'holding'));
+  const first = late[0].expenditureKcal;
+  ok(late.every((d) => d.expenditureKcal === first));
+});
+
+it('holds when there is no weigh-in in the last 7 days, and resumes afterwards', () => {
+  const recs = clean({ days: 50, weigh: (t) => t < 20 || t >= 35 });
+  const r = runExpenditureModel(recs);
+  const at = (t) => r.days.find((d) => d.date === addDays(START, t));
+  eq(at(30).status, 'holding');
+  eq(at(40).status, 'updating');
+});
+
+it('ignores an obvious mistyped weigh-in', () => {
+  const recs = clean({ days: 30 });
+  recs[25].weightKg = 8.0; // meant 80.0
+  const r = runExpenditureModel(recs);
+  const day = r.days.find((d) => d.date === recs[25].date);
+  eq(day.weightOutlier, true);
+  ok(Math.abs(r.current.trendWeightKg - 80) < 0.3);
+});
+
+it('is deterministic', () => {
+  const { recs } = makePerson({ seed: 42, days: 90 });
+  deepEq(runExpenditureModel(recs), runExpenditureModel(recs));
+});
+
+it('no systematic upward bias from symmetric weight noise (V3 bias fix)', () => {
+  let bias = 0;
+  for (const seed of [11, 12, 13, 14, 15, 16]) {
+    const { recs, truth } = makePerson({ seed, days: 120, plan: () => 2700, activityStep: null, vacation: null, glycogenKg: 0, cronoBias: 0 });
+    const r = runExpenditureModel(recs);
+    const tail = r.days.slice(-60);
+    bias += tail.reduce((a, d, i) => a + d.expenditureKcal - truth[truth.length - 60 + i].tdee, 0) / tail.length;
+  }
+  bias /= 6;
+  ok(Math.abs(bias) < 60, `bias ${bias.toFixed(0)}`);
+});
+
+it('noisy synthetic user: within ~150 kcal after 4 weeks of steady maintenance', () => {
+  const errs = [21, 22, 23, 24, 25, 26].map((seed) => {
+    const { recs, truth } = makePerson({ seed, days: 60, plan: () => 2700, activityStep: null, vacation: null, glycogenKg: 0, cronoBias: -400 });
+    const r = runExpenditureModel(recs);
+    return Math.abs(r.current.expenditureKcal - truth[truth.length - 1].tdee);
+  });
+  const mae = errs.reduce((a, b) => a + b, 0) / errs.length;
+  ok(mae < 150, `mae ${mae.toFixed(0)}`);
+});
+
+it('check-in: −0.5%/week at 80 kg is a ~440 kcal/day deficit', () => {
+  const c = weeklyCheckIn({ model: { expenditureKcal: 2500, trendWeightKg: 80, calibrated: true, status: 'updating' }, goal: { ratePctPerWeek: -0.5 } });
+  eq(c.energyDeltaKcal, -440);
+  eq(c.targetKcal, 2060);
+  eq(c.expectedWeeklyChangeKg, -0.4);
+});
+
+it('check-in: caps aggressive rates, respects calorie floor, limits weekly swings once calibrated', () => {
+  const m = { expenditureKcal: 1700, trendWeightKg: 60, calibrated: true, status: 'updating' };
+  const a = weeklyCheckIn({ model: m, goal: { ratePctPerWeek: -2 }, sex: 'female' });
+  eq(a.ratePctPerWeek, -1);
+  eq(a.targetKcal, 1200);
+  const b = weeklyCheckIn({ model: { ...m, expenditureKcal: 2600 }, goal: { ratePctPerWeek: 0 }, previousTargetKcal: 2000 });
+  eq(b.targetKcal, 2250);
+  const c = weeklyCheckIn({ model: { ...m, expenditureKcal: 2600 }, goal: { ratePctPerWeek: 0 }, previousTargetKcal: 2000, goalChanged: true });
+  eq(c.targetKcal, 2600);
+});
+
+it('check-in: macros add back up to the target', () => {
+  const c = weeklyCheckIn({ model: { expenditureKcal: 2600, trendWeightKg: 85, calibrated: true, status: 'updating' }, goal: { ratePctPerWeek: -0.5 } });
+  const { proteinG, fatG, carbsG } = c.macros;
+  ok(Math.abs(proteinG * 4 + fatG * 9 + carbsG * 4 - c.targetKcal) <= 15);
+  ok(fatG >= 0.6 * 85 - 1);
+});
+
+it('activity-aware target scales Cronometer burn by the learned ratio', () => {
+  eq(activityAwareDailyTarget({ weeklyTargetKcal: 2000, calibrationRatio: 0.9, cronometerBurnedAvgKcal: 2500, cronometerBurnedTodayKcal: 2900 }), 2360);
+  eq(activityAwareDailyTarget({ weeklyTargetKcal: 2000, calibrationRatio: null, cronometerBurnedAvgKcal: 2500, cronometerBurnedTodayKcal: 2900 }), 2000);
+});
+
+it('CSV parsers: kcal/kJ, Completed flag, lbs→kg, first weigh-in first', () => {
+  const nut = parseDailyNutritionCsv('Date,Energy (kcal),Protein (g),Completed\n2026-01-01,2100.5,150,true\n2026-01-02,640,40,false\n');
+  deepEq(nut, [
+    { date: '2026-01-01', intakeKcal: 2100.5, excluded: false },
+    { date: '2026-01-02', intakeKcal: 640, excluded: true },
+  ]);
+  const kj = parseDailyNutritionCsv('Date,Energy (kJ)\n2026-01-01,8368\n');
+  eq(Math.round(kj[0].intakeKcal), 2000);
+  const bio = parseBiometricsCsv('Day,Time,Group,Metric,Unit,Amount\n2026-01-01,08:00 AM,,Weight,lbs,176.4\n2026-01-01,07:00 AM,,Weight,lbs,176.0\n2026-01-01,,,Blood Pressure,mmHg,120/80\n');
+  eq(bio.length, 2);
+  eq(bio[0].weightKg, 79.83);
+});
+  });
+
+  // ---------------------------------------------------------------------------------------------------------
+  // Packaging: the generated classic script (tools/gen_tdee.py) is the vendor module with only the column-0
+  // `export ` prefixes removed, exposes every exported name on a frozen CMA.tdee, and stays fast enough to
+  // recompute from scratch on every data change (ADAPTIVE_TDEE_SPEC.md: "a year of data is ~365 tiny steps").
+  // ---------------------------------------------------------------------------------------------------------
+  const CONTRACT = ['RESPONSIVENESS', 'DEFAULT_CONFIG', 'addDays', 'daysBetween', 'normaliseDays', 'runExpenditureModel',
+    'DEFAULT_CHECKIN', 'weeklyCheckIn', 'activityAwareDailyTarget', 'parseCsv', 'parseDailyNutritionCsv',
+    'parseBiometricsCsv', 'UPSTREAM_SHA256'];
+  const BEGIN = '/*<upstream>*/\n', END = '/*</upstream>*/';
+  function get(url) {   // '' when file access is blocked (a plain browser without --allow-file-access-from-files)
+    return new Promise((resolve) => {
+      try {
+        const x = new XMLHttpRequest();
+        x.open('GET', url);
+        x.addEventListener('loadend', () => resolve(x.responseText || ''));
+        x.send();
+      } catch (e) { resolve(''); }
+    });
+  }
+  const lf = (s) => s.replace(/\r\n/g, '\n');
+  function between(text) {
+    const a = text.indexOf(BEGIN), b = text.indexOf(END);
+    ok(a >= 0 && b > a, 'upstream markers present');
+    ok(text.indexOf(BEGIN, a + 1) < 0 && text.indexOf(END, b + 1) < 0, 'each marker appears once');
+    return text.slice(a + BEGIN.length, b);
+  }
+  const exportedNames = (src) => [...src.matchAll(/^export (?:const|let|var|function\*?|class) ([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
+  async function sha256Hex(text) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  describe('adaptive-tdee packaging (tools/gen_tdee.py)', () => {
+    T.it('CMA.tdee is frozen and exposes exactly the contract names', () => {
+      ok(Object.isFrozen(CMA.tdee), 'CMA.tdee is frozen');
+      deepEq(Object.keys(CMA.tdee).slice().sort(), CONTRACT.slice().sort());
+      for (const n of CONTRACT) ok(CMA.tdee[n] !== undefined, n + ' is defined');
+      for (const n of ['addDays', 'daysBetween', 'normaliseDays', 'runExpenditureModel', 'weeklyCheckIn', 'activityAwareDailyTarget',
+        'parseCsv', 'parseDailyNutritionCsv', 'parseBiometricsCsv']) eq(typeof CMA.tdee[n], 'function', n);
+      ok(/^[0-9a-f]{64}$/.test(CMA.tdee.UPSTREAM_SHA256), 'UPSTREAM_SHA256 is a hex digest');
+      ok(Object.isFrozen(CMA.tdee.DEFAULT_CONFIG) && Object.isFrozen(CMA.tdee.DEFAULT_CHECKIN) && Object.isFrozen(CMA.tdee.RESPONSIVENESS),
+        'upstream constants stay frozen');
+      let threw = false;
+      try { (function () { 'use strict'; CMA.tdee.runExpenditureModel = null; })(); } catch (e) { threw = true; }
+      ok(threw && typeof CMA.tdee.runExpenditureModel === 'function', 'assignment to CMA.tdee is refused');
+      eq(typeof CMA.tdeeSim.makePerson, 'function');
+      ok(Object.isFrozen(CMA.tdeeSim), 'CMA.tdeeSim is frozen');
+    });
+
+    T.it('the engine leaks no globals besides window.CMA.tdee', () => {
+      for (const n of CONTRACT.concat(['toUtc', 'toIso', 'DAY_MS', 'mat', 'mul', 'tr', 'round', 'roundOrNull', 'LB_TO_KG', 'KJ_TO_KCAL', 'rng', 'gauss'])) {
+        ok(!Object.prototype.hasOwnProperty.call(window, n), n + ' is not a global');
+      }
+    });
+
+    T.it('the text between the markers is the vendor module with only ^export stripped (+ SHA-256)', async () => {
+      const [vendor, gen] = await Promise.all([get('../vendor/adaptive-tdee/adaptive-tdee.js'), get('../src/tdee/adaptive-tdee.js')]);
+      if (!vendor || !gen) { ok(true, 'SKIPPED: file access blocked (run with --allow-file-access-from-files, as tests/run.sh does)'); return; }
+      const up = lf(vendor).replace(/^﻿/, '');
+      eq(between(lf(gen)), up.replace(/^export /gm, ''), 'wrapped text equals upstream minus the column-0 export prefixes');
+      deepEq(exportedNames(up).concat(['UPSTREAM_SHA256']).sort(), Object.keys(CMA.tdee).slice().sort(), 'every upstream export is on CMA.tdee');
+      ok(gen.indexOf('UPSTREAM_SHA256: \'' + CMA.tdee.UPSTREAM_SHA256 + '\'') > 0 && gen.indexOf('SHA-256: ' + CMA.tdee.UPSTREAM_SHA256) > 0,
+        'header and API carry the same digest');
+      if (!(window.crypto && crypto.subtle)) { ok(true, 'SKIPPED digest: crypto.subtle unavailable on this origin'); return; }
+      eq(await sha256Hex(up), CMA.tdee.UPSTREAM_SHA256, 'UPSTREAM_SHA256 = sha256(vendor file, LF) - regenerate with python tools/gen_tdee.py');
+    });
+
+    T.it('the generated script is a classic script the manifest checker accepts (tools/check_manifest.py rules)', async () => {
+      const gen = await get('../src/tdee/adaptive-tdee.js');
+      if (!gen) { ok(true, 'SKIPPED: file access blocked'); return; }
+      const head = gen.slice(0, 4000);
+      ok(head.indexOf('window.CMA = window.CMA || {};') >= 0, 'namespace guard within the first 4000 chars');
+      ok(!/\bimport\s+[\w{*]|\bexport\s+(default|const|function|class)\b|\brequire\(/.test(head), 'no module syntax in the head');
+      ok(!/^\s*(import|export)\b/m.test(gen), 'no import/export statement anywhere');
+      ok(/generated - do not edit; regenerate with python tools\/gen_tdee\.py/.test(gen.slice(0, 300)), 'do-not-edit header');
+      // Unicode noncharacters / surrogates make Chrome refuse the content script (SPEC 0)
+      let bad = null;
+      for (const ch of gen) {
+        const cp = ch.codePointAt(0);
+        if ((cp >= 0xD800 && cp <= 0xDFFF) || (cp >= 0xFDD0 && cp <= 0xFDEF) || (cp & 0xFFFE) === 0xFFFE) { bad = cp; break; }
+      }
+      eq(bad, null, 'no noncharacter / surrogate');
+    });
+
+    T.it('tests/tdee-sim.js is simulate.mjs with its import bound from CMA.tdee and ^export stripped', async () => {
+      const [vendor, gen] = await Promise.all([get('../vendor/adaptive-tdee/simulate.mjs'), get('tdee-sim.js')]);
+      if (!vendor || !gen) { ok(true, 'SKIPPED: file access blocked'); return; }
+      const up = lf(vendor).replace(/^﻿/, '');
+      const expected = up.replace(/^import \{[^}]*\} from '\.\/adaptive-tdee\.js';\n/m, '').replace(/^export /gm, '');
+      eq(between(lf(gen)), expected);
+      ok(/^const addDays = window\.CMA\.tdee\.addDays;$/m.test(gen), 'addDays bound from CMA.tdee');
+      deepEq(exportedNames(up).sort(), Object.keys(CMA.tdeeSim).slice().sort(), 'every simulate.mjs export is on CMA.tdeeSim');
+    });
+
+    T.it('every upstream node test is ported (names compared with adaptive-tdee.test.mjs)', async () => {
+      const src = await get('../vendor/adaptive-tdee/adaptive-tdee.test.mjs');
+      if (!src) { ok(true, 'SKIPPED: file access blocked'); return; }
+      const names = [...lf(src).matchAll(/^test\('((?:[^'\\]|\\.)*)'/gm)].map((m) => m[1].replace(/\\(.)/g, '$1'));
+      eq(names.length, 17, 'upstream has 17 tests');
+      deepEq(ported, names, 'same names, same order');
+    });
+
+    T.it('reproduces the published benchmark: ADAPTIVE_TDEE_SPEC.md section 7, "Engine (default)" column', () => {
+      // The Kalman rows of vendor/adaptive-tdee/evaluate.mjs (full port with the other estimators and the table:
+      // tests/mock-tdee-evaluate.html): MAE vs true expenditure from day 28 on, 10 seeds per scenario, prior = mean
+      // of the first 7 burned values. Integer-rounded, so any change to the engine maths or the simulator shows.
+      const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+      const SCEN = {
+        A_fullStory: {},
+        B_priorHigh: { cronoBias: 500, vacation: null },
+        C_steady: { plan: () => 2700, activityStep: null, vacation: null, glycogenKg: 0 },
+        D_halfFoodMissing: { missIntake: 0.5, vacation: null },
+        E_weigh2xWeek: { missWeight: 5 / 7, vacation: null },
+        F_bulk: { plan: (t) => (t < 28 ? 2700 : 3000), cronoBias: -300, activityStep: null, vacation: null, glycogenKg: -0.9 },
+      };
+      const got = {};
+      let wk = [];
+      for (const [name, params] of Object.entries(SCEN)) {
+        const maes = [];
+        for (let seed = 1; seed <= 10; seed++) {
+          const { recs, truth } = makePerson({ seed, ...params });
+          const prior = Math.round(mean(recs.slice(0, 7).map((r) => r.burnedKcal)));
+          const res = runExpenditureModel(recs, { initialExpenditureKcal: prior });
+          const map = new Map(res.days.map((d) => [d.date, d.expenditureKcal]));
+          const E = recs.map((r) => map.get(r.date) ?? null);
+          const errs = [];
+          E.forEach((e, i) => { if (i >= 28 && e != null) errs.push(Math.abs(e - truth[i].tdee)); });
+          maes.push(mean(errs));
+          if (name === 'C_steady') for (let i = 35; i < E.length; i++) if (E[i] != null && E[i - 7] != null) wk.push(Math.abs(E[i] - E[i - 7]));
+        }
+        got[name] = Math.round(mean(maes));
+      }
+      wk = wk.sort((x, y) => x - y);
+      got.C_p95wk = Math.round(wk[Math.floor(0.95 * (wk.length - 1))]);
+      got.avgMAE = Math.round(mean(Object.keys(SCEN).map((k) => got[k])));
+      deepEq(got, { A_fullStory: 137, B_priorHigh: 116, C_steady: 48, D_halfFoodMissing: 143, E_weigh2xWeek: 139, F_bulk: 59, C_p95wk: 93, avgMAE: 107 });
+    });
+
+    T.it('runExpenditureModel over 365 synthetic days takes < 50 ms', () => {
+      const { recs } = makePerson({ seed: 7, days: 365 });
+      runExpenditureModel(recs);                 // warm-up (JIT)
+      const runs = 5;
+      const t0 = performance.now();
+      let r = null;
+      for (let k = 0; k < runs; k++) r = runExpenditureModel(recs);
+      const ms = (performance.now() - t0) / runs;
+      eq(r.days.length, 365, 'one output row per day');
+      ok(r.current && Number.isFinite(r.current.expenditureKcal), 'a current estimate');
+      // performance.now() keeps advancing for synchronous work under run.sh's --virtual-time-budget (only timers
+      // are fast-forwarded; measured 2026-09-28: ~0.8 ms per run, a 30 ms busy loop reads ~30 ms - the next test
+      // re-checks the clock). Should a future Chrome freeze it, ms reads 0 and this bound passes vacuously while
+      // the row-count / estimate checks above still run.
+      ok(ms < 50, 'mean ' + ms.toFixed(2) + ' ms per run');
+    });
+
+    T.it('performance.now() advances during synchronous work (so the timing bound above is meaningful)', () => {
+      const t0 = performance.now();
+      let x = 0;
+      const until = Date.now() + 30;
+      while (Date.now() < until && x < 5e8) x++;
+      const dt = performance.now() - t0;
+      // under a frozen clock Date.now() would not advance either and the loop would stop on the counter
+      if (dt === 0) { ok(true, 'SKIPPED: the page clock is frozen; the 50 ms bound is only a sanity check here'); return; }
+      ok(dt > 0, 'clock advanced ' + dt.toFixed(1) + ' ms');
+    });
+  });
+
+  CMA.test.run({ timeoutMs: 60000 });
+})();
+</script></body></html>

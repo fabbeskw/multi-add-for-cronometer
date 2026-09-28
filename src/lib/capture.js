@@ -96,7 +96,15 @@ window.CMA = window.CMA || {};
     getUserFasts: 1, getUserFastsForRange: 1, getFastingStats: 1, getRepeatedItems: 1, addRepeatItem: 1,
     deleteRepeatItem: 1, setDayComplete: 1, addBiometric: 2, removeMeasurement: 2, reauthenticate: 1,
     generateAuthorizationToken: 1, areThereRepeatItemsToBeLoggedForDay: 1,
+    // Adaptive TDEE (research/tdee-critic.md 2-4): getCaloriesConsumedAndBurned(String, I, Day, Day),
+    // getCalendarInfo(String, I, Day, Day), getBiometrics(String, I, I metricId, I unitId, ...) - the metric id
+    // is an int too, so the stub index matters - and setUserPreference(String, I, String key, String value).
+    getCaloriesConsumedAndBurned: 1, getCalendarInfo: 1, getBiometrics: 1, setUserPreference: 1,
   };
+  // setUserPreference(String nonce, int userId, String key, String value) -> void (stub `n1p`): the 'rpc' event
+  // carries {key, value} as ev.pref so src/tdee/tdee-data.js can follow TEF / unit / profile changes. The key is
+  // logged, the value never is (weightInKG / heightInCM values are body data).
+  const PREF_KEY_PARAM = 2, PREF_VALUE_PARAM = 3;
   // Methods whose leading int is definitely NOT the userId.
   const NOT_USER_ID = { getFood: true, getAllFood: true, getDiaryEntries: true, authenticate: true };
   // Confidence ranking of userId sources: a lower-ranked source never overrides a higher-ranked value.
@@ -370,6 +378,17 @@ window.CMA = window.CMA || {};
     }
     return null;
   }
+  /** {key, value} of a parsed setUserPreference request (params 2 and 3, plain strings), else null. value is the
+   *  string sent, null for a null string, undefined when the request could not be decoded that far. */
+  function prefParamOf(parsed) {
+    if (!parsed || !Array.isArray(parsed.params) || !Array.isArray(parsed.paramSigs)) return null;
+    if (parsed.paramSigs[PREF_KEY_PARAM] !== STRING_SIG || parsed.paramSigs[PREF_VALUE_PARAM] !== STRING_SIG) return null;
+    const key = parsed.params[PREF_KEY_PARAM];
+    if (typeof key !== 'string' || !key) return null;
+    const value = parsed.params.length > PREF_VALUE_PARAM ? parsed.params[PREF_VALUE_PARAM] : undefined;
+    if (value !== undefined && value !== null && typeof value !== 'string') return null;
+    return { key: key, value: value };
+  }
   function dayParamOf(parsed) {
     const g = gwt();
     if (!g) return null;
@@ -547,6 +566,7 @@ window.CMA = window.CMA || {};
         }
       }
     }
+    const pref = method === 'setUserPreference' ? prefParamOf(parsed) : null;
     const ok = text !== null && text.indexOf('//OK') === 0;
     const ex = text !== null && text.indexOf('//EX') === 0;
     let exType = null;
@@ -586,8 +606,9 @@ window.CMA = window.CMA || {};
       if (state.throttleVersion !== null && state.throttleVersion !== tv) state.throttleVersionChangedAt = t;
       state.throttleVersion = tv;
     }
-    log('rpc', { service: service, method: method, status: status, ok: ok, ex: exType, date: date, throttle: tv, rejected: rejected || undefined });
+    log('rpc', { service: service, method: method, status: status, ok: ok, ex: exType, date: date, throttle: tv, rejected: rejected || undefined, prefKey: pref ? pref.key : undefined });
     const ev = { type: 'rpc', service: service, method: method, status: status, ok: ok, ex: exType, date: date, t: t, parsed: parsed, rejected: rejected, rejectMessage: rejectMessage };
+    if (pref) ev.pref = pref;
     try { CMA.events.emit('rpc', ev); } catch (e) { /* ignore */ }
   }
   function handleRest(d, t) {

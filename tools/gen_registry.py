@@ -797,6 +797,17 @@ EXPECTED_LAYOUTS = collections.OrderedDict([   # SPEC 3.3; the tests assert thes
     ('com.cronometer.shared.foods.FoodSource/4236433762', 'enum'),
     ('com.cronometer.shared.user.exceptions.NotLoggedInException/844385496', 's'),
 ])
+# SPEC 12.2: the types only the Adaptive TDEE reads decode (registry-builder.js OPTIONAL_LAYOUTS / checkOptional).
+# Reported like the list above; a change there turns the TDEE sync off and never fails the core layouts.
+OPTIONAL_LAYOUTS = collections.OrderedDict([
+    ('com.cronometer.shared.charts.models.DataPoint/3560061380', 'ood'),
+    ('[Lcom.cronometer.shared.charts.models.DataPoint;/1958809962', 'array:o'),
+    ('com.cronometer.shared.entries.models.CalendarInfo/1410710242', 'o'),
+    ('com.cronometer.shared.entries.models.CalendarDayInfo/3738020097', 'zoooozzzzo'),
+    ('com.cronometer.shared.entries.DayQueryType/1802942352', 'enum'),
+    ('[[D/158574334', 'array:o'),
+    ('[D/2047612875', 'array:d'),
+])
 
 
 def layout_str(e):
@@ -954,6 +965,11 @@ def main(argv):
         for sig, expected in EXPECTED_LAYOUTS.items():
             got = layout_str(types.get(sig))
             flag = '' if (expected is None or got == expected) else '   <-- expected ' + expected
+            print('   %-76s %s%s' % (sig, got, flag))
+        print('optional layouts (SPEC 12.2, Adaptive TDEE):')
+        for sig, expected in OPTIONAL_LAYOUTS.items():
+            got = layout_str(types.get(sig))
+            flag = '' if got == expected else '   <-- expected ' + expected + ' (the TDEE sync would be off)'
             print('   %-76s %s%s' % (sig, got, flag))
     print('wrote %s (%d types)' % (out_path, len(types)))
     return 0

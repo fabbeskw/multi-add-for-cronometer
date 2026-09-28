@@ -1,0 +1,1514 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>tdee-data tests</title></head>
+<body>
+<pre id="results"></pre>
+<script src="lib.js"></script>
+<script src="../src/lib/gwt-registry.js"></script>
+<script src="../src/lib/gwt-stream.js"></script>
+<script src="../src/lib/registry-builder.js"></script>
+<script src="../src/lib/rpc.js"></script>
+<script src="../src/lib/capture.js"></script>
+<script src="fixtures.js"></script>
+<script src="../src/tdee/adaptive-tdee.js"></script>
+<script src="../src/tdee/tdee-data.js"></script>
+<script>
+/* Adaptive TDEE data layer (src/tdee/tdee-data.js) and its RPC reads (src/lib/rpc.js), research tdee-recipe-digest.md
+ * DATA-LAYER RECIPE. Part 1 drives the REAL rpc.js against a stubbed fetch (Writer bodies byte-equal to
+ * research/tdee-critic.md 5 / tdee-weight-history.md 10.1, reply decoding through CMA.gwt.encodeResponse); part 2
+ * drives the data layer against a fake CMA.rpc (a scripted synthetic account), a fake CMA.capture, a fake
+ * chrome.storage.local and an injected clock / timer queue. Nothing here contacts cronometer.com. */
+(function () {
+  'use strict';
+  const T = CMA.test, G = CMA.gwt, R = CMA.rpc, D = CMA.tdeeData, EV = CMA.events, TD = CMA.tdee;
+  const eq = T.eq, ok = T.ok, deepEq = T.deepEq, throws = T.throws;
+  const addDays = TD.addDays, daysBetween = TD.daysBetween;
+  const MB = 'https://cronometer.com/cronometer/';
+  const HEAD = MB + '|POLICYHASH|com.cronometer.shared.rpc.CronometerService|';
+  const S42 = { moduleBase: MB, permutation: '0A1C16E148676A90CBB128E4829A562F', policyHash: 'POLICYHASH', nonce: 'NONCE', userId: 42 };
+  const S12345 = Object.assign({}, S42, { userId: 12345 });
+  const STR = 'java.lang.String/2004016611', DAYSIG = 'com.cronometer.shared.entries.models.Day/782579793';
+  // research/tdee-critic.md 5 (offline probe with this extension's own Writer; the energy token pattern equals
+  // EthanDenny's live-derived caloriesBody) and tdee-weight-history.md 10.1
+  const ENERGY_BODY = '7|0|8|' + HEAD + 'getCaloriesConsumedAndBurned|' + STR + '|I|' + DAYSIG + '|NONCE|1|2|3|4|4|5|6|7|7|8|42|7|5|9|2026|7|7|9|2026|';
+  const CALENDAR_BODY = '7|0|8|' + HEAD + 'getCalendarInfo|' + STR + '|I|' + DAYSIG + '|NONCE|1|2|3|4|4|5|6|7|7|8|42|7|1|9|2026|7|29|9|2026|';
+  const FIRSTDAY_BODY = '7|0|7|' + HEAD + 'getFirstDayWithData|' + STR + '|I|NONCE|1|2|3|4|2|5|6|7|42|';
+  const BIO_HEAD = '7|0|10|' + HEAD + 'getBiometrics|' + STR + '|I|' + DAYSIG + '|com.cronometer.shared.entries.models.Time/1552252503|'
+    + 'com.cronometer.shared.entries.DayQueryType/1802942352|NONCE|1|2|3|4|9|5|6|6|6|7|7|8|8|9|10|12345|1|1|';
+  const BIO_ALL_BODY = BIO_HEAD + '0|0|0|0|9|0|';
+  const BIO_RANGE_BODY = BIO_HEAD + '7|1|6|2026|7|28|9|2026|0|0|9|0|';
+  // getPreference(String nonce, String key): stub `G1n(f,zcp,2); Y0n(W0n(u0o)) x2; Y0n(W0n(b)); Y0n(W0n(c))`
+  // (tdee-critic.md 2) under the Writer rules of SPEC 3.1 - no captured template exists for it.
+  const PREF_BODY = '7|0|7|' + HEAD + 'getPreference|' + STR + '|NONCE|use.thermic.effect.food|1|2|3|4|2|5|5|6|7|';
+  const ETHAN_FIXTURE = '//OK[0,0,0,0,0,0,0,0,0,0,1000,2000,12,2,0,0,0,0,0,0,0,0,0,0,900,1743.39,12,2,2,1,["[[D/158574334","[D/2047612875"],0,7]';
+  const WEIGHT_FIXTURE = '//OK[81.1,0,2026,9,28,3,2,81.4,0,32,7,4,2026,9,27,3,2,2,1,["[Lcom.cronometer.shared.charts.models.DataPoint;/1958809962",'
+    + '"com.cronometer.shared.charts.models.DataPoint/3560061380","com.cronometer.shared.entries.models.Day/782579793",'
+    + '"com.cronometer.shared.entries.models.Time/1552252503"],0,7]';
+  const ticks = async (n) => { for (let i = 0; i < (n || 1); i++) await new Promise((r) => setTimeout(r, 0)); };
+  const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+  // ---- synthetic reply builders (the inverse of the decoder) ----
+  function day(iso) { const p = iso.split('-').map(Number); return { $t: G.SIG.DAY, f: [p[2], p[1], p[0]] }; }
+  function time(h, m, s) { return { $t: G.SIG.TIME, f: [h, m, s || 0] }; }
+  function rowsReply(rows) { return G.encodeResponse({ $t: G.SIG.DOUBLE_ARRAY_2D, f: rows.map((r) => ({ $t: G.SIG.DOUBLE_ARRAY, f: r })) }); }
+  function pointsReply(points) {
+    return G.encodeResponse({ $t: G.SIG.DATA_POINT_ARRAY, f: points.map((p) => ({ $t: G.SIG.DATA_POINT, f: [day(p.date), p.time ? time(p.time.h, p.time.m, p.time.s) : null, p.value] })) });
+  }
+  function calendarReply(items) {
+    return G.encodeResponse({ $t: G.SIG.CALENDAR_INFO, f: [items.map((it) => ({ $t: G.SIG.CALENDAR_DAY_INFO,
+      f: [!!it.complete, day(it.date), null, null, null, !!it.loggedBiometric, !!it.loggedExercise, !!it.loggedFood, !!it.loggedNote, null] }))] });
+  }
+  // ---- fetch stub for part 1 ----
+  const realFetch = window.fetch;
+  let lastBody = null, fetchCount = 0;
+  function stubFetch(reply) {
+    window.fetch = async function (url, init) {
+      lastBody = init && init.body; fetchCount++;
+      return new Response(typeof reply === 'function' ? reply(String(url), init) : reply, { status: 200 });
+    };
+  }
+  function restoreFetch() { window.fetch = realFetch; }
+
+  // ================================================================================================
+  T.describe('gwt-stream: lazy SIG getters for the TDEE types', () => {
+    T.it('resolve through the registry by base name', () => {
+      eq(G.SIG.TIME, 'com.cronometer.shared.entries.models.Time/1552252503');
+      eq(G.SIG.DAY_QUERY_TYPE, 'com.cronometer.shared.entries.DayQueryType/1802942352');
+      eq(G.SIG.DATA_POINT, 'com.cronometer.shared.charts.models.DataPoint/3560061380');
+      eq(G.SIG.DATA_POINT_ARRAY, '[Lcom.cronometer.shared.charts.models.DataPoint;/1958809962');
+      eq(G.SIG.CALENDAR_INFO, 'com.cronometer.shared.entries.models.CalendarInfo/1410710242');
+      eq(G.SIG.CALENDAR_DAY_INFO, 'com.cronometer.shared.entries.models.CalendarDayInfo/3738020097');
+      eq(G.SIG.DOUBLE_ARRAY, '[D/2047612875');
+      eq(G.SIG.DOUBLE_ARRAY_2D, '[[D/158574334');
+      ok(Object.keys(G.BASES).indexOf('CALENDAR_DAY_INFO') >= 0);
+    });
+    T.it('registry-builder: the bundled registry carries every optional TDEE layout and method', () => {
+      const v = CMA.registryBuilder.checkOptional(CMA.registry, 'tdee');
+      ok(v.ok, v.problems.join(' | '));
+      ok(v.checked >= 12, 'checked ' + v.checked);
+    });
+  });
+
+  // ================================================================================================
+  T.describe('rpc: TDEE request bodies (byte-equal to research/tdee-critic.md 5)', () => {
+    T.it('getCaloriesConsumedAndBurned: two distinct Day objects, last EXCLUSIVE (EthanDenny caloriesBody)', async () => {
+      stubFetch(ETHAN_FIXTURE);
+      try {
+        const rows = await R.getCaloriesConsumedAndBurned(S42, '2026-09-05', '2026-09-07');
+        eq(lastBody, ENERGY_BODY);
+        ok(/\|42\|7\|5\|9\|2026\|7\|7\|9\|2026\|$/.test(lastBody), "EthanDenny's test regex");
+        eq(rows.length, 2);
+      } finally { restoreFetch(); }
+    });
+    T.it('getCalendarInfo', async () => {
+      stubFetch(calendarReply([]));
+      try {
+        deepEq(await R.getCalendarInfo(S42, '2026-09-01', '2026-09-29'), []);
+        eq(lastBody, CALENDAR_BODY);
+      } finally { restoreFetch(); }
+    });
+    T.it('getFirstDayWithData', async () => {
+      stubFetch(G.encodeResponse(day('2024-01-03')));
+      try {
+        eq(await R.getFirstDayWithData(S42), '2024-01-03');
+        eq(lastBody, FIRSTDAY_BODY);
+      } finally { restoreFetch(); }
+    });
+    T.it('getBiometrics: whole history (null Days / Times, DayQueryType All) and an inclusive range', async () => {
+      stubFetch(WEIGHT_FIXTURE);
+      try {
+        await R.getBiometrics(S12345);
+        eq(lastBody, BIO_ALL_BODY);
+        await R.getBiometrics(S12345, { metricId: 1, unitId: 1, from: '2026-06-01', to: '2026-09-28' });
+        eq(lastBody, BIO_RANGE_BODY);
+        await throws(() => R.getBiometrics(S12345, { metricId: 0 }), /metricId and unitId/);
+        await throws(() => R.getBiometrics(S12345, { from: '2026/06/01' }), /YYYY-MM-DD/);
+      } finally { restoreFetch(); }
+    });
+    T.it('getPreference: String nonce, String key, response read as a string', async () => {
+      stubFetch(G.encodeResponse('true', { kind: 's' }));
+      try {
+        eq(await R.getPreference(S42, 'use.thermic.effect.food'), 'true');
+        eq(lastBody, PREF_BODY);
+        await throws(() => R.getPreference(S42, ''), /key is required/);
+      } finally { restoreFetch(); }
+    });
+    T.it('arguments are validated before anything is sent', async () => {
+      stubFetch(ETHAN_FIXTURE);
+      const n0 = fetchCount;
+      try {
+        await throws(() => R.getCaloriesConsumedAndBurned(S42, '2026-09-07', '2026-09-07'), /exclusive end/);
+        await throws(() => R.getCaloriesConsumedAndBurned(S42, '2026-9-5', '2026-09-07'), /YYYY-MM-DD/);
+        await throws(() => R.getCalendarInfo(S42, '2026-09-10', '2026-09-01'), /must not come before/);
+        await throws(() => R.getFirstDayWithData(Object.assign({}, S42, { userId: null })), /userId/);
+        eq(fetchCount, n0, 'no request for invalid arguments');
+      } finally { restoreFetch(); }
+    });
+  });
+
+  // ================================================================================================
+  T.describe('rpc: TDEE reply decoding', () => {
+    T.it('the EthanDenny double[][] fixture decodes to one ascending row per day', async () => {
+      stubFetch(ETHAN_FIXTURE);
+      try {
+        const rows = await R.getCaloriesConsumedAndBurned(S42, '2026-09-05', '2026-09-07');
+        deepEq(rows, [[1743.39, 900, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [2000, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]);
+      } finally { restoreFetch(); }
+    });
+    T.it('synthetic rows round-trip (negative exercise at [1]); malformed rows are kind decode', async () => {
+      const row = [2143, -300, 0, 1700, 120, 0, 0, 0, 0, 340, 25, -197];
+      stubFetch(rowsReply([row]));
+      try {
+        deepEq(await R.getCaloriesConsumedAndBurned(S42, '2026-09-05', '2026-09-06'), [row]);
+      } finally { restoreFetch(); }
+      stubFetch(rowsReply([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]]));
+      try {
+        const e = await throws(() => R.getCaloriesConsumedAndBurned(S42, '2026-09-05', '2026-09-06'), /not a double\[12\]/);
+        eq(e.kind, 'decode'); eq(e.method, 'getCaloriesConsumedAndBurned');
+      } finally { restoreFetch(); }
+      stubFetch(G.encodeResponse(day('2026-09-05')));
+      try {
+        eq((await throws(() => R.getCaloriesConsumedAndBurned(S42, '2026-09-05', '2026-09-06'), /expected a double\[\]\[\]/)).kind, 'decode');
+      } finally { restoreFetch(); }
+    });
+    T.it('DataPoint[]: the weight-history fixture, Time or null, kg values as sent', async () => {
+      stubFetch(WEIGHT_FIXTURE);
+      try {
+        deepEq(await R.getBiometrics(S12345), [
+          { date: '2026-09-27', time: { h: 7, m: 32, s: 0 }, value: 81.4 },
+          { date: '2026-09-28', time: null, value: 81.1 },
+        ]);
+      } finally { restoreFetch(); }
+      stubFetch(pointsReply([{ date: '2026-01-02', time: { h: 23, m: 59, s: 59 }, value: 180.5 }, { date: '2026-01-03', time: null, value: 0.25 }]));
+      try {
+        deepEq(await R.getBiometrics(S12345, { metricId: 1, unitId: 2 }), [
+          { date: '2026-01-02', time: { h: 23, m: 59, s: 59 }, value: 180.5 }, { date: '2026-01-03', time: null, value: 0.25 }]);
+        ok(/\|12345\|1\|2\|0\|0\|0\|0\|9\|0\|$/.test(lastBody), 'unit id 2 on the wire');
+      } finally { restoreFetch(); }
+      stubFetch(G.encodeResponse(null));
+      try { deepEq(await R.getBiometrics(S12345), [], 'a null array is no weigh-ins'); } finally { restoreFetch(); }
+      stubFetch(G.encodeResponse({ $t: G.SIG.DATA_POINT_ARRAY, f: [day('2026-01-01')] }));
+      try {
+        eq((await throws(() => R.getBiometrics(S12345), /not a DataPoint/)).kind, 'decode');
+      } finally { restoreFetch(); }
+    });
+    T.it('CalendarInfo -> per-day flags; a null reply or list is kind decode (never "nothing logged")', async () => {
+      stubFetch(calendarReply([
+        { date: '2026-09-05', complete: true, loggedFood: true },
+        { date: '2026-09-06', loggedBiometric: true, loggedExercise: true, loggedNote: true },
+      ]));
+      try {
+        deepEq(await R.getCalendarInfo(S42, '2026-09-01', '2026-09-29'), [
+          { date: '2026-09-05', complete: true, loggedFood: true, loggedBiometric: false, loggedExercise: false, loggedNote: false },
+          { date: '2026-09-06', complete: false, loggedFood: false, loggedBiometric: true, loggedExercise: true, loggedNote: true },
+        ]);
+      } finally { restoreFetch(); }
+      stubFetch(G.encodeResponse(null));
+      try { eq((await throws(() => R.getCalendarInfo(S42, '2026-09-01', '2026-09-29'), /expected a CalendarInfo/)).kind, 'decode'); } finally { restoreFetch(); }
+      stubFetch(G.encodeResponse({ $t: G.SIG.CALENDAR_INFO, f: [null] }));
+      try { eq((await throws(() => R.getCalendarInfo(S42, '2026-09-01', '2026-09-29'), /no day list/)).kind, 'decode'); } finally { restoreFetch(); }
+    });
+    T.it('getFirstDayWithData: Day -> ISO, null -> null, another type -> decode', async () => {
+      stubFetch(G.encodeResponse(null));
+      try { eq(await R.getFirstDayWithData(S42), null); } finally { restoreFetch(); }
+      stubFetch(G.encodeResponse(time(7, 0, 0)));
+      try { eq((await throws(() => R.getFirstDayWithData(S42), /expected a Day/)).kind, 'decode'); } finally { restoreFetch(); }
+    });
+    T.it('getPreference: null string -> null; //EX -> kind rpc; NotLoggedInException -> CMA.errors.Session', async () => {
+      stubFetch(G.encodeResponse(null, { kind: 's' }));
+      try { eq(await R.getPreference(S42, 'weightUnit'), null); } finally { restoreFetch(); }
+      stubFetch(G.encodeException('java.lang.RuntimeException', 'no such preference'));
+      try { eq((await throws(() => R.getPreference(S42, 'weightUnit'), /RuntimeException/)).kind, 'rpc'); } finally { restoreFetch(); }
+      stubFetch(CMA.fixtures.notLoggedInResponse);
+      try {
+        const e = await throws(() => R.getCaloriesConsumedAndBurned(S42, '2026-09-05', '2026-09-06'));
+        ok(e instanceof CMA.errors.Session, 'Session error');
+        eq(e.kind, 'session');
+      } finally { restoreFetch(); }
+    });
+    T.it('value helpers: timeValue, isoOfDay, dayFromIso', async () => {
+      deepEq(R.timeValue({ h: 7, m: 5 }), { $t: G.SIG.TIME, f: [7, 5, 0] });
+      eq(R.timeValue(null), null);
+      await throws(() => R.timeValue({ h: 24, m: 0 }), /time must be/);
+      eq(R.isoOfDay(day('2026-03-04')), '2026-03-04');
+      eq(R.isoOfDay({ day: 9, month: 12, year: 2025 }), '2025-12-09');
+      eq(R.isoOfDay({ $t: G.SIG.DAY, f: [0, 1, 2026] }), null);
+      deepEq(R.dayFromIso('2026-02-01'), { day: 1, month: 2, year: 2026 });
+      await throws(() => R.dayFromIso('2026-13-01'), /invalid date/);
+      eq(R.TDEE_FIELDS.ENERGY_ROW.EXERCISE, 1);
+      eq(R.TDEE_FIELDS.CALENDAR_DAY_INFO.LOGGED_FOOD, 7);
+    });
+  });
+
+  // ================================================================================================
+  // part 2: the data layer against a synthetic account
+  // ================================================================================================
+  const realCapture = CMA.capture, realRpc = CMA.rpc, realChrome = window.chrome;
+  const NONCE = 'NONCE-SECRET-1f3a9c';
+  const UID = 1234567, UID_B = 7654321;
+  let clock = 0, TODAY = '2026-09-28', timers = [], server = null;
+  const store = {};
+  const writes = [];
+  const logs = [];
+  const seen = [];   // 'tdee-data' events
+  EV.on('tdee-data', (ev) => { seen.push(ev.type); });
+  const chromeShim = { runtime: {}, storage: { local: {
+    get(keys, cb) { const out = {}; [].concat(keys).forEach((k) => { if (own(store, k)) out[k] = JSON.parse(JSON.stringify(store[k])); }); setTimeout(() => cb(out), 0); },
+    set(obj, cb) { const c = JSON.parse(JSON.stringify(obj)); Object.keys(c).forEach((k) => { store[k] = c[k]; }); writes.push(Object.keys(c)); setTimeout(() => { if (cb) cb(); }, 0); },
+    remove(keys, cb) { [].concat(keys).forEach((k) => { delete store[k]; }); setTimeout(() => { if (cb) cb(); }, 0); },
+  } } };
+  const fakeCap = {
+    state: { userId: UID, registryMismatch: false, diaryDate: { day: 20, month: 9, year: 2026 } },
+    readyOk: true,
+    ready() { return this.readyOk ? { ok: true, missing: [] } : { ok: false, missing: ['nonce', 'policyHash'] }; },
+    session() { return { moduleBase: MB, permutation: 'P', policyHash: 'POLICY', nonce: NONCE, userId: this.state.userId }; },
+    // capture.today(): the browser-LOCAL calendar date (NOT state.diaryDate, the day the diary shows)
+    today() { const p = TODAY.split('-').map(Number); return { day: p[2], month: p[1], year: p[0] }; },
+    log(kind, fields) { logs.push(JSON.stringify(Object.assign({ kind: kind }, fields))); },
+    redact(s) { return typeof s === 'string' ? s.split(NONCE).join('<NONCE>') : s; },
+  };
+  function makeServer() {
+    return { firstDay: '2026-06-01', prefs: { 'use.thermic.effect.food': 'false', 'units.calories': 'true', weightUnit: 'Kilograms' },
+      food: {}, burn: {}, weighIns: [], maxSpan: Infinity, bigRange: 'clamp', refuse: {}, calls: [], hold: null };
+  }
+  function energyRow(d) {
+    const f = server.food[d] || {}, b = server.burn[d] || {};
+    return [f.consumed || 0, -(b.exercise || 0), 0, b.bmr != null ? b.bmr : 1600, b.tef != null ? b.tef : 150, 0, 0, 0, 0,
+      b.act1 != null ? b.act1 : 250, b.act2 != null ? b.act2 : 50, 0];
+  }
+  function rpcEx(name) { const e = new Error(name + ' (from x)'); e.kind = 'rpc'; e.exceptionType = 'com.cronometer.shared.' + name + '/1'; return e; }
+  async function serve(method, session, args, fn) {
+    server.calls.push({ method: method, args: args, nonce: session.nonce, userId: session.userId, at: clock });
+    if (server.hold && server.hold.method === method) { const h = server.hold; server.hold = null; await h.promise; }
+    const refuse = server.refuse[method];
+    if (refuse) { const e = refuse(args); if (e) throw e; }
+    return fn();
+  }
+  const fakeRpc = {
+    throttle: { backoffMs: 5000 },
+    TDEE_FIELDS: realRpc.TDEE_FIELDS,
+    getFirstDayWithData(session) { return serve('getFirstDayWithData', session, [], () => server.firstDay); },
+    getPreference(session, key) { return serve('getPreference', session, [key], () => (own(server.prefs, key) ? server.prefs[key] : null)); },
+    getBiometrics(session, o) {
+      return serve('getBiometrics', session, [o], () => server.weighIns.filter((p) => (!o.from || p.date >= o.from) && (!o.to || p.date <= o.to)).map((p) => JSON.parse(JSON.stringify(p))));
+    },
+    getCaloriesConsumedAndBurned(session, first, lastEx) {
+      return serve('getCaloriesConsumedAndBurned', session, [first, lastEx], () => {
+        let span = daysBetween(first, lastEx);
+        if (span > server.maxSpan) { if (server.bigRange === 'ex') throw rpcEx('ServerException'); span = server.maxSpan; }
+        const rows = [];
+        for (let i = 0, d = first; i < span; i++, d = addDays(d, 1)) rows.push(energyRow(d));
+        return rows;
+      });
+    },
+    getCalendarInfo(session, first, last) {
+      return serve('getCalendarInfo', session, [first, last], () => {
+        const out = [];
+        for (let d = first; d <= last; d = addDays(d, 1)) {
+          const f = server.food[d];
+          if (f && (f.consumed > 0 || f.logged || f.complete)) out.push({ date: d, complete: !!f.complete, loggedFood: f.logged !== undefined ? !!f.logged : f.consumed > 0, loggedBiometric: false, loggedExercise: false, loggedNote: false });
+        }
+        return out;
+      });
+    },
+  };
+  function callsOf(method) { return server.calls.filter((c) => c.method === method); }
+  let timerSeq = 0;
+  function setTimer(fn, ms) { const t = { fn: fn, at: clock + ms, id: ++timerSeq }; timers.push(t); return t; }
+  function clearTimer(t) { timers = timers.filter((x) => x !== t); }
+  async function advance(ms) {
+    const target = clock + ms;
+    for (;;) {
+      const due = timers.filter((t) => t.at <= target).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      timers = timers.filter((t) => t !== due);
+      clock = Math.max(clock, due.at);
+      due.fn();
+      await ticks(1);
+    }
+    clock = Math.max(clock, target);
+  }
+  function fakeSleep(ms) { clock += ms; return Promise.resolve(); }
+  async function waitIdle() {
+    for (let i = 0; i < 2000; i++) {
+      await ticks(1);
+      if (!D._test.run.running && !D._test.run.pendingPromise) { await ticks(3); return; }
+    }
+    throw new Error('the data layer did not settle');
+  }
+  async function freshStart(o) {
+    o = o || {};
+    D._test.reset();
+    Object.keys(store).forEach((k) => { delete store[k]; });
+    writes.length = 0; logs.length = 0; seen.length = 0; timers = [];
+    CMA.capture = fakeCap; CMA.rpc = fakeRpc; window.chrome = chromeShim;
+    fakeCap.state.userId = UID; fakeCap.readyOk = true; fakeCap.state.registryMismatch = false;
+    fakeCap.state.diaryDate = { day: 20, month: 9, year: 2026 };
+    TODAY = o.today || '2026-09-28';
+    clock = Date.UTC(2026, 8, 28, 10, 0, 0);
+    server = makeServer();
+    // no `today` injected: the data layer's default reads CMA.capture.today() (the local calendar date)
+    D._test.configure({ now: () => clock, sleep: fakeSleep, setTimer: setTimer, clearTimer: clearTimer, spacingMs: o.spacingMs || 0, debounceMs: 2000 });
+    if (o.init !== false) await D.init();
+  }
+  function seed(from, to, fn) { for (let d = from; d <= to; d = addDays(d, 1)) fn(d); }
+  /** 2026-08-01..today: 2000 kcal a day (complete), nothing on 09-10, today partly logged; weigh-ins every 2nd day
+   *  from 08-15 at 07:00, plus multi-weigh-in days; 400 kcal of exercise on 09-19. */
+  function seedStandard() {
+    seed('2026-08-01', '2026-09-28', (d) => { server.food[d] = { consumed: 2000, complete: true }; });
+    delete server.food['2026-09-10'];
+    server.food['2026-09-28'] = { consumed: 900 };
+    for (let d = '2026-08-15'; d <= '2026-09-28'; d = addDays(d, 2)) server.weighIns.push({ date: d, time: { h: 7, m: 0, s: 0 }, value: 80.37 });
+    server.weighIns.push({ date: '2026-09-21', time: null, value: 79.03 });
+    server.weighIns.push({ date: '2026-09-21', time: { h: 9, m: 30, s: 0 }, value: 81.23 });
+    server.weighIns.push({ date: '2026-09-21', time: { h: 6, m: 45, s: 0 }, value: 80.61 });
+    server.weighIns.push({ date: '2026-09-23', time: null, value: 70.13 });
+    server.weighIns.push({ date: '2026-09-23', time: null, value: 70.97 });
+    server.burn['2026-09-19'] = { exercise: 400 };
+  }
+  function entry(date) { return D.dayList().find((x) => x.date === date); }
+  async function enabledWithStandard(o) {
+    await freshStart(o);
+    seedStandard();
+    await D.enable();
+    await waitIdle();
+  }
+
+  // ================================================================================================
+  T.describe('data layer: consent and gating (no request before enable(), inert while capture is not ready)', () => {
+    T.it('init / status / sync / app writes cause no request before enable()', async () => {
+      await freshStart();
+      seedStandard();
+      const st = D.status();
+      eq(st.enabled, false); eq(st.ready, true); eq(st.blockedCode, 'not-enabled');
+      ok(/turn it on/.test(st.blockedReason));
+      await D.sync(); await D.sync({ full: true, force: true });
+      EV.emit('rpc', { type: 'rpc', method: 'updateDiary', ok: true, parsed: { params: [NONCE, UID, []] } });
+      eq(timers.length, 0, 'an app write schedules nothing before consent');
+      await advance(5000); await waitIdle();
+      eq(server.calls.length, 0, 'no request');
+      eq(Object.keys(store).length, 0, 'nothing stored');
+    });
+    T.it('enable() stores the consent for this account and runs the first full sync', async () => {
+      await enabledWithStandard();
+      const st = D.status();
+      eq(st.enabled, true); eq(st.blockedCode, null); eq(st.phase, 'done'); eq(st.syncing, false);
+      eq(store.cmaTdeeSync.userId, UID); eq(store.cmaTdeeSync.enabled, true);
+      ok(callsOf('getCaloriesConsumedAndBurned').length >= 1);
+      ok(seen.indexOf('data') >= 0 && seen.indexOf('status') >= 0, "'tdee-data' events: " + seen.slice(0, 5).join(','));
+    });
+    T.it('capture not ready, decoder mismatch, a rebuild in flight, missing TDEE layouts: blocked, no request', async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      fakeCap.readyOk = false;
+      let st = await D.sync({ full: true });
+      eq(st.blockedCode, 'capture-not-ready'); ok(/Reload the Cronometer tab/.test(st.blockedReason));
+      fakeCap.readyOk = true; fakeCap.state.registryMismatch = true;
+      eq((await D.sync({ full: true })).blockedCode, 'decoder-mismatch');
+      fakeCap.state.registryMismatch = false;
+      CMA.registryStore = { inFlight() { return Promise.resolve(); } };
+      try { eq((await D.sync({ full: true })).blockedCode, 'decoder-rebuilding'); } finally { delete CMA.registryStore; }
+      const realReg = CMA.registry;
+      const reg = JSON.parse(JSON.stringify(realReg));
+      reg.types['com.cronometer.shared.entries.models.CalendarDayInfo/3738020097'].f.push('z');
+      CMA.registry = reg;
+      try {
+        st = await D.sync({ full: true });
+        eq(st.blockedCode, 'layouts');
+        ok(/TDEE sync unavailable/.test(st.blockedReason) && /CalendarDayInfo/.test(st.blockedReason), st.blockedReason);
+        ok(CMA.registryBuilder.validate(reg).ok, 'the core decoder bar still passes: only the TDEE feature is off');
+        eq(server.calls.length, 0, 'no request while blocked');
+      } finally { CMA.registry = realReg; EV.emit('registry', {}); }
+      await waitIdle();
+      eq(callsOf('getFirstDayWithData').length, 1, 'the full sync asked for while blocked ran once the block cleared');
+      eq(D.status().blockedCode, null);
+    });
+    T.it('a decoder mismatch noticed mid-sync: the reply in flight is dropped, no further call; the job resumes later', async () => {
+      await freshStart();
+      seedStandard();
+      let release;
+      server.hold = { method: 'getBiometrics', promise: new Promise((r) => { release = r; }) };
+      const p = D.enable();
+      await ticks(10);
+      fakeCap.state.registryMismatch = true;          // capture saw a new build's permutation meanwhile
+      release();
+      await p; await waitIdle();
+      deepEq(server.calls.map((c) => c.method), ['getFirstDayWithData', 'getPreference', 'getPreference', 'getPreference', 'getBiometrics']);
+      eq(D.status().counts.weighIns, 0, 'the biometrics reply that completed after the mismatch was not merged');
+      eq(D.status().blockedCode, 'decoder-mismatch'); eq(D.status().phase, 'idle'); eq(D.status().syncing, false);
+      fakeCap.state.registryMismatch = false;
+      EV.emit('registry', {});
+      await waitIdle();
+      eq(callsOf('getFirstDayWithData').length, 2, 'the full sync ran again');
+      eq(D.status().counts.weighIns, 25);
+    });
+    T.it('the gate is checked before every call: a block that appears during the throttle back-off stops the retry', async () => {
+      await freshStart();
+      seedStandard();
+      let n = 0;
+      server.refuse.getFirstDayWithData = () => (n++ === 0 ? new CMA.errors.Throttled('HTTP 429', { status: 429, retryable: true }) : null);
+      D._test.configure({ now: () => clock, setTimer: setTimer, clearTimer: clearTimer, spacingMs: 0, debounceMs: 2000,
+        sleep: (ms) => { clock += ms; if (ms >= 5000) fakeCap.state.registryMismatch = true; return Promise.resolve(); } });
+      try {
+        await D.enable(); await waitIdle();
+        eq(callsOf('getFirstDayWithData').length, 1, 'the retry was not sent');
+        eq(D.status().blockedCode, 'decoder-mismatch');
+      } finally { fakeCap.state.registryMismatch = false; }
+    });
+    T.it('a request blocked by a transient reason runs once capture is ready ("state" event)', async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      clock += 11 * 60 * 1000;
+      fakeCap.readyOk = false;
+      eq((await D.sync()).blockedCode, 'capture-not-ready');
+      eq(server.calls.length, 0);
+      fakeCap.readyOk = true;
+      EV.emit('state', fakeCap.state);
+      await waitIdle();
+      ok(callsOf('getCaloriesConsumedAndBurned').length === 1, 'the delta ran after the block cleared');
+    });
+  });
+
+  // ================================================================================================
+  T.describe('data layer: full sync (recipe 1-6)', () => {
+    T.it('call order, windows (energy last EXCLUSIVE = today+1, calendar 42-day chunks with end+1, biometrics whole history)', async () => {
+      await enabledWithStandard();
+      deepEq(server.calls.map((c) => c.method), ['getFirstDayWithData', 'getPreference', 'getPreference', 'getPreference', 'getBiometrics',
+        'getCaloriesConsumedAndBurned', 'getCalendarInfo', 'getCalendarInfo']);
+      deepEq(callsOf('getPreference').map((c) => c.args[0]), ['use.thermic.effect.food', 'units.calories', 'weightUnit']);
+      deepEq(callsOf('getBiometrics')[0].args[0], { metricId: 1, unitId: 1 }, 'whole history: no Days');
+      // energy start = max(firstDay 2026-06-01, first weigh-in 2026-08-15 - 14 days)
+      deepEq(callsOf('getCaloriesConsumedAndBurned')[0].args, ['2026-08-01', '2026-09-29']);
+      deepEq(callsOf('getCalendarInfo').map((c) => c.args), [['2026-08-01', '2026-09-12'], ['2026-09-12', '2026-09-29']]);
+      ok(server.calls.every((c) => c.userId === UID), 'every call for the captured account');
+      const st = D.status();
+      eq(st.firstDay, '2026-06-01'); eq(st.flagsSource, 'calendar'); eq(st.energyChunk, null, '59 days prove no full 92-day window');
+      deepEq(st.prefs && [st.prefs.tef, st.prefs.unitsCalories, st.prefs.weightUnit], [false, true, 'Kilograms']);
+      deepEq(st.range, { from: '2026-08-01', to: '2026-09-28' });
+      eq(st.counts.days, 59); eq(st.counts.intakeDays, 57, '59 days - nothing logged on 09-10 - today');
+      ok(st.lastFullAt === clock && st.lastDeltaAt === clock);
+    });
+    T.it('records: intake per loggedFood (a 0-row day with nothing logged is null, never 0), today null, kg as sent', async () => {
+      await freshStart();
+      seedStandard();
+      server.food['2026-09-11'] = { consumed: 0, logged: true, complete: true };   // a logged 0-kcal day (fasting)
+      server.food['2026-09-12'] = { consumed: 450, logged: false };                // the calendar says nothing logged
+      await D.enable(); await waitIdle();
+      eq(entry('2026-09-11').intakeKcal, 0, 'a logged 0-kcal day stays 0');
+      eq(entry('2026-09-12').intakeKcal, 450, 'a positive row counts whatever the calendar says (an incomplete calendar reply must not drop intake)');
+      const rec = D.records();
+      eq(rec.length, 59); eq(rec[0].date, '2026-08-01'); eq(rec[58].date, '2026-09-28');
+      deepEq(Object.keys(rec[0]).sort(), ['burnedKcal', 'date', 'excluded', 'intakeKcal', 'weightKg']);
+      eq(entry('2026-09-09').intakeKcal, 2000);
+      eq(entry('2026-09-10').intakeKcal, null, 'nothing logged -> null');
+      eq(entry('2026-09-10').loggedFood, false);
+      eq(entry('2026-09-10').burnedKcal, 1900, 'BMR + activity still counts on an unlogged day');
+      eq(entry('2026-09-28').intakeKcal, null, "today's intake is never counted");
+      eq(entry('2026-09-28').weightKg, 80.37, "today's weigh-in is passed");
+      eq(entry('2026-09-28').burnedKcal, 1900, "dayList keeps today's (partial) burned for the History");
+      eq(rec[58].burnedKcal, null, "records(): today's partial burned never reaches the engine");
+      eq(rec[57].burnedKcal, 1900, "yesterday's is passed");
+      eq(entry('2026-09-14').weightKg, 80.37);
+      eq(entry('2026-09-15').weightKg, null);
+      eq(entry('2026-09-01').complete, true);
+      deepEq(rec.filter((r) => r.excluded).map((r) => r.date), ['2026-09-11', '2026-09-12'], 'the 0-kcal day and the 450-kcal day: the partial-day prompt');
+      eq(entry('2026-09-11').excludedReason, 'partial');
+    });
+    T.it("today's partial burned stays out of the warm-up prior and the 14-day Cronometer average (records() nulls it)", async () => {
+      await freshStart();
+      seedStandard();
+      server.weighIns = [];                                       // a new user: the first weigh-in 3 days ago
+      seed('2026-09-25', '2026-09-28', (d) => { server.weighIns.push({ date: d, time: null, value: 80 }); });
+      server.burn['2026-09-28'] = { bmr: 1600, act1: 60, act2: 0 };   // today so far: no activity yet (complete days: 1900)
+      await D.enable(); await waitIdle();
+      eq(entry('2026-09-28').burnedKcal, 1660, 'the partial figure is shown in the History');
+      const cur = TD.runExpenditureModel(D.records()).current;
+      eq(cur.status, 'warmup');
+      eq(cur.priorSource, 'cronometer');
+      eq(cur.priorKcal, 1900, 'the prior averages complete days only (with today it would be 1840)');
+      eq(cur.expenditureKcal, 1900);
+      eq(cur.cronometerBurned14Kcal, 1900, 'the 14-day average leaves today out');
+      eq(cur.cronometerCalibrationRatio, 1);
+    });
+    T.it('the engine runs on the records (smoke: status, trend weight, Cronometer comparison)', async () => {
+      await enabledWithStandard();
+      const out = TD.runExpenditureModel(D.records());
+      ok(out.current, 'model output: ' + (out.error || ''));
+      eq(out.current.date, '2026-09-28', 'the model runs through today');
+      eq(out.current.priorSource, 'cronometer');
+      ok(Number.isFinite(out.current.expenditureKcal));
+    });
+    T.it('first weigh-in of a day = smallest Time; untimed after timed, then wire order', async () => {
+      await enabledWithStandard();
+      eq(entry('2026-09-21').weightKg, 80.61, '06:45 beats 09:30 and an untimed point');
+      eq(entry('2026-09-23').weightKg, 70.13, 'two untimed points: the first in wire order');
+      const m = D.firstWeighIns([
+        { date: '2026-01-01', time: null, value: 70 }, { date: '2026-01-01', time: { h: 0, m: 0, s: 0 }, value: 71 },
+        { date: '2026-01-02', time: { h: 8, m: 0, s: 1 }, value: 72 }, { date: '2026-01-02', time: { h: 8, m: 0, s: 0 }, value: 73 },
+        { date: '2026-01-03', time: null, value: 0 }, { date: 'x', time: null, value: 70 },
+      ]);
+      deepEq(Array.from(m.entries()), [['2026-01-01', 71], ['2026-01-02', 73]], 'midnight is a time; 0 kg and bad dates are dropped');
+    });
+    T.it('burned = BMR + activity (9 + 10) + |exercise (1, negative on the wire)| (+ TEF (4) only with the pref); never row[1] alone', async () => {
+      const row = [2000, -400, 999, 1600, 150, 999, 999, 999, 999, 250, 50, -300];
+      eq(D.burnedFromRow(row, false), 2300);
+      eq(D.burnedFromRow(row, true), 2450);
+      eq(D.burnedFromRow(Object.assign(row.slice(), { 1: 400 }), false), 2300, 'the sign of [1] does not matter');
+      eq(D.burnedFromRow([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], true), null, 'a zero row is null, never 0');
+      await enabledWithStandard();
+      eq(entry('2026-09-19').burnedKcal, 2300);
+      deepEq(entry('2026-09-19').burnedParts, { bmr: 1600, activity: 300, exercise: 400, tef: 150 });
+      server.prefs['use.thermic.effect.food'] = 'true';
+      await D.sync({ full: true });
+      eq(entry('2026-09-19').burnedKcal, 2450, 'TEF added when use.thermic.effect.food is true');
+      eq(entry('2026-09-18').burnedKcal, 2050);
+    });
+    T.it('a captured setUserPreference follows TEF without a request; a profile key (bmr) resyncs the energy span', async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      EV.emit('rpc', { type: 'rpc', method: 'setUserPreference', ok: true, pref: { key: 'use.thermic.effect.food', value: 'true' } });
+      eq(entry('2026-09-18').burnedKcal, 2050);
+      eq(D.status().prefs.tef, true);
+      EV.emit('rpc', { type: 'rpc', method: 'setUserPreference', ok: true, pref: { key: 'weightUnit', value: 'Stone' } });
+      eq(D.status().prefs.weightUnit, 'Stone');
+      EV.emit('rpc', { type: 'rpc', method: 'setUserPreference', ok: false, pref: { key: 'use.thermic.effect.food', value: 'false' } });
+      eq(D.status().prefs.tef, true, 'a failed write changes nothing');
+      await advance(3000); await waitIdle();
+      eq(server.calls.length, 0, 'no request for TEF / unit changes');
+      server.burn['2026-09-18'] = { bmr: 1700 };
+      EV.emit('rpc', { type: 'rpc', method: 'setUserPreference', ok: true, pref: { key: 'bmr', value: '1700' } });
+      await advance(2000); await waitIdle();
+      deepEq(server.calls.map((c) => c.method), ['getCaloriesConsumedAndBurned'], 'energy only');
+      deepEq(callsOf('getCaloriesConsumedAndBurned')[0].args, ['2026-08-01', '2026-09-29'], 'the whole energy span');
+      eq(entry('2026-09-18').burnedKcal, 2150);
+    });
+    T.it('getFirstDayWithData null -> 18 months back (then the first weigh-in bounds the energy start); 5-year clamp', async () => {
+      await freshStart();
+      seedStandard();
+      server.firstDay = null;
+      await D.enable(); await waitIdle();
+      eq(D.status().firstDay, addDays('2026-09-28', -548));
+      deepEq(callsOf('getCaloriesConsumedAndBurned')[0].args, ['2026-08-01', '2026-09-29']);
+      await freshStart();
+      seedStandard();
+      server.firstDay = '2015-01-01';
+      server.weighIns = [{ date: '2016-05-05', time: null, value: 90 }, { date: '2026-09-01', time: null, value: 80 }];
+      server.maxSpan = 92;
+      await D.enable(); await waitIdle();
+      eq(D.status().firstDay, addDays('2026-09-28', -1826), 'clamped to 5 years');
+      eq(entry('2016-05-05'), undefined, 'a weigh-in older than 5 years is not kept');
+      eq(callsOf('getCaloriesConsumedAndBurned')[0].args[0], '2026-08-18', 'energy from the first kept weigh-in - 14 days');
+    });
+    T.it('no weigh-in at all: 28 days of energy history only', async () => {
+      await freshStart();
+      seedStandard();
+      server.weighIns = [];
+      await D.enable(); await waitIdle();
+      deepEq(callsOf('getCaloriesConsumedAndBurned')[0].args, ['2026-09-01', '2026-09-29']);
+      eq(TD.runExpenditureModel(D.records()).error, 'NO_WEIGHT_DATA');
+    });
+  });
+
+  // ================================================================================================
+  T.describe('data layer: energy chunking (92 -> halve to 28 on a row-count mismatch or //EX)', () => {
+    async function longAccount(o) {
+      await freshStart(o);
+      server.firstDay = '2026-03-01';
+      seed('2026-04-01', '2026-09-28', (d) => { server.food[d] = { consumed: 2100, complete: true }; });
+      for (let d = '2026-05-01'; d <= '2026-09-28'; d = addDays(d, 3)) server.weighIns.push({ date: d, time: null, value: 88.8 });
+    }
+    function covered() {
+      const days = new Set();
+      callsOf('getCaloriesConsumedAndBurned').forEach((c) => { /* recorded for inspection */ void c; });
+      D.dayList().forEach((x) => { if (x.burnedParts) days.add(x.date); });
+      return days;
+    }
+    T.it('a server that clamps to 56 rows: 92 mismatches, 46 is kept (energyChunk) and every day arrives once', async () => {
+      await longAccount();
+      server.maxSpan = 56;
+      await D.enable(); await waitIdle();
+      const spans = callsOf('getCaloriesConsumedAndBurned').map((c) => daysBetween(c.args[0], c.args[1]));
+      deepEq(spans, [92, 46, 46, 46, 27], 'start 2026-04-17 .. 2026-09-28 = 165 days');
+      eq(callsOf('getCaloriesConsumedAndBurned')[0].args[0], '2026-04-17');
+      eq(callsOf('getCaloriesConsumedAndBurned')[1].args[0], '2026-04-17', 'the same start is retried with half the window');
+      eq(D.status().energyChunk, 46);
+      eq(covered().size, 165);
+      eq(D.status().lastError, null);
+      // the next full sync starts with the proven window
+      server.calls.length = 0;
+      await D.sync({ full: true });
+      deepEq(callsOf('getCaloriesConsumedAndBurned').map((c) => daysBetween(c.args[0], c.args[1])), [46, 46, 46, 27]);
+    });
+    T.it('//EX for long ranges halves the same way', async () => {
+      await longAccount();
+      server.maxSpan = 60; server.bigRange = 'ex';
+      await D.enable(); await waitIdle();
+      deepEq(callsOf('getCaloriesConsumedAndBurned').map((c) => daysBetween(c.args[0], c.args[1])), [92, 46, 46, 46, 27]);
+      eq(covered().size, 165);
+    });
+    T.it('refused below 28 days: marked unavailable; three refusals in a row end the phase; the calendar still runs', async () => {
+      await longAccount();
+      server.maxSpan = 10; server.bigRange = 'ex';
+      await D.enable(); await waitIdle();
+      deepEq(callsOf('getCaloriesConsumedAndBurned').map((c) => daysBetween(c.args[0], c.args[1])), [92, 46, 28, 28, 28]);
+      const dg = D.diagnostics();
+      deepEq(dg.energyUnavailable, ['2026-04-17..2026-05-14', '2026-05-15..2026-06-11', '2026-06-12..2026-07-09', '2026-07-10..2026-09-28']);
+      ok(/energy rows unavailable/.test(D.status().notes), 'a note of the successful sync: ' + D.status().notes);
+      eq(D.status().lastError, null, 'not a failure');
+      ok(callsOf('getCalendarInfo').length > 0);
+      eq(covered().size, 0);
+    });
+    T.it('a refused window that is already short is not sent again: one request, then unavailable', async () => {
+      await longAccount();
+      await D.enable(); await waitIdle();
+      server.calls.length = 0;
+      server.refuse.getCaloriesConsumedAndBurned = () => rpcEx('ServerException');
+      clock += 11 * 60 * 1000;
+      await D.sync();                                             // the 15-day delta
+      deepEq(callsOf('getCaloriesConsumedAndBurned').map((c) => c.args), [['2026-09-14', '2026-09-29']], 'the same window is never resent');
+      ok(/energy rows unavailable 2026-09-14\.\.2026-09-28/.test(D.status().notes), D.status().notes);
+      server.refuse.getCaloriesConsumedAndBurned = null;
+      server.calls.length = 0;
+      server.maxSpan = 20;                                        // a 41-day window clamped to 20 rows
+      EV.emit('rpc', { type: 'rpc', method: 'setDayComplete', ok: true, parsed: { params: [NONCE, day('2026-08-20'), true, UID] } });
+      await advance(2000); await waitIdle();
+      deepEq(callsOf('getCaloriesConsumedAndBurned').map((c) => daysBetween(c.args[0], c.args[1])), [41, 28, 13], 'the 41-day window is halved to 28 (not resent), then marked unavailable');
+    });
+    T.it('a transient HTTP error is retried smaller but never shrinks the saved window size', async () => {
+      await longAccount();
+      let n = 0;
+      server.refuse.getCaloriesConsumedAndBurned = () => { if (n++ === 0) { const e = new Error('HTTP 500'); e.kind = 'http'; e.status = 500; return e; } return null; };
+      await D.enable(); await waitIdle();
+      deepEq(callsOf('getCaloriesConsumedAndBurned').map((c) => daysBetween(c.args[0], c.args[1])), [92, 46, 46, 46, 27]);
+      eq(D.status().energyChunk, null, 'nothing proven about the server limit');
+      server.calls.length = 0;
+      await D.sync({ full: true });
+      deepEq(callsOf('getCaloriesConsumedAndBurned').map((c) => daysBetween(c.args[0], c.args[1])), [92, 73], 'the next full sync tries 92 again');
+      eq(D.status().energyChunk, 92);
+    });
+    T.it('a decode error is not retried with smaller windows', async () => {
+      await longAccount();
+      let n = 0;
+      server.refuse.getCaloriesConsumedAndBurned = () => { n++; const e = new Error('cannot decode'); e.kind = 'decode'; return e; };
+      await D.enable(); await waitIdle();
+      deepEq(callsOf('getCaloriesConsumedAndBurned').map((c) => daysBetween(c.args[0], c.args[1])), [92, 73], 'two chunks, no halving');
+      eq(n, 2);
+      deepEq(D.diagnostics().energyUnavailable, ['2026-04-17..2026-07-17', '2026-07-18..2026-09-28']);
+    });
+  });
+
+  // ================================================================================================
+  T.describe('data layer: window-replace merge, delta, dirty tracking, freshness', () => {
+    T.it('a delta window replaces every day inside it (deletions propagate); days outside are untouched', async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      server.food['2026-09-25'] = { consumed: 2500, complete: true };
+      delete server.food['2026-09-26'];                                        // entries deleted on another device
+      server.weighIns = server.weighIns.filter((p) => p.date !== '2026-09-24');  // weigh-in deleted
+      server.food['2026-09-01'] = { consumed: 3000, complete: true };          // outside the 14-day window
+      clock += 11 * 60 * 1000;
+      await D.sync();
+      deepEq(server.calls.map((c) => c.method), ['getBiometrics', 'getCaloriesConsumedAndBurned', 'getCalendarInfo']);
+      deepEq(callsOf('getBiometrics')[0].args[0], { metricId: 1, unitId: 1, from: '2026-09-14', to: '2026-09-28' }, 'biometrics end INCLUSIVE');
+      deepEq(callsOf('getCaloriesConsumedAndBurned')[0].args, ['2026-09-14', '2026-09-29'], 'energy end EXCLUSIVE');
+      deepEq(callsOf('getCalendarInfo')[0].args, ['2026-09-14', '2026-09-29']);
+      eq(entry('2026-09-25').intakeKcal, 2500);
+      eq(entry('2026-09-26').intakeKcal, null, 'deleted food -> nothing logged');
+      eq(entry('2026-09-24').weightKg, null, 'deleted weigh-in -> null');
+      eq(entry('2026-09-22').weightKg, 80.37);
+      eq(entry('2026-09-01').intakeKcal, 2000, 'outside the window: untouched');
+      eq(D.status().lastDeltaAt, clock);
+    });
+    T.it('delta at most every 10 minutes (force overrides); a full sync instead when the last one is older than 7 days', async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      clock += 60 * 1000;
+      await D.sync();
+      eq(server.calls.length, 0, 'within 10 minutes of the full sync');
+      await D.sync({ force: true });
+      eq(server.calls.length, 3, 'forced delta');
+      clock += 5 * 60 * 1000;
+      await D.sync();
+      eq(server.calls.length, 3, 'within 10 minutes of the delta');
+      clock += 6 * 60 * 1000;
+      await D.sync();
+      eq(server.calls.length, 6, 'a new delta after 10 minutes');
+      clock += 8 * 24 * 3600 * 1000;
+      server.calls.length = 0;
+      await D.sync();
+      eq(server.calls[0].method, 'getFirstDayWithData', 'a full sync after 7 days');
+    });
+    T.it('single flight: a delta asked for while a full sync runs is served by it', async () => {
+      await freshStart();
+      seedStandard();
+      let release;
+      server.hold = { method: 'getBiometrics', promise: new Promise((r) => { release = r; }) };
+      const p1 = D.enable();
+      await ticks(10);
+      ok(D.status().syncing, 'syncing');
+      const p2 = D.sync({ force: true });
+      release();
+      await Promise.all([p1, p2]);
+      await waitIdle();
+      eq(callsOf('getFirstDayWithData').length, 1);
+      eq(callsOf('getCaloriesConsumedAndBurned').length, 1, 'no second energy fetch');
+    });
+    T.it('a cancelled sync never serves or blocks new work (disable + enable while a call is in flight)', async () => {
+      await freshStart();
+      seedStandard();
+      let release;
+      server.hold = { method: 'getCaloriesConsumedAndBurned', promise: new Promise((r) => { release = r; }) };
+      const p1 = D.enable();
+      await ticks(10);
+      await D.disable();
+      const p2 = D.enable();                              // must start a NEW full sync, not return the cancelled one
+      const st = await p2;
+      eq(st.phase, 'done'); eq(st.enabled, true); eq(st.counts.days, 59);
+      eq(callsOf('getFirstDayWithData').length, 2);
+      release();
+      await p1; await waitIdle();
+      eq(D.status().phase, 'done', 'the cancelled job did not touch the new state');
+      eq(D.status().lastError, null);
+      eq(D.dayList().length, 59);
+    });
+    T.it('dirty tracking: app writes are debounced 2 s, then [min(dirty) - 1, today + 1) is refetched', async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      const serving = { $t: 'com.cronometer.shared.entries.models.Serving/2553599101', f: [day('2026-09-05')] };
+      const change = { $t: 'com.cronometer.shared.entries.changes.AddEntryChange/3949104564', f: [true, true, serving] };
+      EV.emit('rpc', { type: 'rpc', method: 'updateDiary', ok: true, parsed: { params: [NONCE, UID, [change]] } });
+      await advance(500);
+      EV.emit('rpc', { type: 'rpc', method: 'removeServing', ok: true, parsed: { params: [NONCE, 'D80lp$', UID] } });
+      EV.emit('rpc', { type: 'rpc', method: 'getDayInfo', ok: true, parsed: { params: [NONCE, day('2026-01-01'), UID] } });   // a read: ignored
+      EV.emit('rpc', { type: 'rpc', method: 'addBiometric', ok: false, parsed: { params: [NONCE, { $t: 'x/1', f: [1, day('2026-01-02')] }, UID] } });   // failed write
+      await advance(1999); await ticks(3);
+      eq(server.calls.length, 0, 'the second write re-armed the 2 s debounce (the first timer would have fired at 2000)');
+      await advance(1); await waitIdle();
+      deepEq(server.calls.map((c) => c.method), ['getBiometrics', 'getCaloriesConsumedAndBurned', 'getCalendarInfo'], 'one refetch');
+      deepEq(callsOf('getCaloriesConsumedAndBurned')[0].args, ['2026-09-04', '2026-09-29'], 'the Serving day 09-05 - 1');
+      deepEq(callsOf('getBiometrics')[0].args[0], { metricId: 1, unitId: 1, from: '2026-09-04', to: '2026-09-28' });
+    });
+    T.it('dirty days: the viewed day only for id-only writes; a write that names its day ignores a stale viewed day; future days ignored', async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      fakeCap.state.diaryDate = { day: 12, month: 9, year: 2026 };   // the diary shows 09-12
+      EV.emit('rpc', { type: 'rpc', method: 'removeServing', ok: true, parsed: { params: [NONCE, 'D80lp$', UID] } });   // ids only
+      await advance(2000); await waitIdle();
+      deepEq(callsOf('getCaloriesConsumedAndBurned')[0].args, ['2026-09-11', '2026-09-29'], 'the viewed day 09-12 - 1');
+      server.calls.length = 0;
+      fakeCap.state.diaryDate = { day: 3, month: 10, year: 2024 };   // browsed back two years, then weighed in for today
+      const bio = { $t: 'com.cronometer.shared.biometrics.Biometric/2989635787', f: [80.2, day('2026-09-28')] };
+      EV.emit('rpc', { type: 'rpc', method: 'addBiometric', ok: true, parsed: { params: [NONCE, bio, UID] } });
+      await advance(2000); await waitIdle();
+      deepEq(callsOf('getCaloriesConsumedAndBurned').map((c) => c.args), [['2026-09-27', '2026-09-29']], 'today only: not two years of windows');
+      eq(server.calls.length, 3, 'one refetch: weigh-ins, energy, calendar');
+      server.calls.length = 0;
+      EV.emit('rpc', { type: 'rpc', method: 'setDayComplete', ok: true, parsed: { params: [NONCE, day('2026-10-02'), true, UID] } });
+      await advance(2000); await waitIdle();
+      deepEq(callsOf('getCaloriesConsumedAndBurned')[0].args, ['2026-09-27', '2026-09-29'], 'a future day is ignored');
+    });
+    T.it('a short job writes cmaTdeeDays once, at its end; the dirty debounce defaults to 30 s', async () => {
+      await enabledWithStandard();
+      eq(D.CONFIG.DIRTY_DEBOUNCE_MS, 30000);
+      writes.length = 0;
+      await D.sync({ force: true });
+      eq(writes.filter((w) => w.indexOf('cmaTdeeDays') >= 0).length, 1, 'writes: ' + JSON.stringify(writes));
+    });
+    T.it("the extension's own writes ('diary-write', fetch-based: never relayed as 'rpc') mark days dirty too", async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      EV.emit('diary-write', { method: 'updateDiary', ok: true, days: ['2026-09-02'] });
+      EV.emit('diary-write', { method: 'updateDiary', ok: false, days: ['2026-08-02'] });   // failed: ignored
+      await advance(2000); await waitIdle();
+      eq(callsOf('getCaloriesConsumedAndBurned').length, 1);
+      deepEq(callsOf('getCaloriesConsumedAndBurned')[0].args, ['2026-09-01', '2026-09-29']);
+    });
+    T.it('an edit queued behind a running sync that meets a transient block runs once the block clears', async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      clock += 11 * 60 * 1000;
+      let release;
+      server.hold = { method: 'getCaloriesConsumedAndBurned', promise: new Promise((r) => { release = r; }) };
+      const p = D.sync();                                   // a delta, held in its energy call
+      await ticks(10);
+      EV.emit('rpc', { type: 'rpc', method: 'setDayComplete', ok: true, parsed: { params: [NONCE, day('2026-09-03'), true, UID] } });
+      await advance(2000);                                  // the edit's job is queued behind the delta
+      fakeCap.readyOk = false;                              // capture loses the session meanwhile
+      release();
+      await p; await waitIdle();
+      eq(callsOf('getCaloriesConsumedAndBurned').length, 1, 'the queued edit did not run while blocked');
+      fakeCap.readyOk = true;
+      EV.emit('state', fakeCap.state);
+      await waitIdle();
+      eq(callsOf('getCaloriesConsumedAndBurned').length, 2);
+      deepEq(callsOf('getCaloriesConsumedAndBurned')[1].args, ['2026-09-02', '2026-09-29'], 'the edited day 09-03 - 1');
+    });
+    T.it('a clock set back (a last-sync stamp in the future) never suppresses syncing', async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      clock -= 3600 * 1000;
+      await D.sync();
+      eq(server.calls[0] && server.calls[0].method, 'getFirstDayWithData', 'stamps from the future: a full sync');
+    });
+    T.it('after disable() no app write triggers a request; disable({forget}) deletes every cmaTdee* key', async () => {
+      await enabledWithStandard();
+      ok(Object.keys(store).length >= 2);
+      await D.disable();
+      eq(store.cmaTdeeSync.enabled, false);
+      ok(store.cmaTdeeDays && Object.keys(store.cmaTdeeDays.days).length === 59, 'data kept');
+      server.calls.length = 0;
+      EV.emit('rpc', { type: 'rpc', method: 'updateDiary', ok: true, parsed: { params: [NONCE, UID, []] } });
+      await advance(5000); await waitIdle();
+      await D.sync({ full: true });
+      eq(server.calls.length, 0);
+      eq(D.status().blockedCode, 'not-enabled');
+      eq(D.dayList().length, 59, 'the cached history stays readable');
+      await D.setOverride('2026-09-01', true);
+      await D.saveSettings({ sex: 'female' });
+      await D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 2000 });
+      deepEq(Object.keys(store).sort(), ['cmaTdeeCheckins', 'cmaTdeeDays', 'cmaTdeeOverrides', 'cmaTdeeSettings', 'cmaTdeeSync']);
+      await D.disable({ forget: true });
+      await ticks(3);
+      deepEq(Object.keys(store), [], 'every key removed');
+      eq(D.dayList().length, 0); eq(D.checkins().length, 0); eq(D.getSettings().sex, 'other');
+    });
+  });
+
+  // ================================================================================================
+  T.describe('data layer: exclusions (spec 2.3: partial-day heuristic, overrides, trustCompleteOnly)', () => {
+    async function diary(values, o) {
+      await freshStart(o);
+      server.firstDay = '2026-01-01';
+      let d = addDays('2026-09-28', -values.length);
+      values.forEach((v) => { if (v !== null) server.food[d] = typeof v === 'object' ? v : { consumed: v, complete: true }; d = addDays(d, 1); });
+      seed(addDays('2026-09-28', -values.length), '2026-09-28', (x) => { server.weighIns.push({ date: x, time: null, value: 75 }); });
+      await D.enable(); await waitIdle();
+    }
+    const days = (n, v) => Array.from({ length: n }, () => v);
+    T.it('a logged day under 50 % of the median of the previous 14 logged days is excluded as partial until decided', async () => {
+      await diary(days(20, 2000).concat([800, 1100]).concat(days(6, 2000)));
+      const low = addDays('2026-09-28', -8), ok2 = addDays('2026-09-28', -7);
+      let e = entry(low);
+      eq(e.intakeKcal, 800); eq(e.excluded, true); eq(e.excludedReason, 'partial'); eq(e.partialSuspect, true); eq(e.override, null);
+      eq(entry(ok2).excluded, false, '1100 is above half the median');
+      eq(D.records().find((r) => r.date === low).excluded, true);
+      await D.setOverride(low, false);                                       // "Yes, I fasted / ate little"
+      e = entry(low);
+      eq(e.excluded, false); eq(e.excludedReason, null); eq(e.partialSuspect, false); eq(e.override, false);
+      await D.setOverride(ok2, true);
+      eq(entry(ok2).excludedReason, 'user');
+      await D.setOverride(ok2, null);
+      eq(entry(ok2).excluded, false);
+      deepEq(store.cmaTdeeOverrides, { userId: UID, days: { [low]: false } });
+      await throws(() => D.setOverride('2026-9-1', true), /YYYY-MM-DD/);
+      await throws(() => D.setOverride(low, 'yes'), /true, false or null/);
+    });
+    T.it('fewer than 7 earlier logged days: no flag; a sustained drop stays excluded until the user confirms it', async () => {
+      await diary(days(5, 2000).concat([500]).concat(days(1, 2000)));
+      eq(entry(addDays('2026-09-28', -2)).excluded, false, 'only 5 logged days before');
+      await diary(days(20, 2000).concat(days(15, 900)));
+      let flagged = D.dayList().filter((x) => x.excludedReason === 'partial').map((x) => x.date);
+      eq(flagged.length, 15, 'every unconfirmed low day stays flagged: ' + flagged.join(','));
+      eq(flagged[0], addDays('2026-09-28', -15));
+      ok(D.records().filter((r) => r.intakeKcal === 900).every((r) => r.excluded), 'none reaches the engine as intake unconfirmed');
+      // "Yes, I ate little" on the first 7: confirmed days feed the median, the rest of the new normal passes
+      for (let i = 0; i < 7; i++) await D.setOverride(flagged[i], false);
+      flagged = D.dayList().filter((x) => x.excludedReason === 'partial').map((x) => x.date);
+      deepEq(flagged, [], 'after a week of confirmed days the lower intake is the new normal');
+      eq(D.records().filter((r) => r.intakeKcal === 900 && !r.excluded).length, 15);
+    });
+    T.it('under-logged days (only breakfast and lunch) never become real intake by themselves: the estimate is not dragged down', async () => {
+      await diary(days(60, 2200).concat(days(29, 1000)));          // weight flat at 75 kg: nothing changed but the logging
+      const low = D.records().filter((r) => r.intakeKcal === 1000);
+      eq(low.length, 29);
+      ok(low.every((r) => r.excluded), 'all 29 excluded until confirmed (they used to pass after about a week)');
+      const cur = TD.runExpenditureModel(D.records()).current;
+      ok(Math.abs(cur.expenditureKcal - 2200) < 60, 'the estimate stays near 2200 (fed as intake it fell to about 1890): ' + cur.expenditureKcal);
+    });
+    T.it('trustCompleteOnly (opt-in): days not marked complete are excluded; complete alone never excludes by default', async () => {
+      const v = days(10, 2000);
+      v[3] = { consumed: 2000, complete: false };
+      v[4] = { consumed: 2000, complete: false };
+      await diary(v);
+      const d3 = addDays('2026-09-28', -7), d4 = addDays('2026-09-28', -6);
+      eq(entry(d3).complete, false); eq(entry(d3).excluded, false, 'default: not excluded');
+      await D.saveSettings({ trustCompleteOnly: true });
+      eq(entry(d3).excludedReason, 'incomplete');
+      await D.setOverride(d4, false);
+      eq(entry(d4).excluded, false, 'a confirmed day wins over trustCompleteOnly');
+    });
+    T.it('records({modelStartDate}) and the setting', async () => {
+      await diary(days(10, 2000));
+      eq(D.records({ modelStartDate: '2026-09-25' }).length, 4);
+      await D.saveSettings({ modelStartDate: '2026-09-27' });
+      eq(D.records().length, 2);
+      eq(D.records({ modelStartDate: null }).length, 25, 'today - 24 (first weigh-in - 14) .. today');
+    });
+  });
+
+  // ================================================================================================
+  T.describe('data layer: accounts, storage, privacy', () => {
+    T.it('records of another account are ignored and never shown; an account switch cancels its sync', async () => {
+      await enabledWithStandard();
+      const saved = JSON.parse(JSON.stringify(store));
+      await freshStart({ init: false });
+      seedStandard();
+      Object.assign(store, saved);                       // storage holds account A's records
+      fakeCap.state.userId = UID_B;
+      await D.init();
+      eq(D.status().ready, true); eq(D.status().enabled, false, "A's consent is not B's");
+      eq(D.dayList().length, 0); eq(D.status().counts.days, 0);
+      eq(D.diagnostics().ignoredOtherAccount, 2);
+      deepEq(D.checkins(), []);
+      eq(store.cmaTdeeDays.userId, UID, 'nothing overwritten by reading');
+      // back to A through the capture 'state' event: A's data is back
+      fakeCap.state.userId = UID;
+      EV.emit('state', fakeCap.state);
+      await waitIdle(); await ticks(5);
+      eq(D.dayList().length, 59);
+      // a switch in the middle of A's sync: nothing of the rest is merged or stored for B
+      let release;
+      server.hold = { method: 'getCaloriesConsumedAndBurned', promise: new Promise((r) => { release = r; }) };
+      const p = D.sync({ full: true });
+      await ticks(10);
+      fakeCap.state.userId = UID_B;
+      EV.emit('state', fakeCap.state);
+      release();
+      await p; await waitIdle(); await ticks(5);
+      eq(D.status().ready, true);
+      eq(D.dayList().length, 0, "B sees none of A's rows");
+      eq(store.cmaTdeeDays.userId, UID);
+      eq(D.status().phase, 'idle');
+      ok(server.calls.every((c) => c.userId === UID), 'no request for B');
+    });
+    T.it('the nonce is never stored or logged; diagnostics carry counts and date ranges only', async () => {
+      await enabledWithStandard();
+      await D.setOverride('2026-09-02', true);
+      await D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 2010, expenditureKcal: 2400, sdKcal: 90, trendWeightKg: 80.37, ratePctPerWeek: -0.5, macros: { proteinG: 145, fatG: 70, carbsG: 210 }, notes: ['n'] });
+      ok(server.calls.length > 0 && server.calls.every((c) => c.nonce === NONCE), 'the calls did carry the session nonce');
+      ok(JSON.stringify(store).indexOf(NONCE) < 0, 'not in chrome.storage');
+      ok(logs.join('\n').indexOf(NONCE) < 0, 'not in the capture log');
+      const dump = JSON.stringify(D.diagnostics()) + JSON.stringify(D.status()) + logs.join('\n');
+      ok(dump.indexOf(NONCE) < 0, 'not in diagnostics / status');
+      ['80.37', '80.61', '70.13', '2000', '2300', '1900', '2010', '2400'].forEach((v) => ok(dump.indexOf(v) < 0, v + ' must not appear: ' + dump.slice(0, 400)));
+      const dg = D.diagnostics();
+      deepEq(dg.counts, { days: 59, weighIns: 25, intakeDays: 57, burnedDays: 59 });
+      deepEq(dg.range, { from: '2026-08-01', to: '2026-09-28' });
+      eq(dg.overrides, 1); eq(dg.checkins, 1); eq(dg.enabled, true);
+    });
+    T.it('stored format: {userId, days: {iso: {i, w, b, bp, c, lf, s, f}}}; a reload reads it back', async () => {
+      await enabledWithStandard();
+      const rec = store.cmaTdeeDays.days['2026-09-19'];
+      deepEq(Object.keys(rec).sort(), ['b', 'bp', 'c', 'f', 'i', 'lf', 's'].sort());
+      deepEq(rec.bp, [1600, 300, 400, 150]); eq(rec.i, 2000); eq(rec.b, 2300); eq(rec.s, 'rpc'); eq(rec.lf, true); eq(rec.c, true);
+      eq(store.cmaTdeeDays.days['2026-09-20'].w, 80.37);
+      eq(store.cmaTdeeSync.rowLayoutVersion, D.ROW_LAYOUT_VERSION);
+      const before = JSON.stringify(D.dayList());
+      const saved = JSON.parse(JSON.stringify(store));
+      await freshStart({ init: false });
+      Object.assign(store, saved);
+      await D.init();
+      eq(JSON.stringify(D.dayList()), before, 'identical after a reload');
+      eq(D.status().enabled, true);
+      eq(server.calls.length, 0, 'loading never fetches');
+    });
+    T.it('a failed storage read is reported and nothing is written over what could not be read', async () => {
+      await freshStart({ init: false });
+      const realGet = chromeShim.storage.local.get;
+      chromeShim.storage.local.get = function (keys, cb) {
+        setTimeout(() => { chromeShim.runtime.lastError = { message: 'IO error' }; try { cb({}); } finally { delete chromeShim.runtime.lastError; } }, 0);
+      };
+      try {
+        await D.init();
+        ok(/could not be read \(IO error\)/.test(D.status().lastError), D.status().lastError);
+        eq(D.diagnostics().storage, 'read failed: IO error');
+        seedStandard();
+        await D.enable(); await waitIdle();
+        eq(D.status().enabled, true, 'works for this page');
+        ok(D.dayList().length > 0);
+        deepEq(Object.keys(store), [], 'no write over the unreadable storage');
+      } finally { chromeShim.storage.local.get = realGet; }
+    });
+    T.it('a stored row layout version that differs forces a full sync', async () => {
+      await enabledWithStandard();
+      const saved = JSON.parse(JSON.stringify(store));
+      saved.cmaTdeeSync.rowLayoutVersion = 0;
+      await freshStart({ init: false });
+      Object.assign(store, saved);
+      await D.init();
+      await D.sync();
+      eq(server.calls[0].method, 'getFirstDayWithData');
+    });
+    T.it('settings: normalised, per account; a goal change stamps goalChangedAt; check-ins keep the last 260', async () => {
+      await freshStart();
+      deepEq(D.getSettings(), JSON.parse(JSON.stringify(D.DEFAULT_SETTINGS)));
+      let s = await D.saveSettings({ sex: 'robot', checkInWeekday: 9, proteinGPerKg: 2.2, units: { weight: 'lb' }, manualInitialKcal: 50 });
+      eq(s.sex, 'other'); eq(s.checkInWeekday, 1); eq(s.proteinGPerKg, 2.2); deepEq(s.units, { weight: 'lb', energy: 'auto' }); eq(s.manualInitialKcal, null);
+      eq(s.goalChangedAt, null);
+      s = await D.saveSettings({ goal: { ratePctPerWeek: -0.5 } });
+      eq(s.goalChangedAt, clock);
+      eq(store.cmaTdeeSettings.userId, UID); eq(store.cmaTdeeSettings.goal.ratePctPerWeek, -0.5);
+      for (let i = 0; i < 262; i++) await D.recordCheckin({ date: addDays('2021-01-04', i * 7), accepted: i % 2 === 0, targetKcal: 2000 + i });
+      eq(D.checkins().length, 260); eq(D.checkins()[0].targetKcal, 2002);
+      eq(store.cmaTdeeCheckins.checkins.length, 260);
+      await throws(() => D.recordCheckin({ date: 'monday' }), /YYYY-MM-DD/);
+      eq(server.calls.length, 0);
+    });
+    T.it("the view's extras survive a reload: dismissed nudges (ISO dates only) and a check-in's previousTargetKcal / goalChanged", async () => {
+      await freshStart();
+      let s = await D.saveSettings({ nudges: { weighIn: '2026-09-28', partial: 'monday', 'x y': '2026-09-28', evil: { a: 1 } } });
+      deepEq(s.nudges, { weighIn: '2026-09-28' }, 'short names with a YYYY-MM-DD value only');
+      s = await D.saveSettings({ nudges: { weighIn: '2026-09-28', partial: '2026-09-28' } });
+      deepEq(store.cmaTdeeSettings.nudges, { weighIn: '2026-09-28', partial: '2026-09-28' });
+      await D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 2150, previousTargetKcal: 2300, goalChanged: true, at: clock });
+      await D.recordCheckin({ date: '2026-09-28', accepted: false, targetKcal: 2100, previousTargetKcal: 'x' });
+      D._test.reset();
+      await D.init();
+      deepEq(D.getSettings().nudges, { weighIn: '2026-09-28', partial: '2026-09-28' }, 'read back after a reload');
+      const cis = D.checkins();
+      eq(cis.length, 2);
+      eq(cis[0].previousTargetKcal, 2300); eq(cis[0].goalChanged, true); eq(cis[0].at, clock);
+      eq(cis[1].previousTargetKcal, null); eq(cis[1].goalChanged, false);
+      ok(JSON.stringify(D.diagnostics()).indexOf('nudges') < 0 && JSON.stringify(D.diagnostics()).indexOf('2300') < 0, 'neither reaches the diagnostics');
+      eq(server.calls.length, 0);
+    });
+  });
+
+  // ================================================================================================
+  T.describe('data layer: failures (recipe 9 + 10)', () => {
+    T.it('Session aborts the sync with a clear status and keeps the cached data', async () => {
+      await enabledWithStandard();
+      server.refuse.getCaloriesConsumedAndBurned = () => new CMA.errors.Session('authentication failed', { method: 'getCaloriesConsumedAndBurned' });
+      const st = await D.sync({ full: true });
+      eq(st.phase, 'error');
+      ok(/not logged in any more/.test(st.lastError), st.lastError);
+      ok(seen.indexOf('error') >= 0);
+      eq(callsOf('getCaloriesConsumedAndBurned').length, 2, 'one energy call in this sync (plus the first sync\'s)');
+      eq(callsOf('getCalendarInfo').length, 2, 'the calendar phase did not run again');
+      eq(D.dayList().length, 59, 'cached data stays');
+    });
+    T.it('Throttled: backs off once (rpc.throttle.backoffMs) and retries; twice ends the sync', async () => {
+      await freshStart();
+      seedStandard();
+      let n = 0;
+      server.refuse.getFirstDayWithData = () => (n++ === 0 ? new CMA.errors.Throttled('HTTP 429', { status: 429, retryable: true }) : null);
+      const t0 = clock;
+      await D.enable(); await waitIdle();
+      eq(callsOf('getFirstDayWithData').length, 2);
+      ok(clock - t0 >= 5000, 'slept the back-off');
+      eq(D.status().phase, 'done');
+      server.refuse.getBiometrics = () => new CMA.errors.Throttled('HTTP 429', { status: 429, retryable: true });
+      const st = await D.sync({ full: true });
+      eq(st.phase, 'error'); ok(/throttled/.test(st.lastError), st.lastError);
+      eq(callsOf('getBiometrics').length, 3, 'first sync + two attempts');
+    });
+    T.it('getPreference refused -> TEF assumed off; getCalendarInfo refused -> flagsSource none, intake = row[0] > 0', async () => {
+      await freshStart();
+      seedStandard();
+      server.prefs['use.thermic.effect.food'] = 'true';
+      server.refuse.getPreference = () => rpcEx('NoSuchMethodException');
+      server.refuse.getCalendarInfo = () => rpcEx('ServerException');
+      server.food['2026-09-10'] = { consumed: 0, logged: true };
+      await D.enable(); await waitIdle();
+      const st = D.status();
+      eq(callsOf('getPreference').length, 1, 'no further preference request after a refusal');
+      deepEq([st.prefs.tef, st.prefs.assumed], [false, true]);
+      deepEq([st.prefs.unitsCalories, st.prefs.weightUnit], [null, null], 'units not read: unknown, not Cronometer\'s defaults (kcal, Pounds)');
+      eq(st.flagsSource, 'none');
+      ok(/preferences unavailable, TEF assumed off/.test(st.notes) && /flags unavailable/.test(st.notes), st.notes);
+      eq(st.lastError, null, 'a sync that completed is not a failure');
+      eq(st.phase, 'done');
+      eq(entry('2026-09-18').burnedKcal, 1900, 'TEF not added');
+      eq(entry('2026-09-18').intakeKcal, 2000);
+      eq(entry('2026-09-10').intakeKcal, null, 'a zero row without flags is not a logged day');
+      eq(entry('2026-09-10').loggedFood, null);
+    });
+    T.it('sequential calls, at least 250 ms apart', async () => {
+      await freshStart({ spacingMs: 250 });
+      seedStandard();
+      await D.enable(); await waitIdle();
+      const at = server.calls.map((c) => c.at);
+      eq(at.length, 8);
+      for (let i = 1; i < at.length; i++) ok(at[i] - at[i - 1] >= 250, 'gap ' + i + ': ' + (at[i] - at[i - 1]));
+    });
+  });
+
+  // ================================================================================================
+  T.describe('data layer: CSV import and probe', () => {
+    const NUTRITION = 'Date,Energy (kcal),Protein (g),Completed\n2026-07-01,2210.5,150,true\n2026-07-02,0,0,false\n2026-07-03,1990,120,false\n'
+      + '2026-09-05,1234,80,true\n2030-01-01,2000,1,true\n07/04/2026,2000,1,true\n';
+    const BIOMETRICS = 'Day,Time,Group,Metric,Unit,Amount\n2026-07-01,7:10 AM,Body,Weight,lbs,180\n2026-07-01,9:00 PM,Body,Weight,lbs,182\n'
+      + '2026-07-02,,Body,Weight,kg,81.5\n2026-07-02,,Body,Body Fat,%,20\n2026-09-20,,Body,Weight,kg,99\n';
+    T.it('imports Cronometer exports as source csv; an RPC value wins; a later refetch replaces CSV values only where the RPC has one', async () => {
+      await enabledWithStandard();
+      let r = await D.importCsv('nutrition', NUTRITION);
+      deepEq(r, { imported: 2, skipped: 4, unknownUnits: 0 }, '07-01 and 07-03; 07-02 empty, 09-05 has RPC data, a future row, a non-ISO date');
+      r = await D.importCsv('biometrics', BIOMETRICS);
+      deepEq(r, { imported: 2, skipped: 1, unknownUnits: 0 }, 'days, not rows: 07-01 (its 7:10 AM weigh-in) and 07-02; 09-20 has an RPC weigh-in');
+      const e1 = entry('2026-07-01');
+      eq(e1.source, 'csv'); eq(e1.intakeKcal, 2210.5); eq(e1.weightKg, 81.65, '180 lb, the parser\'s kg'); eq(e1.burnedKcal, null);
+      eq(entry('2026-07-03').complete, false, 'Completed=false stored as the flag only');
+      eq(entry('2026-07-03').excluded, false);
+      eq(entry('2026-09-05').intakeKcal, 2000, 'the RPC value was kept');
+      eq(entry('2026-09-20').weightKg, 80.37);
+      eq(store.cmaTdeeDays.days['2026-07-01'].s, 'csv');
+      // the RPC later covers 07-01..07-03: its values win where it has one, the CSV value stays where it has none
+      server.food['2026-07-01'] = { consumed: 2300, complete: true };
+      server.weighIns.push({ date: '2026-07-02', time: null, value: 81.9 });
+      server.firstDay = '2026-06-01';
+      server.weighIns.push({ date: '2026-06-20', time: null, value: 82 });
+      const n0 = callsOf('getCaloriesConsumedAndBurned').length;
+      await D.sync({ full: true });
+      eq(callsOf('getCaloriesConsumedAndBurned')[n0].args[0], '2026-06-06', 'new first weigh-in 06-20 - 14 days');
+      eq(entry('2026-07-01').intakeKcal, 2300, 'RPC intake replaces the CSV intake');
+      eq(entry('2026-07-01').weightKg, 81.65, 'no RPC weigh-in that day: the CSV weight stays');
+      eq(entry('2026-07-01').source, 'csv');
+      eq(entry('2026-07-03').intakeKcal, 1990, 'no RPC intake that day: the CSV intake stays');
+      eq(entry('2026-07-02').weightKg, 81.9, 'RPC weigh-in replaces the CSV one');
+      await throws(() => D.importCsv('exercises', 'a'), /nutrition' or 'biometrics/);
+    });
+    T.it('probe(): the most recent full day with its raw row, burned parts and the latest weigh-in', async () => {
+      await enabledWithStandard();
+      const p = D.probe();
+      eq(p.date, '2026-09-27');
+      deepEq(p.row, [2000, 0, 0, 1600, 150, 0, 0, 0, 0, 250, 50, 0]);
+      eq(p.consumed, 2000); eq(p.burned, 1900); eq(p.tefIncluded, false);
+      deepEq(p.parts, { bmr: 1600, activity: 300, exercise: 0, tef: 150 });
+      deepEq(p.weighIn, { date: '2026-09-28', kg: 80.37 });
+      eq(D.today(), '2026-09-28');
+      TODAY = '2026-09-29';
+      eq(D.today(), '2026-09-29', 'today follows capture.today(), not the viewed diary day');
+      eq(entry('2026-09-28').intakeKcal, 900, "yesterday's partial day is a normal day now");
+    });
+  });
+
+  // ================================================================================================
+  T.describe('review round: preferences, first day, pruning, CSV files', () => {
+    T.it("preferences compare case-insensitively like the app's alo('true', value)", async () => {
+      await freshStart();
+      seedStandard();
+      server.prefs['use.thermic.effect.food'] = 'True';
+      server.prefs['units.calories'] = 'FALSE';
+      await D.enable(); await waitIdle();
+      deepEq([D.status().prefs.tef, D.status().prefs.unitsCalories, D.status().prefs.assumed], [true, false, false]);
+      eq(entry('2026-09-18').burnedKcal, 2050, 'TEF counted as the app counts it');
+      EV.emit('rpc', { type: 'rpc', method: 'setUserPreference', ok: true, pref: { key: 'use.thermic.effect.food', value: 'FALSE' } });
+      eq(D.status().prefs.tef, false);
+      eq(entry('2026-09-18').burnedKcal, 1900);
+    });
+    T.it('a refused getFirstDayWithData keeps the first day an earlier sync learned (the 18-month fallback only when none is known)', async () => {
+      await freshStart();
+      seedStandard();
+      server.firstDay = '2024-01-01';
+      await D.enable(); await waitIdle();
+      eq(D.status().firstDay, '2024-01-01');
+      server.refuse.getFirstDayWithData = () => rpcEx('ServerException');
+      await D.sync({ full: true });
+      eq(D.status().firstDay, '2024-01-01', 'kept, not today - 548');
+      ok(/first day unavailable/.test(D.status().notes), D.status().notes);
+      server.refuse.getFirstDayWithData = null;
+      server.firstDay = null;                                      // the server now says: no data at all
+      await D.sync({ full: true });
+      eq(D.status().firstDay, addDays('2026-09-28', -548), 'a null reply still means the fallback');
+    });
+    T.it('a full sync drops days older than the 5-year window that came from Cronometer; CSV days stay', async () => {
+      await enabledWithStandard();
+      const m = D._test.mem;
+      m.days['2020-01-05'] = { i: 2100, w: 82, b: 1900, bp: [1600, 300, 0, 150], c: true, lf: true, s: 'rpc', f: 1 };
+      m.days['2020-01-06'] = { i: 2000, w: null, b: null, bp: null, c: null, lf: null, s: 'csv', cs: 'i', f: 1 };
+      await D.sync({ full: true });
+      ok(!store.cmaTdeeDays.days['2020-01-05'], 'an old Cronometer day is gone from storage');
+      ok(!!store.cmaTdeeDays.days['2020-01-06'], 'an imported CSV day is kept');
+      eq(D.dayList()[0].date, '2020-01-06');
+    });
+    T.it('biometrics CSV: stone and lb amounts converted per row, the EARLIEST weigh-in by 12- or 24-hour time, unknown units skipped', async () => {
+      await freshStart();
+      const csv = 'Day,Time,Group,Metric,Unit,Amount\n'
+        + '2026-09-20,,Body,Weight,st,12.6\n'
+        + '2026-09-21,10:15 AM,Body,Weight,kg,81.3\n2026-09-21,7:02 AM,Body,Weight,kg,80.4\n2026-09-21,1:30 PM,Body,Weight,kg,81.9\n'
+        + '2026-09-22,12:15 PM,Body,Weight,lbs,180.0\n2026-09-22,6:58 AM,Body,Weight,lbs,176.8\n2026-09-22,,Body,Weight,kg,79\n'
+        + '2026-09-23,10:30 PM,Body,Weight,stone,12.8\n2026-09-23,7:05 AM,Body,Weight,st,12.7\n'
+        + '2026-09-24,07:00,Body,Weight,kg,80.0\n2026-09-24,06:30,Body,Weight,kg,80.2\n'
+        + '2026-09-25,,Body,Weight,g,80000\n2026-09-25,7:00 AM,Body,Body Fat,%,20\n';
+      const r = await D.importCsv('biometrics', csv);
+      deepEq(r, { imported: 5, skipped: 1, unknownUnits: 1 });
+      eq(entry('2026-09-20').weightKg, 80.01, '12.6 st = 80.01 kg (the engine parser stored 12.6 kg)');
+      eq(entry('2026-09-21').weightKg, 80.4, '7:02 AM beats 10:15 AM and 1:30 PM (text order put 1:30 PM first)');
+      eq(entry('2026-09-22').weightKg, 80.2, '6:58 AM (176.8 lb) beats 12:15 PM and an untimed row');
+      eq(entry('2026-09-23').weightKg, 80.65, '7:05 AM, 12.7 st');
+      eq(entry('2026-09-24').weightKg, 80.2, '24-hour times: 06:30 beats 07:00');
+      eq(entry('2026-09-25').weightKg, null, 'grams: an unknown unit is not guessed');
+      eq(entry('2026-09-21').source, 'csv');
+      const t = D._test.csvTime;
+      deepEq([t('12:05 AM'), t('12:05 PM'), t('7:02 pm'), t('23:59'), t('7:02:30 AM')], [{ h: 0, m: 5, s: 0 }, { h: 12, m: 5, s: 0 }, { h: 19, m: 2, s: 0 }, { h: 23, m: 59, s: 0 }, { h: 7, m: 2, s: 30 }]);
+      deepEq([t(''), t('13:00 PM'), t('noon'), t(null)], [null, null, null, null]);
+    });
+    T.it('a Food & Recipe Entries export (servings.csv) or the wrong file is refused and stores nothing', async () => {
+      await freshStart();
+      const servings = 'Day,Group,Food Name,Amount,Energy (kcal),Protein (g)\n2026-01-10,Breakfast,Oats,40 g,150,5\n2026-01-10,Lunch,Rice,100 g,130,3\n2026-01-10,Dinner,Soup,1 cup,205,8\n';
+      await throws(() => D.importCsv('nutrition', servings), /2026-01-10 appears more than once.*Food & Recipe Entries.*dailysummary\.csv/);
+      await throws(() => D.importCsv('biometrics', 'Date,Energy (kcal)\n2026-01-01,2000\n'), /no Metric and Amount columns.*biometrics\.csv/);
+      await throws(() => D.importCsv('nutrition', 'Day,Time,Group,Metric,Unit,Amount\n2026-01-01,,Body,Weight,kg,80\n'), /no Energy \(kcal\) or Energy \(kJ\) column/);
+      await throws(() => D.importCsv('nutrition', 'Food,Energy (kcal)\nOats,150\n'), /no Date column/);
+      eq(D.dayList().length, 0, 'nothing stored');
+      ok(!store.cmaTdeeDays, 'nothing written');
+    });
+  });
+
+  // ================================================================================================
+  T.describe("other tabs: another tab's Disable / Delete TDEE data stops this one (the stored consent, checked before every job)", () => {
+    // This page's fake chrome.storage has no onChanged (as if the listener could not be added): the second check -
+    // execute() reads cmaTdeeSync before its first request - is what stops the job.
+    T.it("another tab's Delete TDEE data (every key removed): the next app write sends nothing and re-creates no key", async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      Object.keys(store).forEach((k) => { delete store[k]; });      // disable({forget: true}) in the other tab
+      writes.length = 0;
+      EV.emit('rpc', { type: 'rpc', method: 'updateDiary', ok: true, parsed: { params: [NONCE, UID, []] } });
+      await advance(2000); await waitIdle();
+      eq(server.calls.length, 0, 'no request after the deletion');
+      deepEq(Object.keys(store), [], 'no key re-created');
+      eq(writes.length, 0, 'nothing written');
+      eq(D.status().enabled, false);
+      eq(D.dayList().length, 0, 'the memory copy is dropped too');
+      await D.sync({ full: true });
+      eq(server.calls.length, 0, 'sync() is refused as well (not enabled)');
+    });
+    T.it("another tab's Disable (enabled false stored): stops here too, the data stays, the consent is not re-written", async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      store.cmaTdeeSync.enabled = false;
+      EV.emit('rpc', { type: 'rpc', method: 'updateDiary', ok: true, parsed: { params: [NONCE, UID, []] } });
+      await advance(2000); await waitIdle();
+      eq(server.calls.length, 0);
+      eq(D.status().enabled, false);
+      eq(store.cmaTdeeSync.enabled, false, 'not switched back on');
+      eq(D.dayList().length, 59, 'a Disable keeps the data');
+    });
+    T.it('another account enabled the tab meanwhile (cmaTdeeSync of another userId): nothing is read or written for this one', async () => {
+      await enabledWithStandard();
+      server.calls.length = 0;
+      store.cmaTdeeSync = Object.assign({}, store.cmaTdeeSync, { userId: UID_B });
+      const before = JSON.stringify(store);
+      EV.emit('rpc', { type: 'rpc', method: 'updateDiary', ok: true, parsed: { params: [NONCE, UID, []] } });
+      await advance(2000); await waitIdle();
+      eq(server.calls.length, 0);
+      eq(JSON.stringify(store), before, "the other account's records are untouched");
+      eq(D.status().enabled, false);
+    });
+  });
+
+  // ================================================================================================
+  T.describe('other tabs: two Cronometer tabs over ONE chrome.storage (chrome.storage.onChanged, the real module twice)', () => {
+    // Two iframes = two tabs, each running src/tdee/tdee-data.js with its own fake capture / rpc and real timers,
+    // over one shared fake storage whose onChanged reports every change to both, with object keys SORTED as Chrome
+    // reports them (base::Value dictionaries), and only when a value really changed (as Chrome does).
+    const shared = {};
+    const listeners = [];
+    const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
+    const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys) : v && typeof v === 'object'
+      ? Object.keys(v).sort().reduce((o, k) => { o[k] = sortKeys(v[k]); return o; }, {}) : v);
+    const fire = (ch) => { if (Object.keys(ch).length) listeners.slice().forEach((f) => f(clone(ch), 'local')); };
+    const sharedChrome = { runtime: {}, storage: {
+      onChanged: { addListener(f) { listeners.push(f); }, removeListener(f) { const i = listeners.indexOf(f); if (i >= 0) listeners.splice(i, 1); } },
+      local: {
+        get(keys, cb) { const o = {}; [].concat(keys).forEach((k) => { if (own(shared, k)) o[k] = sortKeys(clone(shared[k])); }); setTimeout(() => cb(o), 0); },
+        set(obj, cb) {
+          const ch = {};
+          Object.keys(obj).forEach((k) => {
+            const nv = obj[k] == null ? null : clone(obj[k]);
+            if (own(shared, k) && JSON.stringify(sortKeys(shared[k])) === JSON.stringify(sortKeys(nv))) return;
+            ch[k] = { oldValue: shared[k], newValue: sortKeys(nv) };
+            shared[k] = nv;
+          });
+          setTimeout(() => { fire(ch); if (cb) cb(); }, 0);
+        },
+        remove(keys, cb) {
+          const ch = {};
+          [].concat(keys).forEach((k) => { if (own(shared, k)) { ch[k] = { oldValue: shared[k] }; delete shared[k]; } });
+          setTimeout(() => { fire(ch); if (cb) cb(); }, 0);
+        },
+      } } };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    function loadInto(w, src) {
+      return new Promise((resolve, reject) => {
+        const s = w.document.createElement('script');
+        s.src = new URL(src, location.href).href;
+        s.onload = () => resolve(); s.onerror = () => reject(new Error('could not load ' + src));
+        w.document.head.appendChild(s);
+      });
+    }
+    async function tab(name, uid) {
+      const f = document.createElement('iframe');
+      f.style.display = 'none';
+      document.body.appendChild(f);
+      const w = f.contentWindow;
+      const handlers = {};
+      const calls = [];
+      const hold = { method: null, promise: null };
+      const serveTab = async (method, fn) => {
+        calls.push(method);
+        if (hold.method === method) { hold.method = null; await hold.promise; }
+        return fn();
+      };
+      w.chrome = sharedChrome;
+      w.CMA = {
+        events: {
+          on(n, fn) { (handlers[n] = handlers[n] || []).push(fn); return () => {}; }, off() {},
+          emit(n, d) { (handlers[n] || []).slice().forEach((fn) => fn(d)); }, count(n) { return (handlers[n] || []).length; },
+        },
+        capture: {
+          state: { userId: uid, registryMismatch: false, diaryDate: { day: 28, month: 9, year: 2026 } },
+          ready() { return { ok: true, missing: [] }; },
+          session() { return { moduleBase: MB, permutation: 'P', policyHash: 'H', nonce: NONCE, userId: this.state.userId }; },
+          today() { return { day: 28, month: 9, year: 2026 }; },
+          log() {}, redact(s) { return s; },
+        },
+        registryStore: { inFlight() { return null; } },
+        rpc: {
+          throttle: { backoffMs: 10 }, TDEE_FIELDS: realRpc.TDEE_FIELDS,
+          getFirstDayWithData() { return serveTab('first', () => '2026-06-01'); },
+          getPreference(s, k) { return serveTab('pref', () => (k === 'weightUnit' ? 'Kilograms' : 'false')); },
+          getBiometrics() { return serveTab('bio', () => [{ date: '2026-09-20', time: null, value: 80.4 }, { date: '2026-09-27', time: null, value: 80 }]); },
+          getCaloriesConsumedAndBurned(s, a, bx) { return serveTab('energy', () => Array.from({ length: daysBetween(a, bx) }, () => [2300, -100, 0, 1700, 180, 0, 0, 0, 0, 500, 0, 0])); },
+          getCalendarInfo(s, a, b) {
+            return serveTab('calendar', () => { const o = []; for (let d = a; d <= b && d <= '2026-09-28'; d = addDays(d, 1)) o.push({ date: d, complete: false, loggedFood: true }); return o; });
+          },
+        },
+      };
+      await loadInto(w, '../src/tdee/adaptive-tdee.js');
+      await loadInto(w, '../src/tdee/tdee-data.js');
+      const TD2 = w.CMA.tdeeData;
+      TD2._test.configure({ spacingMs: 0, debounceMs: 5 });
+      await TD2.init();
+      return { name, w, D: TD2, calls, hold, write: () => w.CMA.events.emit('rpc', { type: 'rpc', method: 'updateDiary', ok: true, parsed: { params: [NONCE, uid, []] } }) };
+    }
+    let A = null, B = null;
+    async function settle(ms) { await sleep(ms || 40); for (const t of [A, B]) { if (t) for (let i = 0; i < 200 && t.D._test.run.running; i++) await sleep(5); } await sleep(10); }
+
+    T.it('both tabs watch the storage; A enables, B (loaded before) adopts the consent and the days without reading anything', async () => {
+      A = await tab('A', UID); B = await tab('B', UID);
+      eq(A.D.diagnostics().crossTab, true, 'the storage watcher is on');
+      await A.D.enable(); await settle();
+      deepEq(A.calls, ['first', 'pref', 'pref', 'pref', 'bio', 'energy', 'calendar'], 'A read its history');
+      eq(B.D.status().enabled, true, "B follows A's consent");
+      eq(B.D.dayList().length, A.D.dayList().length, 'B adopted the days');
+      ok(B.D.dayList().length > 20);
+      eq(B.calls.length, 0, 'B read nothing itself');
+    });
+    T.it("no lost updates: check-ins, settings and day decisions made in either tab all survive the other tab's writes", async () => {
+      await A.D.recordCheckin({ date: '2026-09-21', accepted: true, targetKcal: 2000 }); await settle();
+      await B.D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 2100 }); await settle();
+      deepEq(shared.cmaTdeeCheckins.checkins.map((c) => c.date), ['2026-09-21', '2026-09-28'], 'both check-ins stored');
+      eq(A.D.checkins().length, 2, "A sees B's check-in");
+      await B.D.saveSettings({ sex: 'female' }); await settle();
+      await A.D.saveSettings({ proteinGPerKg: 2.2 }); await settle();
+      deepEq([shared.cmaTdeeSettings.sex, shared.cmaTdeeSettings.proteinGPerKg], ['female', 2.2]);
+      deepEq([B.D.getSettings().sex, B.D.getSettings().proteinGPerKg], ['female', 2.2]);
+      await A.D.setOverride('2026-09-20', true); await settle();
+      await B.D.setOverride('2026-09-21', false); await settle();
+      deepEq(shared.cmaTdeeOverrides.days, { '2026-09-20': true, '2026-09-21': false });
+      eq(A.D.dayList().find((d) => d.date === '2026-09-21').override, false);
+    });
+    T.it("a tab's own writes coming back never roll its memory back (quick successive saves, keys reported sorted)", async () => {
+      A.D.saveSettings({ fatShare: 0.25 });
+      await A.D.saveSettings({ fatShare: 0.5 });
+      await settle();
+      eq(A.D.getSettings().fatShare, 0.5); eq(B.D.getSettings().fatShare, 0.5); eq(shared.cmaTdeeSettings.fatShare, 0.5);
+      eq(A.D.getSettings().sex, 'female', 'nothing else lost');
+    });
+    T.it('Delete TDEE data in A: B stops at once - an app write in B sends nothing and no key comes back', async () => {
+      const n0 = B.calls.length;
+      await A.D.disable({ forget: true }); await settle();
+      deepEq(Object.keys(shared), [], 'every key removed');
+      eq(B.D.status().enabled, false, 'B knows');
+      eq(B.D.dayList().length, 0); eq(B.D.checkins().length, 0); eq(B.D.getSettings().sex, 'other', "B dropped its memory copy");
+      B.write(); await settle(60);
+      eq(B.calls.length, n0, 'no request from B');
+      deepEq(Object.keys(shared), [], 'nothing re-created');
+    });
+    T.it('Disable in B while A is enabled: A stops, keeps its data, and an app write in A sends nothing', async () => {
+      await A.D.enable(); await settle();
+      eq(B.D.status().enabled, true);
+      await B.D.disable(); await settle();
+      eq(A.D.status().enabled, false, 'A follows the Disable');
+      ok(A.D.dayList().length > 20, 'the data stays');
+      const n0 = A.calls.length;
+      A.write(); await settle(60);
+      eq(A.calls.length, n0, 'no request from A');
+      eq(shared.cmaTdeeSync.enabled, false, 'the consent stays withdrawn');
+    });
+    T.it('a Delete in B while A is in the middle of a sync: A stops, merges and writes nothing', async () => {
+      await A.D.enable(); await settle();
+      let release;
+      A.hold.method = 'energy'; A.hold.promise = new Promise((r) => { release = r; });
+      const p = A.D.sync({ full: true });
+      for (let i = 0; i < 100 && A.hold.method; i++) await sleep(5);
+      eq(A.hold.method, null, 'A is waiting for its energy reply');
+      await B.D.disable({ forget: true }); await settle(20);
+      release();
+      await p; await settle();
+      deepEq(Object.keys(shared), [], 'nothing written back after the deletion');
+      eq(A.D.status().enabled, false); eq(A.D.dayList().length, 0);
+    });
+    T.it('another account enables the tab in a third tab: A (the first account) drops its copy and stops', async () => {
+      await A.D.enable(); await settle();
+      const C = await tab('C', UID_B);
+      await C.D.enable(); await settle();
+      eq(shared.cmaTdeeSync.userId, UID_B, "the second account's records replace the first's (one account at a time)");
+      eq(A.D.status().enabled, false); eq(A.D.dayList().length, 0, "A shows nothing of B's and keeps nothing of its own");
+      const n0 = A.calls.length;
+      A.write(); await settle(60);
+      eq(A.calls.length, n0, 'no request from A');
+      eq(shared.cmaTdeeSync.userId, UID_B, "A never writes over the other account's records");
+    });
+    T.it("a Delete when some keys were never stored: the other tab's next write to such a key is still adopted", async () => {
+      const uid3 = 5550001;
+      const D1 = await tab('D1', uid3), E1 = await tab('E1', uid3);
+      const settleBoth = async () => { await sleep(40); for (const t of [D1, E1]) for (let i = 0; i < 200 && t.D._test.run.running; i++) await sleep(5); await sleep(10); };
+      await D1.D.enable(); await settleBoth();
+      deepEq(Object.keys(shared).sort(), ['cmaTdeeDays', 'cmaTdeeSync'], 'no overrides, settings or check-ins stored yet');
+      await D1.D.disable({ forget: true }); await settleBoth();
+      deepEq(Object.keys(shared), []);
+      await E1.D.enable(); await settleBoth();
+      eq(D1.D.status().enabled, true, "D1 follows E1's consent");
+      await E1.D.setOverride('2026-09-22', true); await settleBoth();
+      eq(D1.D.dayList().find((d) => d.date === '2026-09-22').override, true, "D1 adopted E1's override (its Delete left no stale expectation for a key that did not exist)");
+      await E1.D.saveSettings({ sex: 'male' }); await settleBoth();
+      eq(D1.D.getSettings().sex, 'male');
+    });
+  });
+
+  // ================================================================================================
+  T.describe('capture: setUserPreference reaches the data layer through the real capture', () => {
+    T.it("a hooked setUserPreference request carries {key, value} on the 'rpc' event", async () => {
+      await enabledWithStandard();
+      const body = new G.Writer(MB, 'POLICY').call('setUserPreference', [STR, 'I', STR, STR], [NONCE, UID, 'use.thermic.effect.food', 'true']);
+      let ev = null;
+      const off = EV.on('rpc', (e) => { if (e.method === 'setUserPreference') ev = e; });
+      try {
+        realCapture.handleMessage({ source: 'cma-hook', type: 'xhr', method: 'POST', url: MB + 'app',
+          requestHeaders: { 'X-GWT-Permutation': '0A1C16E148676A90CBB128E4829A562F' }, requestBody: body, status: 200,
+          responseText: '//OK[[],0,7]', responseHeaders: '', t: Date.now() });
+      } finally { off(); }
+      ok(ev, 'event seen');
+      deepEq(ev.pref, { key: 'use.thermic.effect.food', value: 'true' });
+      eq(D.status().prefs.tef, true, 'the data layer followed it');
+      eq(entry('2026-09-18').burnedKcal, 2050);
+    });
+  });
+
+  T.describe('cleanup', () => {
+    T.it('restore the real modules', async () => {
+      D._test.reset();
+      D._test.configure({});
+      CMA.capture = realCapture; CMA.rpc = realRpc; window.chrome = realChrome;
+      ok(CMA.rpc.getBiometrics === R.getBiometrics);
+    });
+  });
+
+  T.run({ timeoutMs: 15000 });
+})();
+</script>
+</body>
+</html>

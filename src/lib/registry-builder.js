@@ -13,11 +13,12 @@
  *       throttles in hidden tabs. Warnings (the Python's stderr) go to onWarning(message), else console.warn;
  *       they are never part of the registry. The permutation is read from the bundle's `$strongName`
  *       (opts.permutation is the fallback, cross-checked); generatedAt defaults to now (whole seconds).
- *   validate(registry[, {maxUnknown, truncated, fragments}]) -> {ok, problems, checked}
+ *   validate(registry[, {maxUnknown, truncated, fragments}]) -> {ok, problems, checked, optional}
  *       The bar tests/gwt.html holds the generated registry to (SPEC 3.3 layouts resolved by BASE name like
  *       CMA.gwt.sig(), 42-field User with idx 19 int / 33 string, reader/writer kinds, service methods,
  *       hashes), stats.unknown <= MAX_UNKNOWN (0 in the shipped build), and no truncated download. A
- *       registry that fails must never be activated.
+ *       registry that fails must never be activated. optional.tdee = checkOptional(registry, 'tdee') ->
+ *       {ok, problems, checked}: the Adaptive TDEE types/methods, reported but never part of `ok`.
  *   fetchBundle(moduleBase, permutation, {fetchImpl, maxFragments=200, timeoutMs=60000, retries=3,
  *       retryDelayMs=1500, onProgress}) -> Promise<{text, fragments, bytes (= chars), permutation, truncated}>
  *       GET <moduleBase><perm>.cache.js (must be 200 and non-empty) then deferredjs/<perm>/N.cache.js for
@@ -1056,6 +1057,27 @@ window.CMA = window.CMA || {};
     { base: 'com.cronometer.shared.foods.FoodSource', layout: 'enum' },
     { base: 'com.cronometer.shared.user.exceptions.NotLoggedInException', layout: 's' },
   ];
+  /**
+   * Layouts and CronometerService methods of OPTIONAL features, by feature name. They are NOT part of the core bar
+   * above: `required: false` here means a registry that lacks one of them, or carries it with another layout, still
+   * validates (result.ok is untouched) - validate() reports them under result.optional[feature] = {ok, problems,
+   * checked} and checkOptional(registry, feature) answers the same for one feature, so a Cronometer deploy that drops
+   * or reshapes a type only the Adaptive TDEE reads disables that feature ('TDEE sync unavailable',
+   * src/tdee/tdee-data.js) and never the multi-add engines. Day 'bbh' / Time 'bbb' stay in the core list above.
+   * Layouts: research/tdee-critic.md 5 and src/lib/gwt-registry.js (build 0A1C16E1...).
+   */
+  const OPTIONAL_LAYOUTS = [
+    { feature: 'tdee', base: 'com.cronometer.shared.charts.models.DataPoint', layout: 'ood', required: false },
+    { feature: 'tdee', base: '[Lcom.cronometer.shared.charts.models.DataPoint;', layout: 'array:o', required: false },
+    { feature: 'tdee', base: 'com.cronometer.shared.entries.models.CalendarInfo', layout: 'o', required: false },
+    { feature: 'tdee', base: 'com.cronometer.shared.entries.models.CalendarDayInfo', layout: 'zoooozzzzo', required: false },
+    { feature: 'tdee', base: 'com.cronometer.shared.entries.DayQueryType', layout: 'enum', required: false },
+    { feature: 'tdee', base: '[[D', layout: 'array:o', required: false },
+    { feature: 'tdee', base: '[D', layout: 'array:d', required: false },
+  ];
+  const OPTIONAL_METHODS = {
+    tdee: ['getCaloriesConsumedAndBurned', 'getCalendarInfo', 'getBiometrics', 'getFirstDayWithData', 'getPreference'],
+  };
 
   /** gen_registry.layout_str() plus 'box:<t>'. */
   function layoutStr(e) {
@@ -1125,6 +1147,38 @@ window.CMA = window.CMA || {};
     const sm = Array.isArray(registry.serviceMethods) ? registry.serviceMethods : [];
     REQUIRED_METHODS.forEach((m) => check(sm.indexOf(m) >= 0, 'CronometerService method ' + m + ' not found'));
     check(sm.length > 150, 'only ' + sm.length + ' CronometerService methods (expected > 150)');
+    // optional features: reported, never part of ok / problems
+    const optional = {};
+    Object.keys(OPTIONAL_METHODS).forEach((feature) => { optional[feature] = checkOptional(registry, feature); });
+    return { ok: problems.length === 0, problems, checked, optional };
+  }
+
+  /**
+   * checkOptional(registry, feature) -> {ok, problems, checked}: the OPTIONAL_LAYOUTS of `feature` resolved by base
+   * name exactly like validate() (a CRC change alone passes; missing, ambiguous or reshaped types are problems) and
+   * its OPTIONAL_METHODS in registry.serviceMethods (skipped when the registry carries no method list).
+   */
+  function checkOptional(registry, feature) {
+    const problems = [];
+    let checked = 0;
+    const check = (cond, msg) => { checked++; if (!cond) problems.push(msg); return !!cond; };
+    const layouts = OPTIONAL_LAYOUTS.filter((x) => x.feature === feature);
+    const methods = OPTIONAL_METHODS[feature];
+    if (!methods && !layouts.length) return { ok: false, problems: ['unknown optional feature ' + feature], checked: 1 };
+    const types = registry && registry.types;
+    if (!types || typeof types !== 'object' || Array.isArray(types)) return { ok: false, problems: ['registry has no types'], checked: 1 };
+    const keys = Object.keys(types);
+    layouts.forEach((x) => {
+      const prefix = x.base + '/';
+      const matches = keys.filter((k) => k.startsWith(prefix));
+      if (!check(matches.length > 0, x.base + ' is missing from the registry')) return;
+      if (!check(matches.length === 1, x.base + ' is ambiguous: ' + matches.join(', '))) return;
+      const e = types[matches[0]];
+      check(!!e && typeof e === 'object' && layoutStr(e) === x.layout, matches[0] + ' layout ' + layoutStr(e) + ' (expected ' + x.layout + ')');
+    });
+    if (Array.isArray(registry.serviceMethods)) {
+      (methods || []).forEach((m) => check(registry.serviceMethods.indexOf(m) >= 0, 'CronometerService method ' + m + ' not found'));
+    }
     return { ok: problems.length === 0, problems, checked };
   }
 
@@ -1232,8 +1286,8 @@ window.CMA = window.CMA || {};
   }
 
   CMA.registryBuilder = {
-    build, validate, fetchBundle, sameOriginCheck, concatParts, layoutStr,
-    EXPECTED_LAYOUTS, MAX_UNKNOWN, REQUIRED_KINDS, REQUIRED_METHODS,
+    build, validate, checkOptional, fetchBundle, sameOriginCheck, concatParts, layoutStr,
+    EXPECTED_LAYOUTS, OPTIONAL_LAYOUTS, OPTIONAL_METHODS, MAX_UNKNOWN, REQUIRED_KINDS, REQUIRED_METHODS,
     DEFAULT_YIELD_EVERY, DEFAULT_MAX_FRAGMENTS, DEFAULT_TIMEOUT_MS, DEFAULT_RETRIES, DEFAULT_RETRY_DELAY_MS, END_OF_LIST_STATUS,
     // internals exposed for tests / diagnostics
     _internals: { Bundle, ReaderInfo, WriterInfo, Classifier, loadTable, findPolicies, findServiceMethods, splitStatements, splitFor, jsUnescape, gwtCompare, hasConditionalRead },

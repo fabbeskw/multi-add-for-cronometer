@@ -151,6 +151,34 @@
       eq(C.extractUserId(G.parseRequest(FX.getFoodTemplate)), null);
       deepEq(C.extractUserId(G.parseRequest(FX.removeServingTemplate)), { userId: 1234567, source: 'method' });
     });
+    T.it('Adaptive TDEE reads + setUserPreference: userId by the stub index; ev.pref = {key, value}; the value is never logged', () => {
+      C.reset();
+      const DQT = G.SIG.DAY_QUERY_TYPE;
+      // getBiometrics(String, I userId, I metricId, I unitId, Day, Day, Time, Time, DayQueryType)
+      const bio = writer().call('getBiometrics', [G.STRING_SIG, 'I', 'I', 'I', S.DAY, S.DAY, S.TIME, S.TIME, DQT],
+        ['NONCE', 1234567, 1, 1, null, null, null, null, { $t: DQT, ordinal: 0 }]);
+      deepEq(C.extractUserId(G.parseRequest(bio)), { userId: 1234567, source: 'method' });
+      ['getCaloriesConsumedAndBurned', 'getCalendarInfo'].forEach((m) => {
+        const body = writer().call(m, [G.STRING_SIG, 'I', S.DAY, S.DAY], ['NONCE', 1234567, FX.day(1, 9, 2026), FX.day(29, 9, 2026)]);
+        deepEq(C.extractUserId(G.parseRequest(body)), { userId: 1234567, source: 'method' }, m);
+      });
+      const pref = writer().call('setUserPreference', [G.STRING_SIG, 'I', G.STRING_SIG, G.STRING_SIG], ['NONCE', 1234567, 'weightInKG', '81.4']);
+      deepEq(C.extractUserId(G.parseRequest(pref)), { userId: 1234567, source: 'method' });
+      const events = [];
+      const off = EV.on('rpc', (e) => { events.push(e); });
+      try {
+        C.handleMessage(rpcMsg(pref, FX.voidResponse));
+        C.handleMessage(rpcMsg(FX.getDayInfoTemplate));
+      } finally { off(); }
+      eq(events.length, 2);
+      eq(events[0].method, 'setUserPreference'); eq(events[0].ok, true);
+      deepEq(events[0].pref, { key: 'weightInKG', value: '81.4' });
+      eq(events[1].pref, undefined, 'only setUserPreference carries pref');
+      eq(C.state.userId, 1234567); eq(C.state.userIdSource, 'method');
+      const logged = C.state.log.filter((x) => x.kind === 'rpc' && x.method === 'setUserPreference');
+      eq(logged.length, 1); eq(logged[0].prefKey, 'weightInKG');
+      ok(JSON.stringify(C.state.log).indexOf('81.4') < 0 && JSON.stringify(C.snapshot()).indexOf('81.4') < 0, 'the value is never logged');
+    });
     T.it('(c) authenticate response -> userId, session key as nonce, groups from the DG map', () => {
       C.reset();
       const flags = [true, true, false, true, true];

@@ -21,6 +21,10 @@
  *   rotated by the app's reauthenticate mid-batch is used (SPEC 2.1).
  * CMA.engineRpc.undo(session, lastBatch, opts, progressCb)
  *   → { removed:[ids], failed:[{id, error}] }   (removeServing per id, sequential)
+ * After a run that added entries (or an undo that removed some) both emit CMA.events 'diary-write'
+ *   {method:'updateDiary'|'removeServing', ok:true, days:['YYYY-MM-DD'], count}: these writes go out with fetch,
+ *   which the page hook never relays, so the Adaptive TDEE data layer (src/tdee/tdee-data.js) learns from this
+ *   event which diary day to read again. Method, day and count only - no ids, no foods.
  * CMA.engineRpc.refreshDiary(opts) → { method:'nav'|'hash'|'none', verified:boolean, hashFlip?:true }
  * CMA.engineRpc.loadLastBatch() → Promise<lastBatch|null>   (from chrome.storage.local)
  */
@@ -45,6 +49,22 @@ window.CMA = window.CMA || {};
     return String(m).replace(/[A-Za-z0-9+\/=_-]{32,}/g, '[redacted]');
   }
   function opt(opts, key, dflt) { return opts && opts[key] != null ? opts[key] : dflt; }
+  /** 'YYYY-MM-DD' of a {day, month, year} diary date (built from its parts, never from a UTC timestamp), else null. */
+  function isoOfDate(d) {
+    if (!d || typeof d !== 'object') return null;
+    const day = Number(d.day), month = Number(d.month), year = Number(d.year);
+    if (!Number.isInteger(day) || !Number.isInteger(month) || !Number.isInteger(year) || day < 1 || day > 31 || month < 1 || month > 12 || year < 1) return null;
+    return String(year).padStart(4, '0') + '-' + (month < 10 ? '0' : '') + month + '-' + (day < 10 ? '0' : '') + day;
+  }
+  /** CMA.events 'diary-write' (see the header): tells the TDEE data layer which day the extension's own writes changed. */
+  function announceWrite(method, date, count) {
+    try {
+      const ev = CMA.events;
+      if (!ev || typeof ev.emit !== 'function' || !(count > 0)) return;
+      const iso = isoOfDate(date);
+      ev.emit('diary-write', { method, ok: true, days: iso ? [iso] : [], count });
+    } catch (e) { /* a listener never breaks the batch */ }
+  }
   function rowsOf(plan) {
     if (Array.isArray(plan)) return plan;
     return plan && Array.isArray(plan.rows) ? plan.rows : [];
@@ -236,6 +256,8 @@ window.CMA = window.CMA || {};
         result.refresh = { method: 'none', verified: false, error: errMessage(e) };
       }
     }
+    // rows counted as added after an unreadable //OK are in the diary too, so they count
+    announceWrite('updateDiary', date, result.added.length);
     safeCb(progressCb, { phase: 'done', result });
     return result;
   }
@@ -280,6 +302,7 @@ window.CMA = window.CMA || {};
       try { result.refresh = await refreshDiary(Object.assign({ date: batch && batch.date }, o.refreshOpts || {})); }
       catch (e) { result.refresh = { method: 'none', verified: false, error: errMessage(e) }; }
     }
+    announceWrite('removeServing', batch && batch.date, result.removed.length);
     safeCb(progressCb, { phase: 'done', result });
     return result;
   }

@@ -9,11 +9,13 @@ Writes  dist/multi-add-for-cronometer-<version>.zip  (version = manifest.json "v
     popup.html
     LICENSE
     icons/*.png
-    src/**/*.js       (the content scripts and the generated registry - .js only, and every one of them must
-                       be listed in the manifest, see below)
+    src/**/*.js       (the content scripts, the generated registry and the generated Adaptive TDEE engine
+                       wrapper src/tdee/adaptive-tdee.js - .js only, and every one of them must be listed in the
+                       manifest, see below)
 
-and nothing else: tests/, tools/, SPEC.md, README.md, PRIVACY.md, STORE-LISTING.md, dist/, .gitignore, .git/,
-__pycache__/, editor droppings (.bak, .orig, ~), a stray registry backup (gwt-registry.js.old) or a scratch .py
+and nothing else: tests/, tools/, vendor/ (the pristine upstream TDEE engine, its .mjs node tests, simulator,
+benchmark and spec), SPEC.md, README.md, PRIVACY.md, STORE-LISTING.md, dist/, .gitignore, .git/, __pycache__/,
+editor droppings (.bak, .orig, ~), a stray registry backup (gwt-registry.js.old), an .mjs module or a scratch .py
 under src/ never make it into the package.
 
 The archive is reproducible: members are added in sorted order with a fixed timestamp and fixed permission bits
@@ -51,6 +53,7 @@ COMPRESS_LEVEL = 9
 SKIP_DIR_NAMES = {'__pycache__', '.git', 'node_modules'}
 SKIP_FILE_NAMES = {'.DS_Store', 'Thumbs.db', '.gitignore'}
 SKIP_FILE_SUFFIXES = ('.pyc', '.swp', '.orig', '.rej', '~')
+DEV_DIRS = ('vendor', 'tests', 'tools', 'dist', 'store-assets')   # never packaged (the allow-list excludes them too)
 
 # Fixed metadata for reproducible archives. ZIP timestamps start at 1980-01-01; the date itself is irrelevant to
 # Chrome, it only needs to be constant between builds.
@@ -188,6 +191,13 @@ def verify_zip(path, problems):
         for must in ROOT_FILES:
             if must not in names:
                 fail('required file missing from archive: %s' % must)
+        # stated separately from the allow-list: the development trees and ES modules never ship (the upstream TDEE
+        # engine goes in only as its generated classic-script wrapper src/tdee/adaptive-tdee.js)
+        dev = [n for n in names if n.split('/')[0] in DEV_DIRS or n.lower().endswith('.mjs')]
+        if dev:
+            fail('development files in the archive (%s or an .mjs module): %s' % (', '.join(d + '/' for d in DEV_DIRS), ', '.join(dev)))
+        else:
+            good('no %s file and no .mjs module in the archive' % ', '.join(d + '/' for d in DEV_DIRS))
 
         # -- manifest ----------------------------------------------------------------------------------
         if 'manifest.json' not in names:

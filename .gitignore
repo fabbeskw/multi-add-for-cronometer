@@ -21,9 +21,6 @@ tools/_*.py
 store-assets/*.png
 store-assets/dry-run/
 
-# Upstream Adaptive TDEE engine files, kept pristine until the TDEE feature that wraps them is committed with it.
-vendor/
-
 # editor / OS droppings
 *.bak
 *.orig

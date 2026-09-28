@@ -796,6 +796,14 @@ window.CMA = window.CMA || {};
     FOOD_SOURCE: 'com.cronometer.shared.foods.FoodSource', SEARCH_HIT: 'com.cronometer.shared.foods.models.SearchHit',
     USER: 'com.cronometer.shared.user.models.User', USER_PREFERENCES: 'com.cronometer.shared.user.models.UserPreferences',
     NOT_LOGGED_IN: 'com.cronometer.shared.user.exceptions.NotLoggedInException',
+    // Adaptive TDEE reads (rpc.getBiometrics / getCalendarInfo / getCaloriesConsumedAndBurned, research/tdee-critic.md):
+    // optional types - registry-builder.js checks them as the 'tdee' feature, never as part of the core bar.
+    DAY_QUERY_TYPE: 'com.cronometer.shared.entries.DayQueryType',
+    DATA_POINT: 'com.cronometer.shared.charts.models.DataPoint',
+    DATA_POINT_ARRAY: '[Lcom.cronometer.shared.charts.models.DataPoint;',
+    CALENDAR_INFO: 'com.cronometer.shared.entries.models.CalendarInfo',
+    CALENDAR_DAY_INFO: 'com.cronometer.shared.entries.models.CalendarDayInfo',
+    DOUBLE_ARRAY: '[D', DOUBLE_ARRAY_2D: '[[D',
   };
   const SIG = {};
   Object.keys(BASES).forEach(function (k) {

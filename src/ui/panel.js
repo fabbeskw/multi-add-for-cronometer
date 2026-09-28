@@ -2,7 +2,9 @@
  *
  *   CMA.panel = { mount(), toggle(), open(view), close(), setState(partial), isOpen(), ... }
  *
- * Views: Input | Preview | Results | Diagnostics | Settings.
+ * Views: Input | Preview | Results | Diagnostics | Settings, plus views other scripts add with
+ * CMA.panel.registerView({id, label, order, render(ctx), onEvent, diagnostics, unmount, css}) — the TDEE view
+ * (src/ui/tdee-view.js) is one; see "View registry" below.
  * Mounted by content.js (which also maps Alt+Shift+M → CMA.panel.toggle()).
  *
  * Wiring (all optional at load time, resolved lazily so load order / test stubs do not matter):
@@ -48,8 +50,13 @@ window.CMA = window.CMA || {};
   const SETTINGS_KEY = 'cmaSettings';
   const INPUT_KEY = 'cmaLastInput';
   const DEFAULT_SETTINGS = Object.freeze({ engine: 'rpc', delayMs: 250, rememberInput: true });
-  const VIEWS = ['input', 'preview', 'results', 'diagnostics', 'settings'];
+  // Built-in views. Other scripts add views through CMA.panel.registerView (see "View registry" below); the tab
+  // order is by `order` (built-ins 10..50, a registered view defaults to 35 = just before Diagnostics).
+  const BUILTIN_VIEWS = ['input', 'preview', 'results', 'diagnostics', 'settings'];
   const VIEW_LABELS = { input: 'Input', preview: 'Preview', results: 'Results', diagnostics: 'Diagnostics', settings: 'Settings' };
+  const BUILTIN_ORDER = { input: 10, preview: 20, results: 30, diagnostics: 40, settings: 50 };
+  const DEFAULT_VIEW_ORDER = 35;
+  const VIEW_ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
   const MAX_LOG = 200;
   const LOG_TAIL = 50;
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -107,6 +114,9 @@ window.CMA = window.CMA || {};
   let toolbarTimer = null;
   let inputSaveTimer = null;
   let drag = null;
+  let renderedView = null;       // the view whose content els.body holds (a registered view is told 'hidden' when it changes)
+  const customViews = new Map(); // id → {id, label, order, seq, def, css, styleEl}: views added by registerView
+  let viewSeq = 0;
 
   // ---------------------------------------------------------------------------
   // Small helpers
@@ -373,6 +383,8 @@ window.CMA = window.CMA || {};
     // window/document and still fire.
     for (const t of ['keydown', 'keyup', 'keypress']) wrap.addEventListener(t, (e) => e.stopPropagation());
     els = { wrap };
+    renderedView = null;
+    for (const v of customViews.values()) { v.styleEl = null; injectViewCss(v); }
     els.launcher = el('button', { type: 'button', class: 'cma-launcher', title: 'Multi-Add for Cronometer (Alt+Shift+M)', on: { click: () => toggle() } }, 'Multi-add');
     wrap.appendChild(els.launcher);
     els.panel = buildShell();
@@ -395,6 +407,9 @@ window.CMA = window.CMA || {};
     if (unsubState) { try { unsubState(); } catch (e) { /* ignore */ } unsubState = null; }
     unsubRegistry.splice(0).forEach(off => { try { off(); } catch (e) { /* ignore */ } });
     stopToolbarWatch();
+    // registered views stay registered (a remount shows their tabs again) but drop their listeners/timers now
+    for (const v of customViews.values()) { callView(v, 'unmount'); v.styleEl = null; }
+    renderedView = null;
     document.querySelectorAll('.' + MULTI_BUTTON_CLASS).forEach(b => b.remove());
     if (host) host.remove();
     host = null; root = null; els = {};
@@ -403,7 +418,7 @@ window.CMA = window.CMA || {};
   function isOpen() { return state.mounted && state.open; }
   function open(view) {
     mount();
-    if (view && VIEWS.indexOf(view) >= 0) state.view = view;
+    if (view && isView(view)) state.view = view;
     state.open = true;
     els.panel.hidden = false;
     renderView();
@@ -413,13 +428,17 @@ window.CMA = window.CMA || {};
     if (!state.mounted) return;
     state.open = false;
     els.panel.hidden = true;
+    // a registered view stops its live updates while the panel is hidden; open() renders it again
+    const cv = customViews.get(renderedView);
+    renderedView = null;
+    if (cv) callView(cv, 'onEvent', 'hidden', null);
   }
   function toggle() { if (isOpen()) close(); else open(); }
   function setState(partial) {
     if (partial && typeof partial === 'object') {
       for (const k of Object.keys(partial)) {
         if (k === 'settings') state.settings = normSettings(Object.assign({}, state.settings, partial.settings));
-        else if (k === 'view') { if (VIEWS.indexOf(partial.view) >= 0) state.view = partial.view; }
+        else if (k === 'view') { if (isView(partial.view)) state.view = partial.view; }
         else if (k === 'log' || k === 'mounted') continue;
         else state[k] = partial[k];
       }
@@ -457,6 +476,7 @@ window.CMA = window.CMA || {};
     if (state.view === 'input') refreshInputMeta();
     else if (state.view === 'preview') updateAddButton();
     else if (state.view === 'diagnostics') refreshRegistryStatus();
+    else forwardViewEvent('state', capState());
   }
   // 'registry' (another registry installed) and 'registry-progress' (a rebuild step) come from
   // CMA.registryStore (SPEC §3.5); capture re-emits 'state' for the former, the progress events only
@@ -465,19 +485,20 @@ window.CMA = window.CMA || {};
   function subscribeRegistry() {
     const ev = CMA.events;
     if (!ev || typeof ev.on !== 'function' || unsubRegistry.length) return;
-    const fn = () => onRegistryEvent();
     for (const name of ['registry', 'registry-progress']) {
+      const fn = (payload) => onRegistryEvent(name, payload);
       try {
         const off = ev.on(name, fn);
         unsubRegistry.push(typeof off === 'function' ? off : () => { try { ev.off(name, fn); } catch (e) { /* ignore */ } });
       } catch (e) { log('events subscribe failed (' + name + '): ' + errText(e)); }
     }
   }
-  function onRegistryEvent() {
+  function onRegistryEvent(name, payload) {
     if (!state.mounted || !state.open) return;
     if (state.view === 'input') refreshInputMeta();
     else if (state.view === 'preview') updateAddButton();
     else if (state.view === 'diagnostics') refreshRegistryStatus();
+    else forwardViewEvent(name, payload);
   }
   const BATCH_TTL_MS = 24 * 3600 * 1000;
   async function loadStoredBatch() {
@@ -580,11 +601,8 @@ window.CMA = window.CMA || {};
   // ---------------------------------------------------------------------------
   function buildShell() {
     const nav = el('div', { class: 'cma-nav', role: 'tablist' });
-    els.tabs = {};
-    for (const v of VIEWS) {
-      els.tabs[v] = el('button', { type: 'button', class: 'cma-tab', role: 'tab', data: { view: v }, on: { click: () => switchView(v) } }, VIEW_LABELS[v]);
-      nav.appendChild(els.tabs[v]);
-    }
+    els.nav = nav;
+    buildTabs();
     const header = el('div', { class: 'cma-header' },
       el('span', { class: 'cma-title' }, 'Multi-add'),
       nav,
@@ -612,7 +630,7 @@ window.CMA = window.CMA || {};
     ev.preventDefault();
   }
   function switchView(v) {
-    if (VIEWS.indexOf(v) < 0) return;
+    if (!isView(v)) return;
     state.view = v;
     state.notice = null;
     renderView();
@@ -628,12 +646,16 @@ window.CMA = window.CMA || {};
   }
   function renderView() {
     if (!state.mounted) return;
-    for (const v of VIEWS) els.tabs[v].setAttribute('aria-selected', v === state.view ? 'true' : 'false');
-    els.tabs.preview.disabled = !state.plan && !state.building;
-    els.tabs.results.disabled = !state.result && !state.running;
+    if (!isView(state.view)) state.view = 'input';
+    syncTabs();
     clear(els.body); clear(els.footer);
     els.textarea = null;
     renderNotice();
+    const prev = renderedView !== state.view ? customViews.get(renderedView) : null;
+    renderedView = state.view;
+    if (prev) callView(prev, 'onEvent', 'hidden', null);   // its DOM was just cleared: stop its live updates
+    const cv = customViews.get(state.view);
+    if (cv) { renderCustomView(cv); return; }
     switch (state.view) {
       case 'input': renderInput(); break;
       case 'preview': renderPreview(); break;
@@ -642,6 +664,129 @@ window.CMA = window.CMA || {};
       case 'settings': renderSettings(); break;
       default: state.view = 'input'; renderInput();
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // View registry. CMA.panel.registerView({id, label, order, render(ctx), onEvent(name, payload), diagnostics(),
+  // unmount(), css}) → unregister(). A registered view (src/ui/tdee-view.js is the first) gets
+  //   * a tab, sorted by `order` (built-ins 10 input … 50 settings; default 35 = just before Diagnostics);
+  //   * its `css` as one extra <style> in the closed shadow root (next to CMA.panelCss);
+  //   * render(ctx) with an empty ctx.body / ctx.footer each time the panel renders it (open, tab click, setState);
+  //   * onEvent('state' | 'registry' | 'registry-progress', payload) while it is the open view — the same signals
+  //     the built-in views follow — and onEvent('hidden') when its content is cleared (another view, close);
+  //   * unmount() when the panel unmounts or the view is unregistered (drop listeners and timers there);
+  //   * diagnostics() in the dump under views.<id>: the view decides what is safe to show (the dump is pasted
+  //     into bug reports, so no health data).
+  // ctx carries the panel's helpers (DOM, redaction, capture/readiness, decoder state, storage, formatting), so a
+  // view never needs panel internals. Registering after mount rebuilds the tabs; a script that loads before
+  // panel.js can queue its definition in CMA.panelViewQueue (drained once below, at load).
+  // ---------------------------------------------------------------------------
+  function isView(id) { return typeof id === 'string' && (BUILTIN_VIEWS.indexOf(id) >= 0 || customViews.has(id)); }
+  function viewIds() {
+    const all = BUILTIN_VIEWS.map((id, i) => ({ id, order: BUILTIN_ORDER[id], seq: i - BUILTIN_VIEWS.length }))
+      .concat(Array.from(customViews.values(), v => ({ id: v.id, order: v.order, seq: v.seq })));
+    all.sort((a, b) => a.order - b.order || a.seq - b.seq);
+    return all.map(v => v.id);
+  }
+  function viewLabel(id) { const v = customViews.get(id); return v ? v.label : (VIEW_LABELS[id] || id); }
+  function buildTabs() {
+    if (!els.nav) return;
+    clear(els.nav);
+    els.tabs = {};
+    for (const v of viewIds()) {
+      els.tabs[v] = el('button', { type: 'button', class: 'cma-tab', role: 'tab', data: { view: v }, on: { click: () => switchView(v) } }, viewLabel(v));
+      els.nav.appendChild(els.tabs[v]);
+    }
+    syncTabs();
+  }
+  function syncTabs() {
+    if (!els.tabs) return;
+    for (const v of Object.keys(els.tabs)) els.tabs[v].setAttribute('aria-selected', v === state.view ? 'true' : 'false');
+    if (els.tabs.preview) els.tabs.preview.disabled = !state.plan && !state.building;
+    if (els.tabs.results) els.tabs.results.disabled = !state.result && !state.running;
+  }
+  /** Call an optional method of a registered view; a throwing view never breaks the panel (it is logged). */
+  function callView(v, method) {
+    const fn = v && v.def ? v.def[method] : null;
+    if (typeof fn !== 'function') return undefined;
+    try { return fn.apply(v.def, Array.prototype.slice.call(arguments, 2)); }
+    catch (e) { log('view ' + v.id + ' ' + method + ' failed: ' + errText(e)); return undefined; }
+  }
+  function injectViewCss(v) {
+    if (!root || !v.css || (v.styleEl && v.styleEl.isConnected)) return;
+    v.styleEl = el('style', { data: { view: v.id } });
+    v.styleEl.textContent = v.css;
+    root.insertBefore(v.styleEl, els.wrap && els.wrap.parentNode === root ? els.wrap : null);
+  }
+  function registerView(def) {
+    if (!def || typeof def !== 'object') throw new TypeError('registerView: a view definition object is required');
+    const id = def.id;
+    if (typeof id !== 'string' || !VIEW_ID_RE.test(id)) throw new TypeError('registerView: id must be a short lower-case word, got ' + JSON.stringify(id));
+    if (BUILTIN_VIEWS.indexOf(id) >= 0) throw new Error('registerView: "' + id + '" is a built-in view');
+    if (typeof def.render !== 'function') throw new TypeError('registerView: render(ctx) is required for "' + id + '"');
+    const prev = customViews.get(id);
+    const keepSelected = !!prev && state.view === id;
+    if (prev) removeView(prev, true);
+    const v = {
+      id, label: typeof def.label === 'string' && def.label ? def.label : id,
+      order: typeof def.order === 'number' && isFinite(def.order) ? def.order : DEFAULT_VIEW_ORDER,
+      seq: ++viewSeq, def, css: typeof def.css === 'string' ? def.css : '', styleEl: null
+    };
+    customViews.set(id, v);
+    if (keepSelected) state.view = id;
+    if (state.mounted) {
+      injectViewCss(v);
+      buildTabs();
+      if (state.view === id) renderView();
+    }
+    log('view registered: ' + id);
+    return function unregister() { if (customViews.get(id) === v) removeView(v, false); };
+  }
+  function removeView(v, replacing) {
+    customViews.delete(v.id);
+    callView(v, 'unmount');
+    if (v.styleEl) { v.styleEl.remove(); v.styleEl = null; }
+    const wasShown = renderedView === v.id;
+    if (wasShown) renderedView = null;
+    if (replacing) return;
+    if (state.view === v.id) state.view = 'input';
+    if (state.mounted) { buildTabs(); if (wasShown) renderView(); }
+    log('view removed: ' + v.id);
+  }
+  /** The helpers a registered view renders with (see the block comment above). */
+  function viewCtx(v) {
+    return {
+      id: v.id, body: els.body, footer: els.footer,
+      el, btn, option, clear, append,
+      notify, log: (msg) => log(v.id + ': ' + msg), redact, errText,
+      capState, sessionFrom, readiness,
+      registryMismatch: () => !!capState().registryMismatch, rebuildInProgress, waitForRebuild, registryStatus,
+      todayDate, formatDate, formatAgo, isoDate, parseIsoDate,
+      copyText, storageGet, storageSet,
+      switchView, renderView,
+      isActive: () => state.mounted && state.open && state.view === v.id && renderedView === v.id && customViews.get(v.id) === v
+    };
+  }
+  function renderCustomView(v) {
+    try { v.def.render(viewCtx(v)); }
+    catch (e) {
+      log('view ' + v.id + ' render failed: ' + errText(e));
+      clear(els.body); clear(els.footer);
+      els.body.appendChild(el('div', { class: 'cma-banner' }, 'This view could not be shown: ' + errText(e)));
+    }
+  }
+  function forwardViewEvent(name, payload) {
+    const v = customViews.get(state.view);
+    if (v && renderedView === v.id) callView(v, 'onEvent', name, payload);
+  }
+  function viewDiagnostics() {
+    const out = {};
+    for (const v of customViews.values()) {
+      if (typeof v.def.diagnostics !== 'function') { out[v.id] = null; continue; }
+      try { const d = v.def.diagnostics(); out[v.id] = d === undefined ? null : d; }
+      catch (e) { out[v.id] = { error: errText(e) }; }
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------------------
@@ -1500,6 +1645,8 @@ window.CMA = window.CMA || {};
       captureLog: capLog,
       registry: reg,
       panel: { view: state.view, settings: Object.assign({}, state.settings), defaultGroupId: state.defaultGroupId, dateOverride: state.dateOverride, plan, result, lastBatch: (CMA.engineRpc && CMA.engineRpc.lastBatch) || state.storedBatch || null, lastRefresh: (CMA.engineRpc && CMA.engineRpc.lastRefresh) || null },
+      // registered views (registerView): each one's own diagnostics(), which must hold no health data
+      views: viewDiagnostics(),
       panelLog: state.log.slice(-LOG_TAIL)
     };
   }
@@ -1587,7 +1734,7 @@ window.CMA = window.CMA || {};
   }
   function renderDiagnostics() {
     const text = diagnosticsText();
-    els.body.appendChild(el('div', { class: 'cma-muted cma-small', style: 'margin-bottom:6px' }, 'Paste this into a bug report. It contains no session token (nonce shown as present/missing) and no cookies; it does name your account id, your diary group names, the page address and your browser, and the panel log at the end includes the food names you typed and searched — remove what you do not want to share.'));
+    els.body.appendChild(el('div', { class: 'cma-muted cma-small', style: 'margin-bottom:6px' }, 'Paste this into a bug report. It contains no session token (nonce shown as present/missing) and no cookies; it does name your account id, your diary group names, the page address and your browser, and the panel log at the end includes the food names you typed and searched — remove what you do not want to share. The TDEE part (views.tdee) holds counts, date ranges and settings flags only: no weight, intake, expenditure or target.'));
     els.registryStatus = el('div', { class: 'cma-registry-status' });
     els.body.appendChild(els.registryStatus);
     refreshRegistryStatus();
@@ -1651,8 +1798,15 @@ window.CMA = window.CMA || {};
     setInput: (text) => { state.input = String(text == null ? '' : text); if (els.textarea) els.textarea.value = state.input; updateFindButton(); saveInputSoon(); },
     getInput: () => state.input,
     ensureToolbarButton,
+    registerView,
+    views: () => Array.from(customViews.values(), v => ({ id: v.id, label: v.label, order: v.order })),
     get host() { return host; },
     get root() { return root; },
-    VIEWS, DEFAULT_SETTINGS, SETTINGS_KEY, INPUT_KEY, HOST_ID
+    get VIEWS() { return viewIds(); },
+    DEFAULT_SETTINGS, SETTINGS_KEY, INPUT_KEY, HOST_ID
   };
+  // view definitions queued by a script that loaded before panel.js (registerView's fallback, see above)
+  if (Array.isArray(CMA.panelViewQueue)) {
+    CMA.panelViewQueue.splice(0).forEach(def => { try { registerView(def); } catch (e) { log('queued view rejected: ' + errText(e)); } });
+  }
 })();

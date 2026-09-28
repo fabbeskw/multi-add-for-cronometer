@@ -278,6 +278,31 @@
       delete r4.types['com.cronometer.shared.entries.models.Serving/2553599101'];
       ok(RB.validate(r4).ok, RB.validate(r4).problems.join(' | '));
     });
+    T.it('optional feature layouts (Adaptive TDEE) are reported under optional.tdee and never fail the core bar', () => {
+      const v = RB.validate(REG);
+      ok(v.optional && v.optional.tdee && v.optional.tdee.ok, JSON.stringify(v.optional));
+      const r = clone(REG);
+      r.types['com.cronometer.shared.entries.models.CalendarDayInfo/3738020097'].f.push('z');   // reshaped by a deploy
+      delete r.types['[[D/158574334'];                                                          // dropped by a deploy
+      r.stats.types--;
+      r.serviceMethods = r.serviceMethods.filter((m) => m !== 'getBiometrics');
+      const v2 = RB.validate(r);
+      ok(v2.ok, 'the core bar still passes: ' + v2.problems.join(' | '));
+      T.eq(v2.optional.tdee.ok, false);
+      const p = v2.optional.tdee.problems.join(' | ');
+      ok(/CalendarDayInfo\/3738020097 layout zoooozzzzoz \(expected zoooozzzzo\)/.test(p), p);
+      ok(/\[\[D is missing from the registry/.test(p), p);
+      ok(/getBiometrics not found/.test(p), p);
+      T.deepEq(RB.checkOptional(r, 'tdee'), v2.optional.tdee);
+      const r3 = clone(REG);   // a CRC change alone passes; two keys with one base name are ambiguous
+      r3.types['com.cronometer.shared.charts.models.DataPoint/1'] = r3.types['com.cronometer.shared.charts.models.DataPoint/3560061380'];
+      delete r3.types['com.cronometer.shared.charts.models.DataPoint/3560061380'];
+      ok(RB.checkOptional(r3, 'tdee').ok, RB.checkOptional(r3, 'tdee').problems.join(' | '));
+      r3.types['com.cronometer.shared.charts.models.DataPoint/2'] = { k: 'class', f: ['o', 'o', 'd'] };
+      ok(RB.checkOptional(r3, 'tdee').problems.some((x) => /DataPoint is ambiguous/.test(x)));
+      ok(!RB.checkOptional(REG, 'no-such-feature').ok);
+      ok(!RB.checkOptional(null, 'tdee').ok);
+    });
     T.it('User must keep 42 fields with idx 19 int and idx 33 string', () => {
       const r = clone(REG);
       r.types['com.cronometer.shared.user.models.User/91151502'].f[33] = 'o';

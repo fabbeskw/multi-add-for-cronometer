@@ -10,7 +10,11 @@ Checks
   * host_permissions and every content_scripts match target https://cronometer.com/* only (SPEC 0);
   * the MAIN-world entry is exactly src/hook-main.js at document_start;
   * the ISOLATED-world list is exactly what tests/load-all.html loads, in the same order (so the test page
-    cannot drift from the manifest), and every listed script starts with the CMA namespace guard.
+    cannot drift from the manifest), and every listed script starts with the CMA namespace guard;
+  * every content script lives under src/ as a .js file (never vendor/ - the pristine upstream Adaptive TDEE engine
+    is an ES module only tools/gen_tdee.py reads - and never a test-only script such as tests/tdee-sim.js), and the
+    load-order pairs in ORDER_RULES hold (the generated TDEE engine wrapper before its data layer, the TDEE view
+    after panel.js; SPEC 12).
 Exit status 0 when everything passes, 1 otherwise (each failure is printed).
 """
 import json
@@ -23,6 +27,12 @@ ALLOWED_MATCH = 'https://cronometer.com/*'
 KNOWN_KEYS = {'manifest_version', 'name', 'description', 'version', 'minimum_chrome_version', 'permissions',
               'host_permissions', 'icons', 'action', 'content_scripts', 'web_accessible_resources'}
 NAMESPACE_GUARD = 'window.CMA = window.CMA || {};'
+# (earlier, later): when both scripts are listed, `earlier` must load first
+ORDER_RULES = (
+    ('src/lib/gwt-registry.js', 'src/lib/gwt-stream.js'),      # the stream resolves signatures from the registry
+    ('src/tdee/adaptive-tdee.js', 'src/tdee/tdee-data.js'),    # CMA.tdee (engine) before CMA.tdeeData (data layer)
+    ('src/ui/panel.js', 'src/ui/tdee-view.js'),                # the TDEE view registers itself with CMA.panel at load
+)
 
 
 def png_size(path):
@@ -156,8 +166,19 @@ def main(argv):
         iso_js = iso.get('js', [])
         if not iso_js or iso_js[-1] != 'src/content.js':
             fail('the ISOLATED list must end with src/content.js (it wires everything), got %r' % iso_js[-1:])
-        if 'src/lib/gwt-registry.js' in iso_js and 'src/lib/gwt-stream.js' in iso_js and iso_js.index('src/lib/gwt-registry.js') > iso_js.index('src/lib/gwt-stream.js'):
-            fail('src/lib/gwt-registry.js must load before src/lib/gwt-stream.js')
+        order_ok = True
+        for earlier, later in ORDER_RULES:
+            if earlier in iso_js and later in iso_js and iso_js.index(earlier) > iso_js.index(later):
+                order_ok = False
+                fail('%s must load before %s' % (earlier, later))
+        if order_ok:
+            good('load-order rules hold (%s)' % '; '.join('%s < %s' % (a.split('/')[-1], b.split('/')[-1])
+                                                          for a, b in ORDER_RULES if a in iso_js and b in iso_js))
+        outside = [f for f in (hook.get('js') or []) + iso_js if not f.startswith('src/') or not f.endswith('.js')]
+        if outside:
+            fail('content scripts must be .js files under src/ (never vendor/ or tests/), got %s' % ', '.join(outside))
+        else:
+            good('every content script is a .js file under src/ (nothing from vendor/ or tests/)')
         page = os.path.join(root, 'tests', 'load-all.html')
         if os.path.isfile(page):
             page_scripts = scripts_of_test_page(page)

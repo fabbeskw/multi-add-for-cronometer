@@ -1,0 +1,142 @@
+<!doctype html><html><head><meta charset="utf-8"><title>tdee evaluate</title>
+<style>body { font: 13px/1.4 system-ui, sans-serif; margin: 16px; } pre { font: 12px/1.4 ui-monospace, Consolas, monospace; }</style>
+</head><body>
+<h1>Adaptive TDEE: estimator benchmark (manual)</h1>
+<p>The logic of <code>vendor/adaptive-tdee/evaluate.mjs</code> run in the browser against the generated engine
+(<code>src/tdee/adaptive-tdee.js</code>) and the synthetic people of <code>tests/tdee-sim.js</code>: mean absolute error
+(kcal/day, from day 28 on, 10 seeds) of the Kalman model and a simpler window estimator per scenario, plus the week-to-week
+(<code>C_p95wk</code>) and day-to-day (<code>C_p95day</code>) p95 jitter on steady maintenance and how much of a +250 kcal
+activity step is still missing 2&ndash;4 weeks later (<code>S_missing2to4wk</code>). Manual page: <code>tests/run.sh</code>
+skips <code>mock-*.html</code> and this page prints no verdict line. The first and last rows should equal the tables of
+<code>ADAPTIVE_TDEE_SPEC.md</code> &sect;7 (the default-engine figures are also asserted by <code>tests/tdee.html</code>).</p>
+<pre id="results">running&hellip;</pre>
+<script src="../src/tdee/adaptive-tdee.js"></script>
+<script src="tdee-sim.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { runExpenditureModel } = CMA.tdee;
+  const { makePerson } = CMA.tdeeSim;
+
+  // ---- ported from vendor/adaptive-tdee/evaluate.mjs (exports dropped, node:url main block replaced by the
+  // table printer below); keep it in step with that file when the vendor copy is updated ----
+  const SEEDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+  const SCENARIOS = {
+    A_fullStory: {},
+    B_priorHigh: { cronoBias: 500, vacation: null },
+    C_steady: { plan: () => 2700, activityStep: null, vacation: null, glycogenKg: 0 },
+    D_halfFoodMissing: { missIntake: 0.5, vacation: null },
+    E_weigh2xWeek: { missWeight: 5 / 7, vacation: null },
+    F_bulk: { plan: (t) => (t < 28 ? 2700 : 3000), cronoBias: -300, activityStep: null, vacation: null, glycogenKg: -0.9 },
+    S_step250: { plan: () => 2700, activityStep: { day: 60, kcal: 250 }, vacation: null, glycogenKg: 0, days: 140, cronoBias: 0 },
+  };
+
+  // ---- estimators: each returns an array of E aligned to recs (null before it starts) ----
+  const methods = {
+    kalman: (cfg = {}) => (recs, prior) => {
+      const res = runExpenditureModel(recs, { initialExpenditureKcal: prior, config: cfg });
+      const map = new Map(res.days.map((d) => [d.date, d.expenditureKcal]));
+      return recs.map((r) => map.get(r.date) ?? null);
+    },
+    // 10% EMA trend weight, 14-day window, 10% smoothing of the raw estimate (Hacker's-Diet style)
+    emaWindow: ({ win = 14, alpha = 0.1 } = {}) => (recs, prior) => {
+      let trend = null, E = prior; const trends = [];
+      return recs.map((d, i) => {
+        if (d.weightKg != null) trend = trend == null ? d.weightKg : trend + 0.1 * (d.weightKg - trend);
+        trends.push(trend);
+        if (i >= win && trends[i - win] != null) {
+          const intakes = recs.slice(i - win + 1, i + 1).map((x) => x.intakeKcal).filter((x) => x != null);
+          if (intakes.length >= win * 4 / 7) {
+            const raw = mean(intakes) - (trend - trends[i - win]) * 7700 / win;
+            E += alpha * (raw - E);
+          }
+        }
+        return E;
+      });
+    },
+    // Least-squares slope of raw scale weights over a trailing window + mean logged intake, then EMA.
+    regression: ({ win = 21, alpha = 0.15 } = {}) => (recs, prior) => {
+      let E = prior;
+      return recs.map((d, i) => {
+        if (i >= win - 1) {
+          const w = [], t = [], intakes = [];
+          for (let j = i - win + 1; j <= i; j++) {
+            if (recs[j].weightKg != null) { w.push(recs[j].weightKg); t.push(j); }
+            if (recs[j].intakeKcal != null && j < i) intakes.push(recs[j].intakeKcal);
+          }
+          if (w.length >= 3 * win / 7 && intakes.length >= (win - 1) * 4 / 7) {
+            const tb = mean(t), wb = mean(w);
+            let num = 0, den = 0; t.forEach((tt, k) => { num += (tt - tb) * (w[k] - wb); den += (tt - tb) ** 2; });
+            const raw = mean(intakes) - (num / den) * 7700;
+            E += alpha * (raw - E);
+          }
+        }
+        return E;
+      });
+    },
+  };
+
+  function mean(a) { return a.reduce((x, y) => x + y, 0) / a.length; }
+  function pct(a, p) { const s = [...a].sort((x, y) => x - y); return s[Math.floor(p * (s.length - 1))]; }
+
+  function evaluate(method) {
+    const out = {};
+    for (const [name, params] of Object.entries(SCENARIOS)) {
+      const maes = [], wk = [], dy = [], stepLate = [];
+      for (const seed of SEEDS) {
+        const { recs, truth } = makePerson({ seed, ...params });
+        const prior = Math.round(mean(recs.slice(0, 7).map((r) => r.burnedKcal)));
+        const E = method(recs, prior);
+        const errs = [];
+        E.forEach((e, i) => { if (i >= 28 && e != null) errs.push(Math.abs(e - truth[i].tdee)); });
+        maes.push(mean(errs));
+        for (let i = 35; i < E.length; i++) {
+          if (E[i] != null && E[i - 7] != null) wk.push(Math.abs(E[i] - E[i - 7]));
+          if (E[i] != null && E[i - 1] != null) dy.push(Math.abs(E[i] - E[i - 1]));
+        }
+        if (name === 'S_step250') {
+          // mean error 2–4 weeks after the step (how much of the change is still missing)
+          const e = []; for (let i = 74; i < 88; i++) e.push(truth[i].tdee - E[i]);
+          stepLate.push(mean(e));
+        }
+      }
+      out[name] = Math.round(mean(maes));
+      if (name === 'C_steady') { out.C_p95wk = Math.round(pct(wk, 0.95)); out.C_p95day = Math.round(pct(dy, 0.95)); }
+      if (name === 'S_step250') out.S_missing2to4wk = Math.round(mean(stepLate));
+    }
+    const keys = Object.keys(SCENARIOS).filter((k) => k !== 'C_steady' && k !== 'S_step250');
+    out.avgMAE = Math.round(mean(keys.map((k) => out[k]).concat([out.C_steady])));
+    return out;
+  }
+  // ---- end of the evaluate.mjs port ----
+
+  // console.table-like printer (textContent only)
+  function table(rows) {
+    const names = Object.keys(rows);
+    const cols = [];
+    for (const n of names) for (const k of Object.keys(rows[n])) if (cols.indexOf(k) < 0) cols.push(k);
+    const head = ['(index)'].concat(cols);
+    const body = names.map((n) => [n].concat(cols.map((c) => (rows[n][c] == null ? '' : String(rows[n][c])))));
+    const widths = head.map((h, i) => Math.max(h.length, ...body.map((r) => r[i].length)));
+    const line = (cells) => cells.map((c, i) => (i === 0 ? c.padEnd(widths[i]) : c.padStart(widths[i]))).join(' | ');
+    const rule = widths.map((w) => '-'.repeat(w)).join('-+-');
+    return [line(head), rule].concat(body.map(line)).join('\n');
+  }
+
+  setTimeout(() => {   // let the page paint "running..." first
+    const t0 = performance.now();
+    const rows = {
+      'kalman (default)': evaluate(methods.kalman()),
+      'kalman, glycogen term off': evaluate(methods.kalman({ glycogenKgPerKcal: 0 })),
+      'kalman, responsive (drift 25)': evaluate(methods.kalman({ expenditureDriftKcal: 25 })),
+      'simple: 10% EMA + 14-day window': evaluate(methods.emaWindow()),
+    };
+    const ms = performance.now() - t0;
+    document.getElementById('results').textContent =
+      table(rows) + '\n\nengine upstream sha256 ' + CMA.tdee.UPSTREAM_SHA256 + '\n' +
+      Object.keys(rows).length + ' estimators x ' + Object.keys(SCENARIOS).length + ' scenarios x ' + SEEDS.length +
+      ' seeds in ' + Math.round(ms) + ' ms';
+  }, 0);
+})();
+</script></body></html>

@@ -1292,6 +1292,41 @@
         try { delete window.chrome; } catch (e) { window.chrome = undefined; }
       }
     });
+
+    it("announces its writes as CMA.events 'diary-write' {method, ok, days, count} for the TDEE data layer (fetch is never relayed by the hook)", async () => {
+      const realEvents = CMA.events;
+      const seen = [];
+      CMA.events = { emit(name, payload) { seen.push({ name, payload: JSON.parse(JSON.stringify(payload)) }); return 1; } };
+      try {
+        const fake = makeFake();
+        const plan = await buildPlan(fake, 'banana\nbanana\nnothing here');
+        const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+        eq(res.added.length, 2);
+        deepEq(seen, [{ name: 'diary-write', payload: { method: 'updateDiary', ok: true, days: ['2026-03-04'], count: 2 } }], 'one event per batch, the plan date as ISO');
+        ok(JSON.stringify(seen).indexOf('SID') < 0 && JSON.stringify(seen).indexOf('NONCE') < 0, 'no ids, no session');
+        seen.length = 0;
+        fake.failScript.removeServing = [new CMA.errors.Network('offline')];
+        const u = await CMA.engineRpc.undo(SESSION, res.lastBatch, { delayMs: 1, refresh: false });
+        eq(u.removed.length, 1);
+        deepEq(seen, [{ name: 'diary-write', payload: { method: 'removeServing', ok: true, days: ['2026-03-04'], count: 1 } }]);
+        seen.length = 0;
+        // nothing written, nothing announced: a batch whose only row fails, an undo that removes nothing
+        const plan2 = await buildPlan(fake, 'banana');
+        fake.failScript.updateDiaryAdd = [new Error('nope')];
+        const res2 = await CMA.engineRpc.run(SESSION, plan2, ENGINE_OPTS);
+        eq(res2.added.length, 0); eq(res2.failed.length, 1);
+        fake.failScript.removeServing = [new CMA.errors.Network('offline')];
+        await CMA.engineRpc.undo(SESSION, CMA.engineRpc.lastBatch, { delayMs: 1, refresh: false });
+        deepEq(seen, [], 'no event without a write');
+        // a listener that throws never breaks the batch
+        CMA.events = { emit() { throw new Error('listener'); } };
+        const res3 = await CMA.engineRpc.run(SESSION, await buildPlan(fake, 'banana'), ENGINE_OPTS);
+        eq(res3.added.length, 1);
+      } finally {
+        CMA.events = realEvents;
+        await CMA.engineRpc.clearLastBatch();
+      }
+    });
   });
 
   describe('engineRpc.refreshDiary', () => {

@@ -7,6 +7,14 @@
  *   CMA.rpc.updateDiaryAdd(session, serving) -> {servingId (GWT base64 long string), serving, results}
  *   CMA.rpc.removeServing(session, servingIdStr) -> true
  *   CMA.rpc.searchFoods(session, query, {maxResults=50, includeRetired=false}) -> hits
+ *   Adaptive TDEE reads (read-only, src/tdee/tdee-data.js; evidence research/tdee-critic.md, tdee-intake-burned.md,
+ *   tdee-weight-history.md):
+ *   CMA.rpc.getFirstDayWithData(session)               -> 'YYYY-MM-DD' | null
+ *   CMA.rpc.getPreference(session, key)                 -> string | null
+ *   CMA.rpc.getBiometrics(session, {metricId=1, unitId=1, from=null, to=null}) -> [{date, time:{h,m,s}|null, value}]
+ *   CMA.rpc.getCaloriesConsumedAndBurned(session, firstIso, lastExclusiveIso) -> number[][] (one row per day)
+ *   CMA.rpc.getCalendarInfo(session, firstIso, lastIso) -> [{date, complete, loggedFood, loggedBiometric, ...}]
+ *   CMA.rpc.timeValue({h, m, s}|null), isoOfDay(day), dayFromIso(iso)
  *   CMA.errors = {Session, Throttled, Network, CmaError, isNetwork}   (guarded; plan.js defines the same block)
  *
  * Wire facts (research/live-app-report.md sections 2-5, research/serving-fields-resolved.md):
@@ -71,6 +79,23 @@ window.CMA = window.CMA || {};
     MEASURE: 'com.cronometer.shared.foods.models.Measure/',
     AECR: 'com.cronometer.shared.entries.changes.AddEntryChangeResult/',
     EECR: 'com.cronometer.shared.entries.changes.ErrorEntryChangeResult/',
+    DAY: 'com.cronometer.shared.entries.models.Day/',
+    TIME: 'com.cronometer.shared.entries.models.Time/',
+    DATA_POINT: 'com.cronometer.shared.charts.models.DataPoint/',
+    CALENDAR_INFO: 'com.cronometer.shared.entries.models.CalendarInfo/',
+    CALENDAR_DAY_INFO: 'com.cronometer.shared.entries.models.CalendarDayInfo/',
+  };
+  // Field indices of the Adaptive TDEE replies (registry layouts, build 0A1C16E1...; research/tdee-critic.md 1 + 5):
+  //   DataPoint/3560061380 = [o Day, o Time|null, d value]  (the deserializer casts f[1] to class 107 = Time)
+  //   CalendarDayInfo/3738020097 = [z complete, o Day, o fastFinish, o fastStart, o follicular, z loggedBiometric,
+  //     z loggedExercise, z loggedFood, z loggedNote, o luteal]
+  //   getCaloriesConsumedAndBurned row (double[12], MiniGraph PHc): [0] consumed, [1] exercise (NEGATIVE on the wire,
+  //     the card negates it and labels it 'Exercise'), [3] BMR, [4] TEF (added by the client only when the pref
+  //     use.thermic.effect.food is 'true'), [9] + [10] activity, [11] a server 'Net' (formula unknown); 2, 5-8 unread.
+  const TDEE_FIELDS = {
+    DATA_POINT: { DAY: 0, TIME: 1, VALUE: 2 },
+    CALENDAR_DAY_INFO: { COMPLETE: 0, DAY: 1, LOGGED_BIOMETRIC: 5, LOGGED_EXERCISE: 6, LOGGED_FOOD: 7, LOGGED_NOTE: 8 },
+    ENERGY_ROW: { CONSUMED: 0, EXERCISE: 1, BMR: 3, TEF: 4, ACTIVITY_A: 9, ACTIVITY_B: 10, NET: 11, LENGTH: 12 },
   };
   // Measure$Type ordinals ($pj in the bundle: Weight 0, Volume 1, Atomic 2, Recipe 3)
   const MEASURE_TYPE_NAMES = ['Weight', 'Volume', 'Atomic', 'Recipe'];
@@ -565,6 +590,206 @@ window.CMA = window.CMA || {};
   }
 
   // ------------------------------------------------------------------------------------------------
+  // Adaptive TDEE reads (src/tdee/tdee-data.js). Read-only RPCs the web app itself sends: the dashboard's Energy
+  // History card (getCaloriesConsumedAndBurned, `QHc`), the profile weight history (getBiometrics with null Days,
+  // `BiometricHistoryHandler`), the diary calendar (getCalendarInfo, `vsd`), the Nutrition Report's 'All Time'
+  // range (getFirstDayWithData) and the preference reader `bOf` (getPreference). Wire bodies are byte-equal to the
+  // templates in research/tdee-critic.md 5 (asserted by tests/tdee-data.html). A reply that is not the expected
+  // shape throws a plain Error with kind 'decode' (the server executed the read; nothing to undo).
+  // ------------------------------------------------------------------------------------------------
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function decodeError(method, what) {
+    const e = new Error(method + ' returned an unexpected value: ' + what);
+    e.kind = 'decode'; e.method = method; e.applied = true;
+    return e;
+  }
+  function typeName(v) {
+    if (v === null) return 'null';
+    if (Array.isArray(v)) return 'array';
+    if (v && typeof v === 'object' && typeof v.$t === 'string') return shortName(v.$t);
+    return typeof v;
+  }
+  /** isoOfDay(day) -> 'YYYY-MM-DD' | null. day = a Day value {$t, f:[d, m, y]} or {day, month, year}; the ISO text is
+   *  built from the Day's own parts (the diary-local date), never from a Date/UTC timestamp. */
+  function isoOfDay(day) {
+    let d, m, y;
+    if (day && typeof day === 'object' && Array.isArray(day.f)) { d = day.f[0]; m = day.f[1]; y = day.f[2]; }
+    else if (day && typeof day === 'object') { d = day.day; m = day.month; y = day.year; }
+    else return null;
+    if (!Number.isInteger(d) || !Number.isInteger(m) || !Number.isInteger(y) || d < 1 || d > 31 || m < 1 || m > 12 || y < 1 || y > 9999) return null;
+    return String(y).padStart(4, '0') + '-' + pad2(m) + '-' + pad2(d);
+  }
+  /** dayFromIso('YYYY-MM-DD') -> {day, month, year}; throws on anything else (Day values and {day,month,year} pass through). */
+  function dayFromIso(iso) {
+    if (iso && typeof iso === 'object') {
+      const s = isoOfDay(iso);
+      if (!s) throw new Error('CMA.rpc: malformed day ' + snippet(JSON.stringify(iso), 60));
+      iso = s;
+    }
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso));
+    if (!m) throw new Error('CMA.rpc: expected a YYYY-MM-DD date (got ' + snippet(iso, 40) + ')');
+    const out = { day: Number(m[3]), month: Number(m[2]), year: Number(m[1]) };
+    if (out.month < 1 || out.month > 12 || out.day < 1 || out.day > 31 || out.year < 1) throw new Error('CMA.rpc: invalid date ' + iso);
+    return out;
+  }
+  /** timeValue({h, m, s}|null) -> Time value {$t: SIG.TIME, f:[h, m, s]} (Time/1552252503 = [b h, b m, b s]) or null. */
+  function timeValue(t) {
+    if (t === null || t === undefined) return null;
+    const g = gwt();
+    if (isType(t, BASE.TIME)) return t;
+    const h = Number(t && t.h), m = Number(t && t.m), s = t && t.s != null ? Number(t.s) : 0;
+    if (!Number.isInteger(h) || !Number.isInteger(m) || !Number.isInteger(s) || h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59) {
+      throw new Error('CMA.rpc: time must be {h (0-23), m (0-59), s (0-59)} (got ' + snippet(JSON.stringify(t), 60) + ')');
+    }
+    return { $t: g.SIG.TIME, f: [h, m, s] };
+  }
+  /** A lazy CMA.gwt.SIG lookup that fails as kind 'incompatible': the active decoder lacks a type the call needs. */
+  function requiredSig(name, method) {
+    try { return gwt().SIG[name]; } catch (e) {
+      const x = new Error(method + ' is unavailable with this decoder: ' + ((e && e.message) || e));
+      x.kind = 'incompatible'; x.method = method;
+      throw x;
+    }
+  }
+  function callOpts(o) { return o && typeof o.timeoutMs === 'number' ? { timeoutMs: o.timeoutMs } : undefined; }
+
+  /** getFirstDayWithData(session) -> 'YYYY-MM-DD' | null. (String nonce, int userId) -> Day; the callback casts to
+   *  class 37 = Day (`P8k(a,37)`); null for an account without data. */
+  async function getFirstDayWithData(session, opts) {
+    checkSession(session, true);
+    const r = await call(session, 'getFirstDayWithData', [STRING_SIG, 'I'], [session.nonce, session.userId], callOpts(opts));
+    const v = r.value;
+    if (v === null || v === undefined) return null;
+    if (!isType(v, BASE.DAY)) throw decodeError('getFirstDayWithData', 'expected a Day, got ' + typeName(v));
+    const iso = isoOfDay(v);
+    if (!iso) throw decodeError('getFirstDayWithData', 'malformed Day');
+    return iso;
+  }
+
+  /** getPreference(session, key) -> string | null. (String nonce, String key) -> String (response reader U1n =
+   *  string; call site `bOf(Zc.c.d, this.g.Q, key, ...)`). Keys used: use.thermic.effect.food ('true' adds TEF to
+   *  burned), units.calories ('true' = kcal display), weightUnit ('Kilograms' | 'Pounds' | 'Stone'). */
+  async function getPreference(session, key, opts) {
+    checkSession(session, false);
+    if (typeof key !== 'string' || !key) throw new Error('CMA.rpc.getPreference: key is required');
+    const r = await call(session, 'getPreference', [STRING_SIG, STRING_SIG], [session.nonce, key], Object.assign({ kind: 's' }, callOpts(opts) || {}));
+    const v = r.value;
+    if (v === null || v === undefined) return null;
+    if (typeof v !== 'string') throw decodeError('getPreference', 'expected a string, got ' + typeName(v));
+    return v;
+  }
+
+  /**
+   * getBiometrics(session, {metricId=1, unitId=1, from=null, to=null, timeoutMs}) -> [{date, time:{h,m,s}|null, value}]
+   * in wire order. (String nonce, int userId, int metricId, int unitId, Day start, Day end, Time, Time, DayQueryType)
+   * -> DataPoint[]; Weight = metric 1, kg = unit 1 (lbs 2, stone 68524): the server converts every value into the
+   * requested unit. from = to = null is the app's own whole-history query (BiometricHistoryHandler); a range is
+   * `from`..`to` INCLUSIVE (the WeightChangeCard passes end = today and reads today's point). Times are always null
+   * and DayQueryType is All (ordinal 0), like every call in the app. Points with a malformed Day or a non-finite
+   * value are dropped; an element that is not a DataPoint throws kind 'decode'.
+   */
+  async function getBiometrics(session, opts) {
+    checkSession(session, true);
+    const o = opts || {};
+    const metricId = o.metricId == null ? 1 : Number(o.metricId);
+    const unitId = o.unitId == null ? 1 : Number(o.unitId);
+    if (!isPosInt(metricId) || !isPosInt(unitId)) throw new Error('CMA.rpc.getBiometrics: metricId and unitId must be positive integers');
+    const DAY = requiredSig('DAY', 'getBiometrics'), TIME = requiredSig('TIME', 'getBiometrics');
+    const DQT = requiredSig('DAY_QUERY_TYPE', 'getBiometrics');
+    const from = o.from == null ? null : dayValue(dayFromIso(o.from));
+    const to = o.to == null ? null : dayValue(dayFromIso(o.to));
+    const r = await call(session, 'getBiometrics', [STRING_SIG, 'I', 'I', 'I', DAY, DAY, TIME, TIME, DQT],
+      [session.nonce, session.userId, metricId, unitId, from, to, null, null, { $t: DQT, ordinal: 0 /* All */ }], callOpts(o));
+    const v = r.value;
+    if (v === null || v === undefined) return [];
+    if (!Array.isArray(v)) throw decodeError('getBiometrics', 'expected a DataPoint[], got ' + typeName(v));
+    const F = TDEE_FIELDS.DATA_POINT;
+    const out = [];
+    for (let i = 0; i < v.length; i++) {
+      const p = v[i];
+      if (p === null || p === undefined) continue;
+      if (!isType(p, BASE.DATA_POINT) || p.f.length < 3) throw decodeError('getBiometrics', 'element ' + i + ' is ' + typeName(p) + ', not a DataPoint');
+      const date = isType(p.f[F.DAY], BASE.DAY) ? isoOfDay(p.f[F.DAY]) : null;
+      if (!date) continue;
+      const t = p.f[F.TIME];
+      let time = null;
+      if (t !== null && t !== undefined) {
+        if (!isType(t, BASE.TIME)) continue;
+        time = { h: t.f[0], m: t.f[1], s: t.f[2] };
+      }
+      const value = p.f[F.VALUE];
+      if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+      out.push({ date: date, time: time, value: value });
+    }
+    return out;
+  }
+
+  /**
+   * getCaloriesConsumedAndBurned(session, firstIso, lastExclusiveIso[, opts]) -> number[][]: one row of 12 doubles
+   * per day from `first` (ascending) up to but EXCLUDING `last` (the app asks for first = today+1-N, last = today+1
+   * for its N-day chart). Params (String nonce, int userId, Day first, Day last) with two distinct Day objects (no
+   * back-reference), exactly EthanDenny's live-derived body. Row indices: TDEE_FIELDS.ENERGY_ROW. The row count is
+   * NOT checked here (the caller compares it with the span: a server that clamps the range answers fewer rows).
+   */
+  async function getCaloriesConsumedAndBurned(session, firstIso, lastExclusiveIso, opts) {
+    checkSession(session, true);
+    const DAY = requiredSig('DAY', 'getCaloriesConsumedAndBurned');
+    const first = dayFromIso(firstIso), last = dayFromIso(lastExclusiveIso);
+    if (isoOfDay(last) <= isoOfDay(first)) throw new Error('CMA.rpc.getCaloriesConsumedAndBurned: the exclusive end must come after the first day');
+    const r = await call(session, 'getCaloriesConsumedAndBurned', [STRING_SIG, 'I', DAY, DAY],
+      [session.nonce, session.userId, dayValue(first), dayValue(last)], callOpts(opts));
+    const v = r.value;
+    if (!Array.isArray(v)) throw decodeError('getCaloriesConsumedAndBurned', 'expected a double[][], got ' + typeName(v));
+    const R = TDEE_FIELDS.ENERGY_ROW;
+    const used = [R.CONSUMED, R.EXERCISE, R.BMR, R.TEF, R.ACTIVITY_A, R.ACTIVITY_B];
+    for (let i = 0; i < v.length; i++) {
+      const row = v[i];
+      if (!Array.isArray(row) || row.length < R.LENGTH) throw decodeError('getCaloriesConsumedAndBurned', 'row ' + i + ' is not a double[' + R.LENGTH + ']');
+      for (let k = 0; k < row.length; k++) if (typeof row[k] !== 'number') throw decodeError('getCaloriesConsumedAndBurned', 'row ' + i + ' holds a ' + typeof row[k]);
+      for (let k = 0; k < used.length; k++) if (!Number.isFinite(row[used[k]])) throw decodeError('getCaloriesConsumedAndBurned', 'row ' + i + ' index ' + used[k] + ' is not finite');
+    }
+    return v;
+  }
+
+  /**
+   * getCalendarInfo(session, firstIso, lastIso[, opts]) -> [{date, complete, loggedFood, loggedBiometric,
+   * loggedExercise, loggedNote}] for the days the server lists (a day absent from the list has nothing logged, as the
+   * diary calendar treats it). (String nonce, int userId, Day first, Day last) -> CalendarInfo{List<CalendarDayInfo>};
+   * the diary passes last = min(gridEnd, today), very likely INCLUSIVE, so callers pass end + 1 and map by the
+   * returned Day. A null reply or list throws kind 'decode' (never read as "nothing logged").
+   */
+  async function getCalendarInfo(session, firstIso, lastIso, opts) {
+    checkSession(session, true);
+    const DAY = requiredSig('DAY', 'getCalendarInfo');
+    const first = dayFromIso(firstIso), last = dayFromIso(lastIso);
+    if (isoOfDay(last) < isoOfDay(first)) throw new Error('CMA.rpc.getCalendarInfo: the last day must not come before the first');
+    const r = await call(session, 'getCalendarInfo', [STRING_SIG, 'I', DAY, DAY],
+      [session.nonce, session.userId, dayValue(first), dayValue(last)], callOpts(opts));
+    const v = r.value;
+    if (!isType(v, BASE.CALENDAR_INFO)) throw decodeError('getCalendarInfo', 'expected a CalendarInfo, got ' + typeName(v));
+    const list = v.f[0];
+    if (!Array.isArray(list)) throw decodeError('getCalendarInfo', 'CalendarInfo carries no day list (' + typeName(list) + ')');
+    const F = TDEE_FIELDS.CALENDAR_DAY_INFO;
+    const out = [];
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
+      if (item === null || item === undefined) continue;
+      if (!isType(item, BASE.CALENDAR_DAY_INFO) || item.f.length < 10) throw decodeError('getCalendarInfo', 'element ' + i + ' is ' + typeName(item) + ', not a CalendarDayInfo');
+      const date = isType(item.f[F.DAY], BASE.DAY) ? isoOfDay(item.f[F.DAY]) : null;
+      if (!date) continue;
+      out.push({
+        date: date,
+        complete: item.f[F.COMPLETE] === true,
+        loggedFood: item.f[F.LOGGED_FOOD] === true,
+        loggedBiometric: item.f[F.LOGGED_BIOMETRIC] === true,
+        loggedExercise: item.f[F.LOGGED_EXERCISE] === true,
+        loggedNote: item.f[F.LOGGED_NOTE] === true,
+      });
+    }
+    return out;
+  }
+
+  // ------------------------------------------------------------------------------------------------
   // exports
   // ------------------------------------------------------------------------------------------------
   rpc.call = call;
@@ -578,6 +803,15 @@ window.CMA = window.CMA || {};
   rpc.updateDiaryAdd = updateDiaryAdd;
   rpc.removeServing = removeServing;
   rpc.searchFoods = searchFoods;
+  rpc.getFirstDayWithData = getFirstDayWithData;
+  rpc.getPreference = getPreference;
+  rpc.getBiometrics = getBiometrics;
+  rpc.getCaloriesConsumedAndBurned = getCaloriesConsumedAndBurned;
+  rpc.getCalendarInfo = getCalendarInfo;
+  rpc.timeValue = timeValue;
+  rpc.isoOfDay = isoOfDay;
+  rpc.dayFromIso = dayFromIso;
+  rpc.TDEE_FIELDS = TDEE_FIELDS;
   rpc.searchUrl = searchUrl;
   rpc.encodeQueryValue = encodeQueryValue;
   rpc.mapHit = mapHit;

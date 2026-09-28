@@ -1,0 +1,1103 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>tdee-view</title>
+</head>
+<body>
+<pre id="results"></pre>
+<script src="lib.js"></script>
+<script>
+/* ---- STUBS installed before panel.js: events, capture, registry store (the panel resolves them lazily) ---- */
+(function () {
+  window.CMA = window.CMA || {};
+  const NONCE = 'TDEE-SECRET-NONCE-VALUE-5a4b3c2d1e0f';
+  window.__NONCE = NONCE;
+  const handlers = {};
+  CMA.events = {
+    on(n, f) { (handlers[n] = handlers[n] || []).push(f); },
+    off(n, f) { const l = handlers[n] || []; const i = l.indexOf(f); if (i >= 0) l.splice(i, 1); },
+    emit(n, d) { (handlers[n] || []).slice().forEach(f => f(d)); },
+    count(n) { return (handlers[n] || []).length; }
+  };
+  CMA.capture = {
+    _ready: true,
+    state: {
+      hooked: true, moduleBase: 'https://cronometer.com/cronometer/', permutation: '0A1C16E148676A90CBB128E4829A562F',
+      policyHash: 'C0FFEE00C0FFEE00C0FFEE00C0FFEE00', nonce: NONCE, nonceUpdatedAt: 1, userId: 1234567,
+      groups: [], groupsSource: 'default', diaryDate: { day: 20, month: 9, year: 2026 }, diaryDateSource: 'getDayInfo',
+      lastRpcAt: 0, rpcCount: 3, lastError: null, registryMismatch: false, log: []
+    },
+    ready() { return this._ready ? { ok: true, missing: [] } : { ok: false, missing: ['nonce'] }; }
+  };
+  const reg = { inProgress: false };
+  window.__reg = reg;
+  CMA.registryStore = {
+    status() { return { active: 'bundled', inProgress: reg.inProgress, progress: reg.inProgress ? { phase: 'fetch' } : null, builderLoaded: true, lastRebuild: null, lastAttempt: null, lastRefusal: null }; },
+    inFlight() { return null; },
+    async rebuild() { return { ok: true }; }
+  };
+})();
+</script>
+<script src="../src/ui/panel.css.js"></script>
+<script src="../src/ui/panel.js"></script>
+<!-- The generated engine wrapper (maths unchanged from vendor/adaptive-tdee/adaptive-tdee.js). When it does not exist
+     yet, the bootstrap below converts the vendored ES module inside this page (same maths); only without file access
+     does a minimal stub stand in, and the first result line says which engine ran. -->
+<script src="../src/tdee/adaptive-tdee.js"></script>
+<script>
+/* ---- CMA.tdeeData stub (the shared contract of src/tdee/tdee-data.js) ---- */
+(function () {
+  const clone = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
+  const S = window.__tdee = {
+    today: '2026-09-28',                       // a Monday; check-in weekday default 1 = Monday
+    status: {
+      enabled: false, syncing: false, phase: null, progress: { done: 0, total: 0 }, lastFullAt: null, lastDeltaAt: null,
+      firstDay: '2025-01-01', lastError: null, flagsSource: 'calendar', energyChunk: 56,
+      prefs: { tef: false, unitsCalories: true, weightUnit: 'Kilograms', at: 1 }, ready: true, blockedReason: null
+    },
+    raw: [], overrides: {}, checkins: [], probe: null,
+    settings: null,
+    calls: null,
+    emit(type) { CMA.events.emit('tdee-data', { type }); }
+  };
+  S.defaults = {
+    goal: { ratePctPerWeek: -0.5 }, sex: 'other', checkInWeekday: 1, responsiveness: 'balanced', manualInitialKcal: null,
+    proteinGPerKg: 1.8, fatShare: 0.35, activityAware: false, units: { weight: 'auto', energy: 'auto' }, modelStartDate: null,
+    trustCompleteOnly: false, goalChangedAt: null
+  };
+  S.resetCalls = () => { S.calls = { init: 0, enable: 0, disable: [], sync: [], setOverride: [], saveSettings: [], recordCheckin: [], importCsv: [], records: [] }; };
+  S.resetCalls();
+  S.settings = clone(S.defaults);
+  function dayView(d) {
+    const o = S.overrides[d.date];
+    let excluded = false, reason = null;
+    if (o === true) { excluded = true; reason = 'user'; }
+    else if (o === false) { excluded = false; }
+    else if (d.partialSuspect) { excluded = true; reason = 'partial'; }
+    else if (S.settings.trustCompleteOnly && d.complete === false) { excluded = true; reason = 'incomplete'; }
+    return Object.assign({ burnedParts: null, complete: null, loggedFood: d.intakeKcal != null, partialSuspect: false, source: 'rpc' }, clone(d), { excluded, excludedReason: reason });
+  }
+  CMA.tdeeData = {
+    async init() { S.calls.init++; return this.status(); },
+    status() {
+      const st = clone(S.status);
+      const r = S.raw;
+      st.counts = { days: r.length, weighIns: r.filter(d => d.weightKg != null).length, intakeDays: r.filter(d => d.intakeKcal != null).length, burnedDays: r.filter(d => d.burnedKcal != null).length };
+      st.range = r.length ? { from: r[0].date, to: r[r.length - 1].date } : null;
+      return st;
+    },
+    async enable() { S.calls.enable++; S.status.enabled = true; S.emit('status'); return this.status(); },
+    async disable(o) { S.calls.disable.push(clone(o)); S.status.enabled = false; if (o && o.forget) { S.raw = []; S.checkins = []; S.overrides = {}; S.settings = clone(S.defaults); } S.emit('status'); },
+    async sync(o) { S.calls.sync.push(clone(o)); S.status.lastDeltaAt = Date.now(); if (o && o.full) S.status.lastFullAt = Date.now(); S.emit('data'); return this.status(); },
+    dayList() { return S.raw.map(dayView); },
+    records(o) {
+      S.calls.records.push(clone(o));
+      const start = o && o.modelStartDate;
+      return S.raw.map(dayView).filter(d => !start || d.date >= start)
+        .map(d => ({ date: d.date, intakeKcal: d.date === S.today ? null : d.intakeKcal, weightKg: d.weightKg, burnedKcal: d.burnedKcal, excluded: d.excluded }));
+    },
+    async setOverride(date, v) { S.calls.setOverride.push([date, v]); if (v == null) delete S.overrides[date]; else S.overrides[date] = v; S.emit('data'); },
+    getSettings() { return clone(S.settings); },
+    async saveSettings(p) { S.calls.saveSettings.push(clone(p)); Object.assign(S.settings, clone(p)); S.emit('data'); return clone(S.settings); },
+    checkins() { return clone(S.checkins); },
+    async recordCheckin(c) { S.calls.recordCheckin.push(clone(c)); S.checkins.push(clone(c)); S.emit('data'); },
+    async importCsv(kind, text) {
+      S.calls.importCsv.push({ kind, text });
+      const rows = kind === 'nutrition' ? CMA.tdee.parseDailyNutritionCsv(text) : CMA.tdee.parseBiometricsCsv(text);
+      return { imported: rows.length, skipped: 0 };
+    },
+    probe() { return clone(S.probe); },
+    today() { return S.today; }
+  };
+})();
+</script>
+<script src="../src/ui/tdee-view.js"></script>
+<script>
+(async function () {
+  const { describe, it, ok, eq, deepEq } = CMA.test;
+  const P = CMA.panel, S = window.__tdee, V = CMA.tdeeView;
+  const q = (sel) => P.root.querySelector(sel);
+  const qa = (sel) => Array.from(P.root.querySelectorAll(sel));
+  const text = (el) => (el ? el.textContent : '').replace(/\s+/g, ' ').trim();
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  function waitFor(fn, label, timeout) {
+    const t0 = Date.now();
+    return new Promise((resolve, reject) => {
+      (function poll() {
+        let v = null;
+        try { v = fn(); } catch (e) { return reject(e); }
+        if (v) return resolve(v);
+        if (Date.now() - t0 > (timeout || 3000)) return reject(new Error('timed out waiting for ' + label));
+        setTimeout(poll, 10);
+      })();
+    });
+  }
+  const button = (label, scope) => Array.from((scope || P.root).querySelectorAll('button')).find(b => text(b) === label) || null;
+  const iso = (y, m, d) => y + '-' + (m < 10 ? '0' : '') + m + '-' + (d < 10 ? '0' : '') + d;
+  function addDaysIso(s, n) { return new Date(Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10)) + n * 86400000).toISOString().slice(0, 10); }
+  // A noise-free person (the upstream tests' clean() anchored at "today"): distinctive numbers so the diagnostics
+  // test can prove none of them leaks (weight 83.17 kg, intake 2517, Cronometer burned 2653).
+  function person(o) {
+    const n = o.n, end = o.end || S.today, startKg = o.startKg == null ? 83.17 : o.startKg, tdee = o.tdee == null ? 2517 : o.tdee;
+    const intake = o.intake == null ? tdee : o.intake, burned = o.burned == null ? 2653 : o.burned;
+    const logFood = o.logFood || (() => true), weigh = o.weigh || (() => true);
+    const out = []; let W = startKg;
+    for (let t = 0; t < n; t++) {
+      const I = typeof intake === 'function' ? intake(t) : intake;
+      const logged = logFood(t);
+      out.push({ date: addDaysIso(end, t - (n - 1)), intakeKcal: logged ? I : null, weightKg: weigh(t) ? Math.round(W * 100) / 100 : null,
+        burnedKcal: burned, burnedParts: { bmr: 1720, activity: burned - 1720, exercise: 0, tef: 0 }, complete: false, loggedFood: logged, partialSuspect: false, source: 'rpc' });
+      W += (I - tdee) / 7700;
+    }
+    return out;
+  }
+  function scenario(days, opts) {
+    const o = opts || {};
+    S.raw = days; S.overrides = {};
+    if (!o.keepCheckins) S.checkins = [];
+    S.emit('data');
+  }
+  async function openTdee() {
+    P.open('tdee');
+    await waitFor(() => q('.cma-tdee') && !q('.cma-tdee-loading'), 'the TDEE view rendered');
+  }
+  async function rendered(pred, label) { return waitFor(() => { try { return pred(); } catch (e) { return false; } }, label, 3000); }
+  async function sub(name) {
+    const b = qa('.cma-tdee-seg').find(x => x.dataset.sub === name);
+    b.click();
+    await rendered(() => qa('.cma-tdee-seg').find(x => x.dataset.sub === name).getAttribute('aria-pressed') === 'true', 'sub-view ' + name);
+  }
+  const chip = () => text(q('.cma-tdee-chip'));
+  const model = () => V.model();
+
+  // ---- engine: generated wrapper > vendored module converted here > minimal stub ----
+  function xhrText(url) {
+    return new Promise((resolve) => {
+      try {
+        const x = new XMLHttpRequest();
+        x.open('GET', url);
+        x.addEventListener('loadend', () => resolve(x.status === 0 || x.status === 200 ? (x.responseText || '') : ''));
+        x.send();
+      } catch (e) { resolve(''); }
+    });
+  }
+  function loadScript(url) {
+    return new Promise((resolve) => { const s = document.createElement('script'); s.src = url; s.onload = () => resolve(true); s.onerror = () => resolve(false); document.head.appendChild(s); });
+  }
+  function installStubEngine() {
+    // Placeholder numbers only (a mean of burned as expenditure); enough to render. Engine-specific assertions skip.
+    const addDays = (s, n) => addDaysIso(s, n);
+    CMA.tdee = {
+      RESPONSIVENESS: Object.freeze({ stable: 10, balanced: 15, responsive: 25 }),
+      DEFAULT_CONFIG: Object.freeze({ warmupDays: 7, kcalPerKg: 7700 }),
+      DEFAULT_CHECKIN: Object.freeze({ minKcal: { female: 1200, male: 1500, other: 1350 } }),
+      addDays,
+      runExpenditureModel(recs) {
+        const days = recs.slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+        const i0 = days.findIndex(d => d.weightKg != null);
+        if (i0 < 0) return { days: [], current: null, error: 'NO_WEIGHT_DATA' };
+        const b = days.map(d => d.burnedKcal).filter(v => v != null);
+        const E = b.length ? Math.round(b.reduce((a, c) => a + c, 0) / b.length) : 2000;
+        const out = days.slice(i0).map((d, k) => ({ date: d.date, scaleWeightKg: d.weightKg, trendWeightKg: d.weightKg || 80, expenditureKcal: E, expenditureSdKcal: 100, status: k < 7 ? 'warmup' : 'updating', calibrated: k >= 21, cronometerBurnedKcal: d.burnedKcal, weightOutlier: false }));
+        const last = out[out.length - 1];
+        return { days: out, current: { date: last.date, expenditureKcal: E, expenditureSdKcal: 100, trendWeightKg: last.trendWeightKg, status: last.status, calibrated: last.calibrated, priorKcal: E, priorSource: 'cronometer', weeklyTrendChangeKg: 0, avgIntake7Kcal: null, cronometerBurned14Kcal: E, cronometerCalibrationRatio: 1 } };
+      },
+      weeklyCheckIn(p) { const t = Math.round((p.model.expenditureKcal + (p.goal.ratePctPerWeek / 100) * p.model.trendWeightKg * 1100) / 10) * 10; return { targetKcal: t, expenditureKcal: p.model.expenditureKcal, energyDeltaKcal: 0, ratePctPerWeek: p.goal.ratePctPerWeek, expectedWeeklyChangeKg: 0, changeFromPreviousKcal: null, macros: { proteinG: 150, fatG: 70, carbsG: 200 }, notes: [] }; },
+      activityAwareDailyTarget(p) { return p.weeklyTargetKcal; },
+      parseDailyNutritionCsv(t) { return t.trim().split(/\r?\n/).slice(1).map(l => ({ date: l.split(',')[0] })); },
+      parseBiometricsCsv(t) { return t.trim().split(/\r?\n/).slice(1).map(l => ({ date: l.split(',')[0] })); }
+    };
+  }
+  async function ensureEngine() {
+    if (CMA.tdee && typeof CMA.tdee.runExpenditureModel === 'function') return { real: true, source: 'src/tdee/adaptive-tdee.js (generated wrapper)' };
+    const src = await xhrText('../vendor/adaptive-tdee/adaptive-tdee.js');
+    if (src && /^export function runExpenditureModel\(/m.test(src)) {
+      const names = [];
+      const body = src.replace(/^export (const|function) ([A-Za-z_$][\w$]*)/gm, (m, kw, name) => { names.push(name); return kw + ' ' + name; });
+      const code = 'window.CMA = window.CMA || {};\n(function () {\n' + body + '\nwindow.CMA.tdee = { ' + names.join(', ') + ' };\n})();\n';
+      await loadScript(URL.createObjectURL(new Blob([code], { type: 'text/javascript' })));
+      if (CMA.tdee && typeof CMA.tdee.runExpenditureModel === 'function') return { real: true, source: 'vendor/adaptive-tdee/adaptive-tdee.js (ES module converted in this page; src/tdee/adaptive-tdee.js not generated yet)' };
+    }
+    installStubEngine();
+    return { real: false, source: 'MINIMAL STUB (no file access): engine-specific assertions are skipped' };
+  }
+  const ENGINE = await ensureEngine();
+  const REAL = ENGINE.real;
+  const E = CMA.tdee;
+
+  describe('engine used by this page', () => {
+    it('engine: ' + ENGINE.source, () => {
+      eq(typeof E.runExpenditureModel, 'function');
+      eq(typeof E.weeklyCheckIn, 'function');
+      deepEq(E.RESPONSIVENESS, { stable: 10, balanced: 15, responsive: 25 });
+    });
+  });
+
+  describe('registration and consent', () => {
+    it('the view registers a "TDEE" tab just before Diagnostics and injects its own stylesheet', () => {
+      P.mount();
+      const tabs = qa('.cma-tab').map(t => t.dataset.view);
+      ok(tabs.indexOf('tdee') > tabs.indexOf('results') && tabs.indexOf('tdee') === tabs.indexOf('diagnostics') - 1, 'order: ' + tabs.join(','));
+      eq(text(qa('.cma-tab').find(t => t.dataset.view === 'tdee')), 'TDEE');
+      ok(P.VIEWS.indexOf('tdee') >= 0, 'CMA.panel.VIEWS lists it');
+      const style = qa('style').find(s => s.dataset.view === 'tdee');
+      ok(style && style.textContent === V.css, 'the view css is its own <style> in the shadow root');
+    });
+    it('while disabled: the consent screen says what is read, that it stays in this browser, links PRIVACY and carries the disclaimer; nothing is read', async () => {
+      await openTdee();
+      const t = text(q('.cma-tdee-consent'));
+      ok(/daily energy intake/.test(t) && /energy-burned/.test(t) && /weight history/.test(t), 'what it reads: ' + t);
+      ok(/through the session of this tab/.test(t), 'how it reads');
+      ok(/stored only in this browser/.test(t) && /sent nowhere else/.test(t), 'where it is stored');
+      ok(/which days have food logged or are marked complete/.test(t) && /three of your Cronometer settings \(TEF, kcal or kJ, weight unit\)/.test(t), 'the flags and settings are named too');
+      ok(/up to five years at first/.test(t) && /after you edit the diary in this tab \(also while the panel is closed\)/.test(t), 'how much and when');
+      ok(/for one Cronometer account at a time: enabling it for another account replaces the stored copy/.test(t) && !/kept per account/.test(t), 'one account at a time');
+      const a = q('.cma-tdee-consent a');
+      eq(a.getAttribute('href'), 'https://github.com/fabbeskw/multi-add-for-cronometer/blob/HEAD/PRIVACY.md');
+      eq(a.getAttribute('rel'), 'noopener noreferrer');
+      ok(/Estimates only, not medical advice/.test(t) && /pregnancy/.test(t) && /weight or fluid/.test(t), 'disclaimer');
+      ok(button('Enable'), 'Enable button');
+      eq(S.calls.enable, 0); eq(S.calls.sync.length, 0); eq(S.calls.records.length, 0, 'no model run, no data read before consent');
+      eq(S.calls.init, 1, 'init() loaded the stored state once');
+    });
+    it('an Enable the data layer refuses (account not known) says so instead of doing nothing', async () => {
+      const real = CMA.tdeeData.enable;
+      CMA.tdeeData.enable = async function () { S.calls.enable++; return this.status(); };
+      try {
+        button('Enable').click();
+        await rendered(() => /account of this tab is not known yet/.test(text(q('.cma-tdee-msg'))), 'refusal message');
+        ok(q('.cma-tdee-consent'), 'still the consent screen');
+      } finally { CMA.tdeeData.enable = real; S.calls.enable = 0; }
+    });
+    it('while the data layer does not know the account (status.ready false) nothing stored is shown', async () => {
+      S.status.ready = false; S.emit('status');
+      await rendered(() => q('.cma-tdee-waiting'), 'waiting card');
+      ok(!q('.cma-tdee-consent') && !q('.cma-tdee-exp'), 'neither consent nor data');
+      ok(/Waiting for the Cronometer account of this tab/.test(text(q('.cma-tdee-waiting'))));
+      S.status.ready = true; S.emit('status');
+      await rendered(() => q('.cma-tdee-consent'), 'consent again once the account is known');
+      const x = q('.cma-tdee-msg-x'); if (x) x.click();
+    });
+    it('Enable calls tdeeData.enable() and the enabled view replaces the consent screen', async () => {
+      S.status.lastFullAt = Date.now(); S.status.lastDeltaAt = Date.now();   // no automatic refresh in these tests
+      scenario(person({ n: 90 }));
+      button('Enable').click();
+      await rendered(() => S.calls.enable === 1 && q('.cma-tdee-subnav'), 'enabled view');
+      ok(!q('.cma-tdee-consent'), 'consent gone');
+      ok(q('.cma-tdee-exp') && q('.cma-tdee-week'), 'expenditure + this-week cards');
+    });
+  });
+
+  describe('expenditure card: status chip, number, comparison (real engine)', () => {
+    it('warm-up: "Getting to know you · day 3 of 7"', async () => {
+      scenario(person({ n: 3 }));
+      await rendered(() => chip() === 'Getting to know you · day 3 of 7', 'warm-up chip, got ' + chip());
+      if (REAL) eq(model().current.status, 'warmup');
+      eq(text(q('.cma-tdee-cmp')), 'Cronometer estimates 2,653 — the comparison with your own data starts after the first week', 'no "your data says" during the warm-up');
+    });
+    it('updating, not calibrated: "Calibrating"', async () => {
+      scenario(person({ n: 10 }));
+      if (!REAL) return;
+      await rendered(() => chip() === 'Calibrating', 'calibrating chip, got ' + chip());
+      eq(model().current.status, 'updating'); eq(model().current.calibrated, false);
+    });
+    it('updating and calibrated: "Up to date"', async () => {
+      scenario(person({ n: 90 }));
+      if (!REAL) return;
+      await rendered(() => chip() === 'Up to date', 'up-to-date chip, got ' + chip());
+      eq(model().current.calibrated, true);
+    });
+    it('holding (no food for 10 days): the paused chip text', async () => {
+      scenario(person({ n: 60, logFood: (t) => t < 50 }));
+      if (!REAL) return;
+      await rendered(() => chip() === 'Paused — log food on 4+ of 7 days and weigh in at least weekly', 'holding chip, got ' + chip());
+      eq(model().current.status, 'holding');
+    });
+    it('the big number is "N kcal/day ± sd" from the model; the comparison line and the prior note follow the engine', async () => {
+      scenario(person({ n: 90 }));
+      await rendered(() => chip() === (REAL ? 'Up to date' : 'Getting to know you · day 7 of 7') || model().days.length === 90, 'rendered');
+      await sleep(150);
+      const cur = model().current;
+      eq(text(q('.cma-tdee-big')), V.test.fmtInt(cur.expenditureKcal) + ' kcal/day ± ' + V.test.fmtInt(cur.expenditureSdKcal));
+      const pct = Math.round(Math.abs(1 - cur.cronometerCalibrationRatio) * 100);
+      eq(text(q('.cma-tdee-cmp')), 'Cronometer estimates 2,653 — your data says you burn about ' + pct + '% ' + (cur.cronometerCalibrationRatio < 1 ? 'less' : 'more'));
+      if (REAL) {
+        ok(Math.abs(cur.expenditureKcal - 2517) < 40, 'converged near the true 2517, got ' + cur.expenditureKcal);
+        ok(/about [45]% less$/.test(text(q('.cma-tdee-cmp'))), 'about 5% less than Cronometer');
+        ok(/Started from Cronometer’s burned average over your first week \(2,653 kcal\/day\)\./.test(text(q('.cma-tdee-exp'))), 'prior note');
+      }
+    });
+    it('comparisonText: the spec example, "more", equal and missing cases', () => {
+      const u = { energy: 'kcal', weight: 'kg' };
+      eq(V.test.comparisonText({ cronometerBurned14Kcal: 2650, cronometerCalibrationRatio: 0.94 }, u), 'Cronometer estimates 2,650 — your data says you burn about 6% less');
+      eq(V.test.comparisonText({ cronometerBurned14Kcal: 2100, cronometerCalibrationRatio: 1.08 }, u), 'Cronometer estimates 2,100 — your data says you burn about 8% more');
+      eq(V.test.comparisonText({ cronometerBurned14Kcal: 2100, cronometerCalibrationRatio: 1.003 }, u), 'Cronometer estimates 2,100 — your data agrees with it');
+      eq(V.test.comparisonText({ cronometerBurned14Kcal: null, cronometerCalibrationRatio: null }, u), null);
+      eq(V.test.comparisonText({ cronometerBurned14Kcal: 2650, cronometerCalibrationRatio: 0.94 }, { energy: 'kJ', weight: 'kg' }), 'Cronometer estimates 11,095 — your data says you burn about 6% less');
+      eq(V.test.comparisonText({ status: 'warmup', priorSource: 'manual', priorKcal: 2800, cronometerBurned14Kcal: 2500, cronometerCalibrationRatio: 1.12 }, u),
+        'Cronometer estimates 2,500 — your starting estimate is 12% higher; the comparison with your own data starts after the first week', 'a manual start is not "your data"');
+      eq(V.test.comparisonText({ status: 'warmup', priorSource: 'cronometer', priorKcal: 2500, cronometerBurned14Kcal: 2500, cronometerCalibrationRatio: 1 }, u),
+        'Cronometer estimates 2,500 — the comparison with your own data starts after the first week');
+    });
+    it('chipText covers the four states exactly as spec §6.1', () => {
+      eq(V.test.chipText({ status: 'warmup' }, 3), 'Getting to know you · day 3 of 7');
+      eq(V.test.chipText({ status: 'updating', calibrated: false }, 20), 'Calibrating');
+      eq(V.test.chipText({ status: 'updating', calibrated: true }, 60), 'Up to date');
+      eq(V.test.chipText({ status: 'holding', calibrated: true }, 60), 'Paused — log food on 4+ of 7 days and weigh in at least weekly');
+    });
+    it('friendly empty state without any weigh-in: "Log a weigh-in in Cronometer to start"', async () => {
+      scenario(person({ n: 20, weigh: () => false }));
+      await rendered(() => /Log a weigh-in in Cronometer to start/.test(text(q('.cma-tdee-exp'))), 'NO_WEIGHT_DATA empty state');
+      eq(model().error, 'NO_WEIGHT_DATA');
+      ok(!q('.cma-tdee-charts'), 'no charts without a model');
+      ok(q('.cma-tdee-checkin').disabled, 'no check-in without an estimate');
+    });
+    it('sync line: last refreshed, Refresh (delta) and Refresh all (full) call tdeeData.sync', async () => {
+      scenario(person({ n: 90 }));
+      await rendered(() => q('.cma-tdee-refresh') && /Stored: 90 days, 90 weigh-ins \(1 Jul 2026 – 28 Sep 2026\)/.test(text(q('.cma-tdee-sync'))), 'sync buttons + counts');
+      ok(/^Last refreshed/.test(text(q('.cma-tdee-sync-line'))), 'last refreshed: ' + text(q('.cma-tdee-sync-line')));
+      const n0 = S.calls.sync.length;
+      q('.cma-tdee-refresh').click();
+      await rendered(() => S.calls.sync.length === n0 + 1, 'delta sync');
+      deepEq(S.calls.sync[n0], { full: false, force: true }, 'a button press is not throttled by the data layer');
+      await rendered(() => q('.cma-tdee-refresh-all') && !q('.cma-tdee-refresh-all').disabled, 're-rendered');
+      q('.cma-tdee-refresh-all').click();
+      await rendered(() => S.calls.sync.length === n0 + 2, 'full sync');
+      deepEq(S.calls.sync[n0 + 1], { full: true });
+    });
+    it('gates: "Decoder rebuilding" while a rebuild runs, the deploy note on a mismatch, reload hint without a session; Refresh is disabled', async () => {
+      window.__reg.inProgress = true;
+      CMA.events.emit('registry-progress', { phase: 'fetch' });
+      await rendered(() => /^Decoder rebuilding/.test(text(q('.cma-tdee-gate'))), 'rebuilding gate');
+      ok(q('.cma-tdee-refresh').disabled && q('.cma-tdee-refresh-all').disabled, 'refresh disabled');
+      window.__reg.inProgress = false;
+      CMA.capture.state.registryMismatch = true;
+      CMA.events.emit('state', CMA.capture.state);
+      await rendered(() => /^Cronometer deployed a new build/.test(text(q('.cma-tdee-gate'))), 'mismatch gate');
+      CMA.capture.state.registryMismatch = false;
+      CMA.capture._ready = false;
+      CMA.events.emit('state', CMA.capture.state);
+      await rendered(() => /reload the Cronometer tab/.test(text(q('.cma-tdee-gate'))), 'session gate');
+      CMA.capture._ready = true;
+      CMA.events.emit('state', CMA.capture.state);
+      await rendered(() => !q('.cma-tdee-gate') && !q('.cma-tdee-refresh').disabled, 'gate cleared');
+    });
+    it('opening the view refreshes when the data is stale: delta after 10 min, full after 7 days, nothing when fresh', async () => {
+      const n0 = S.calls.sync.length;
+      S.status.lastFullAt = Date.now() - 86400000; S.status.lastDeltaAt = Date.now() - 11 * 60000;
+      V.test.resetAutoSync();
+      P.open('input'); await openTdee();
+      await rendered(() => S.calls.sync.length === n0 + 1, 'automatic delta refresh');
+      deepEq(S.calls.sync[n0], { full: false });
+      S.status.lastFullAt = Date.now() - 8 * 86400000;
+      V.test.resetAutoSync();
+      P.open('input'); await openTdee();
+      await rendered(() => S.calls.sync.length === n0 + 2, 'automatic full refresh');
+      deepEq(S.calls.sync[n0 + 1], { full: true });
+      S.status.lastFullAt = Date.now(); S.status.lastDeltaAt = Date.now();
+      V.test.resetAutoSync();
+      P.open('input'); await openTdee();
+      await sleep(100);
+      eq(S.calls.sync.length, n0 + 2, 'fresh data: no automatic refresh');
+      // the first open of a page load renders "Loading…" while init() runs: the check waits for the enabled view
+      S.status.lastFullAt = Date.now() - 86400000; S.status.lastDeltaAt = Date.now() - 11 * 60000;
+      V.test.resetAutoSync(); V.test.reinit();
+      P.open('input');
+      P.open('tdee');
+      ok(q('.cma-tdee-loading'), 'loading state first');
+      await rendered(() => S.calls.sync.length === n0 + 3, 'refresh after the stored data loaded');
+      deepEq(S.calls.sync[n0 + 2], { full: false });
+      S.status.lastFullAt = Date.now(); S.status.lastDeltaAt = Date.now();
+    });
+  });
+
+  describe('charts (plain SVG)', () => {
+    it('expenditure: band + estimate + faint Cronometer line; weight: dots, trend, outlier ring, excluded ticks — one path per series', async () => {
+      const days = person({ n: 400 });
+      days[380].weightKg = 8.3;            // a typo (8.3 for 83): the engine flags it as an outlier
+      scenario(days);
+      S.overrides[days[390].date] = true;   // an excluded day
+      S.emit('data');
+      await rendered(() => q('.cma-tdee-chart-exp') && q('.cma-tdee-l-excl'), 'charts');
+      const exp = q('.cma-tdee-chart-exp'), w = q('.cma-tdee-chart-weight');
+      eq(exp.querySelectorAll('.cma-tdee-l-main').length, 1); eq(exp.querySelectorAll('.cma-tdee-l-band').length, 1); eq(exp.querySelectorAll('.cma-tdee-l-faint').length, 1);
+      eq(w.querySelectorAll('.cma-tdee-l-main').length, 1); eq(w.querySelectorAll('.cma-tdee-l-dots').length, 1);
+      if (REAL) { eq(w.querySelectorAll('.cma-tdee-l-out').length, 1, 'outlier ring'); ok(model().days[380].weightOutlier, 'engine flagged the typo'); }
+      eq(w.querySelectorAll('.cma-tdee-l-excl').length, 1, 'excluded-day tick');
+      const points = (el) => (el.getAttribute('d').match(/[ML]/g) || []).length;
+      eq(points(exp.querySelector('.cma-tdee-l-main')), 180, 'last 180 days by default');
+      ok(/Weigh-ins/.test(text(q('.cma-tdee-charts'))) && /Cronometer burned, 7-day average/.test(text(q('.cma-tdee-charts'))), 'legends');
+      ok(/^Mon 28 Sep · expenditure/.test(text(q('.cma-tdee-readout'))), 'readout shows the latest day: ' + text(q('.cma-tdee-readout')));
+    });
+    it('the range selector switches 90 / 1 y / All and the node count stays bounded', async () => {
+      const points = () => (q('.cma-tdee-chart-exp .cma-tdee-l-main').getAttribute('d').match(/[ML]/g) || []).length;
+      for (const [label, want] of [['90 d', 90], ['1 y', 365], ['All', 400]]) {
+        qa('.cma-tdee-range .cma-tdee-seg').find(b => text(b) === label).click();
+        await rendered(() => points() === want, label + ' → ' + want + ' points (got ' + points() + ')');
+      }
+      for (const svg of qa('.cma-tdee-svg')) ok(svg.querySelectorAll('*').length <= 40, 'svg nodes ' + svg.querySelectorAll('*').length);
+      const all = q('.cma-tdee').querySelectorAll('*').length;
+      ok(all < 400, 'whole overview ' + all + ' nodes for 400 days');
+      qa('.cma-tdee-range .cma-tdee-seg').find(b => text(b) === '180 d').click();
+      await rendered(() => points() === 180, 'back to 180');
+    });
+    it('hovering moves the cursor and the readout names that day', async () => {
+      const svg = q('.cma-tdee-chart-weight');
+      const r = svg.getBoundingClientRect();
+      svg.dispatchEvent(new MouseEvent('mousemove', { clientX: r.left + r.width * (50 / 680), clientY: r.top + 20, bubbles: true }));
+      const ro = qa('.cma-tdee-readout')[1];
+      ok(/ · trend /.test(text(ro)), 'weight readout: ' + text(ro));
+      ok(svg.querySelector('.cma-tdee-l-cursor').getAttribute('d').length > 0, 'cursor drawn');
+      svg.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+      eq(svg.querySelector('.cma-tdee-l-cursor').getAttribute('d'), '');
+    });
+  });
+
+  const TARGETS = [];                          // every target the check-in tests saw (the diagnostics test greps for them)
+  describe('weekly check-in (spec §4)', () => {
+    let T1 = null;
+    it('a due check-in: the this-week card shows a preview; Check in opens the dialog with the target and the why', async () => {
+      S.settings = JSON.parse(JSON.stringify(S.defaults));
+      scenario(person({ n: 90 }));
+      await rendered(() => q('.cma-tdee-checkin') && !q('.cma-tdee-checkin').disabled, 'Check in enabled');
+      const cur = model().current;
+      const want = E.weeklyCheckIn({ model: cur, goal: { ratePctPerWeek: -0.5 }, sex: 'other', previousTargetKcal: null, goalChanged: false, settings: { proteinGPerKg: 1.8, fatShareOfRemaining: 0.35 } });
+      T1 = want.targetKcal;
+      TARGETS.push(T1);
+      ok(/preview/.test(text(q('.cma-tdee-target'))), 'preview tag');
+      eq(text(q('.cma-tdee-target .cma-tdee-num')), V.test.fmtInt(T1));
+      eq(text(q('.cma-tdee-next')), 'Check-in due today.');
+      if (REAL) ok(/^≈ −0\.[34]\d? kg\/week if you hit it$/.test(text(q('.cma-tdee-expect'))), 'expected change: ' + text(q('.cma-tdee-expect')));
+      q('.cma-tdee-checkin').click();
+      await rendered(() => q('.cma-tdee-dialog'), 'dialog');
+      const d = text(q('.cma-tdee-dialog'));
+      ok(d.indexOf('New target: ' + V.test.fmtInt(T1) + ' kcal/day') >= 0, 'new target line: ' + d);
+      ok(/Expenditure (moved from|stayed at)/.test(d), 'expenditure why');
+      if (REAL) ok(/Your trend weight changed by .* over the week while your logged intake averaged 2,517 kcal\/day \(the 6 days before today\)\./.test(d), 'trend + intake why: ' + d);
+      ok(/Goal: lose 0\.5% per week/.test(d), 'goal why');
+      ok(/Protein \d+ g · Fat \d+ g · Carbs \d+ g/.test(d), 'macros');
+      eq(S.calls.recordCheckin.length, 0, 'nothing recorded by opening it');
+    });
+    it('Accept records accepted:true with the engine target, shows "Your new target" with Copy, and the card keeps it', async () => {
+      let copied = null;
+      const orig = navigator.clipboard;
+      try { Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t) => { copied = t; } }, configurable: true }); } catch (e) { /* no stub */ }
+      q('.cma-tdee-accept').click();
+      await rendered(() => q('.cma-tdee-newtarget'), 'accepted phase');
+      eq(S.calls.recordCheckin.length, 1);
+      const c = S.calls.recordCheckin[0];
+      eq(c.accepted, true); eq(c.targetKcal, T1); eq(c.date, '2026-09-28'); eq(c.ratePctPerWeek, -0.5);
+      eq(c.goalRatePctPerWeek, -0.5, 'the goal the user had chosen is recorded (ratePctPerWeek is the capped rate)');
+      ok(c.macros && c.macros.proteinG > 0 && Array.isArray(c.notes) && typeof c.at === 'number', 'macros, notes, at recorded');
+      eq(c.expenditureKcal, model().current.expenditureKcal); eq(c.trendWeightKg, model().current.trendWeightKg);
+      eq(text(q('.cma-tdee-newtarget')), 'Your new target: ' + V.test.fmtInt(T1) + ' kcal');
+      ok(/Cronometer → Targets/.test(text(q('.cma-tdee-dialog'))), 'set it in Cronometer note');
+      q('.cma-tdee-dialog .cma-tdee-copy').click();
+      await rendered(() => copied !== null, 'clipboard');
+      eq(copied, String(T1), 'the plain number is copied');
+      try { Object.defineProperty(navigator, 'clipboard', { value: orig, configurable: true }); } catch (e) { /* ignore */ }
+      q('.cma-tdee-done').click();
+      await rendered(() => !q('.cma-tdee-dialog') && q('.cma-tdee-week'), 'back to the overview');
+      eq(text(q('.cma-tdee-target .cma-tdee-num')), V.test.fmtInt(T1));
+      ok(!/preview/.test(text(q('.cma-tdee-target'))), 'no longer a preview');
+      ok(q('.cma-tdee-checkin').disabled && q('.cma-tdee-skip').disabled, 'not due again this week');
+      eq(text(q('.cma-tdee-next')), 'Next check-in: Mon 5 Oct (Mondays).');
+    });
+    it('the target stays fixed between check-ins although the data (and the estimate) move', async () => {
+      const before = model().current.expenditureKcal;
+      scenario(person({ n: 90, tdee: 2617 }), { keepCheckins: true });
+      await rendered(() => model() && model().current && model().current.expenditureKcal !== before, 'the estimate moved');
+      const again = E.weeklyCheckIn({ model: model().current, goal: { ratePctPerWeek: -0.5 }, previousTargetKcal: T1, settings: { proteinGPerKg: 1.8, fatShareOfRemaining: 0.35 } });
+      if (REAL) ok(again.targetKcal !== T1, 'a new check-in would give ' + again.targetKcal + ', not ' + T1);
+      await sleep(150);
+      eq(text(q('.cma-tdee-target .cma-tdee-num')), V.test.fmtInt(T1), 'the card still shows the accepted target');
+      eq(S.calls.recordCheckin.length, 1, 'nothing recorded behind the user');
+    });
+    it('next week: "Skip this week" records accepted:false and keeps the target', async () => {
+      S.today = '2026-10-05';
+      scenario(person({ n: 97, tdee: 2617, end: '2026-10-05' }), { keepCheckins: true });
+      await rendered(() => q('.cma-tdee-skip') && !q('.cma-tdee-skip').disabled, 'due again on the next Monday');
+      q('.cma-tdee-skip').click();
+      await rendered(() => S.calls.recordCheckin.length === 2, 'skip recorded');
+      const c = S.calls.recordCheckin[1];
+      eq(c.accepted, false); eq(c.date, '2026-10-05'); eq(c.previousTargetKcal, T1);
+      await rendered(() => q('.cma-tdee-week') && q('.cma-tdee-checkin').disabled, 'not due after the skip');
+      eq(text(q('.cma-tdee-target .cma-tdee-num')), V.test.fmtInt(T1), 'target unchanged');
+      ok(text(q('.cma-tdee-msg')).indexOf('your target stays ' + V.test.fmtInt(T1) + ' kcal/day') >= 0, 'skip notice: ' + text(q('.cma-tdee-msg')));
+    });
+    it('a goal change allows an immediate check-in and lifts the weekly cap (goalChanged:true)', async () => {
+      await sleep(20);
+      await sub('settings');
+      q('#cma-tdee-s-goal').value = '0';
+      q('.cma-tdee-save').click();
+      await rendered(() => S.calls.saveSettings.length && S.calls.saveSettings[S.calls.saveSettings.length - 1].goal, 'saved');
+      const saved = S.calls.saveSettings[S.calls.saveSettings.length - 1];
+      eq(saved.goal.ratePctPerWeek, 0); eq(typeof saved.goalChangedAt, 'number');
+      await sub('overview');
+      await rendered(() => q('.cma-tdee-checkin') && !q('.cma-tdee-checkin').disabled, 'check-in re-opened by the goal change');
+      eq(text(q('.cma-tdee-next')), 'Your goal changed — you can check in now.');
+      q('.cma-tdee-checkin').click();
+      await rendered(() => q('.cma-tdee-dialog'), 'dialog');
+      ok(/the weekly limit on target changes does not apply/.test(text(q('.cma-tdee-dialog'))), 'goal-change line');
+      ok(/Goal: maintain your weight/.test(text(q('.cma-tdee-dialog'))), 'new goal');
+      q('.cma-tdee-accept').click();
+      await rendered(() => S.calls.recordCheckin.length === 3, 'accepted');
+      const c = S.calls.recordCheckin[2];
+      const cur = model().current;
+      const base = { model: cur, goal: { ratePctPerWeek: 0 }, sex: 'other', previousTargetKcal: T1, settings: { proteinGPerKg: 1.8, fatShareOfRemaining: 0.35 } };
+      const free = E.weeklyCheckIn(Object.assign({ goalChanged: true }, base)), capped = E.weeklyCheckIn(Object.assign({ goalChanged: false }, base));
+      TARGETS.push(free.targetKcal, capped.targetKcal, S.calls.recordCheckin[1].targetKcal);
+      eq(c.accepted, true); eq(c.goalChanged, true); eq(c.targetKcal, free.targetKcal);
+      if (REAL) { eq(cur.calibrated, true, 'the cap would apply to a calibrated model'); ok(capped.targetKcal !== free.targetKcal, 'capped ' + capped.targetKcal + ' vs free ' + free.targetKcal); }
+      q('.cma-tdee-done').click();
+      await rendered(() => q('.cma-tdee-week') && q('.cma-tdee-checkin').disabled, 'closed again');
+      eq(text(q('.cma-tdee-target .cma-tdee-num')), V.test.fmtInt(free.targetKcal));
+    });
+    it('checkInInfo: weekday slots, the 7-day first check-in, goal-change ordering', () => {
+      const s = V.test.normSettings({ checkInWeekday: 3, goal: { ratePctPerWeek: -0.5 } });   // Wednesdays
+      const m = { days: new Array(10).fill(0).map((x, i) => ({ date: addDaysIso('2026-09-28', i - 9) })), current: { expenditureKcal: 2500 } };
+      let i = V.test.checkInInfo(m, s, [], '2026-09-28');
+      eq(i.slot, '2026-09-23'); eq(i.due, true, 'never checked in, enough data');
+      i = V.test.checkInInfo(m, s, [{ date: '2026-09-24', accepted: true, targetKcal: 2000, at: 1 }], '2026-09-28');
+      eq(i.due, false); eq(i.next, '2026-09-30');
+      i = V.test.checkInInfo({ days: m.days.slice(0, 5), current: {} }, s, [], '2026-09-28');
+      eq(i.due, false); eq(i.enoughData, false); eq(i.daysToGo, 2);
+      const s2 = V.test.normSettings({ checkInWeekday: 3, goalChangedAt: 5000 });
+      i = V.test.checkInInfo(m, s2, [{ date: '2026-09-24', accepted: true, targetKcal: 2000, at: 4000 }, { date: '2026-09-25', accepted: false, targetKcal: 2100, at: 6000 }], '2026-09-28');
+      eq(i.due, false, 'a skip AFTER the goal change closes it again'); eq(i.goalChanged, true, 'but the cap is still lifted for the next check-in');
+    });
+    it('checkInInfo: moving the check-in day right after a check-in opens no new one within days; a goal changed and changed back is no change', () => {
+      const m = { days: new Array(20).fill(0).map((x, i) => ({ date: addDaysIso('2026-09-30', i - 19) })), current: { expenditureKcal: 2500 } };
+      const mon = { date: '2026-09-28', accepted: true, targetKcal: 2000, at: 4000, ratePctPerWeek: -0.5, goalRatePctPerWeek: -0.5 };
+      const wed = V.test.normSettings({ checkInWeekday: 3, goal: { ratePctPerWeek: -0.5 } });
+      let i = V.test.checkInInfo(m, wed, [mon], '2026-09-30');
+      eq(i.due, false, 'Wednesday is 2 days after the Monday check-in'); eq(i.next, '2026-10-04', 'no sooner than 6 days after it');
+      i = V.test.checkInInfo(m, wed, [mon], '2026-10-04');
+      eq(i.due, true, 'then the (Wednesday) slot is open');
+      const back = V.test.normSettings({ checkInWeekday: 1, goal: { ratePctPerWeek: -0.5 }, goalChangedAt: 5000 });   // -0.5 -> 0 -> -0.5
+      i = V.test.checkInInfo(m, back, [mon], '2026-09-29');
+      eq(i.due, false, 'the goal is the one of the last check-in: nothing re-opens'); eq(i.goalChanged, false, 'and the weekly cap still applies');
+      const real = V.test.normSettings({ checkInWeekday: 1, goal: { ratePctPerWeek: -1 }, goalChangedAt: 5000 });
+      i = V.test.checkInInfo(m, real, [mon], '2026-09-29');
+      eq(i.due, true); eq(i.byGoal, true); eq(i.goalChanged, true, 'a real goal change re-opens it at once, without the cap');
+    });
+    it('activity-aware "Today" line: only above-average activity adds food while the day runs, never under the calorie floor; the note follows the inputs', () => {
+      if (!REAL) return;
+      const u = { energy: 'kcal', weight: 'kg' }, T0 = '2026-09-28';
+      const m = (ratio, avg) => ({ current: { cronometerCalibrationRatio: ratio, cronometerBurned14Kcal: avg }, days: [{ date: T0, cronometerBurnedKcal: null }] });
+      const day = (b) => [{ date: T0, burnedKcal: b }];
+      const aa = V.test.activityAwareLine;
+      eq(aa(m(0.85, 2000), 2000, u, T0, day(2400), { sex: 'other' }), 'Today: 2,340 kcal', 'more food for activity above the average');
+      eq(aa(m(0.85, 2000), 1200, u, T0, day(1450), { sex: 'female' }), 'Today: 1,200 kcal (activity so far is below your average: not lowered while the day runs)', 'the engine alone says 730');
+      eq(aa(m(0.85, 2000), 1200, u, T0, day(2100), { sex: 'male' }), 'Today: 1,500 kcal (kept at the 1,500 kcal minimum)', 'never under the floor of the sex set now');
+      eq(aa(m(0.85, 2000), 2150, u, T0, [], { sex: 'other' }), 'Today: 2,150 kcal (no Cronometer figure for today yet)');
+      eq(aa(m(null, null), 2150, u, T0, day(2653), { sex: 'other' }), 'Today: 2,150 kcal (no Cronometer burned average to compare with)');
+      eq(aa(m(1, 2653), 2150, u, T0, day(2653), { sex: 'other' }), 'Today: 2,150 kcal', 'an average day: no note (it used to claim "no activity figure")');
+      eq(aa(m(0.85, 2000), 2000, { energy: 'kJ', weight: 'kg' }, T0, day(2400), { sex: 'other' }), 'Today: 9,797 kJ');
+    });
+    it("the engine's guardrail notes and the calorie-floor hint read in the display unit", () => {
+      const kj = { energy: 'kJ', weight: 'kg' };
+      eq(V.test.noteText('Weekly change limited to ±250 kcal; the rest will follow next week if the trend holds.', kj), 'Weekly change limited to ±1,047 kJ; the rest will follow next week if the trend holds.');
+      eq(V.test.noteText('Target raised to the 1200 kcal minimum.', kj), 'Target raised to the 5,024 kJ minimum.');
+      eq(V.test.noteText('Target raised to the 1200 kcal minimum.', { energy: 'kcal', weight: 'kg' }), 'Target raised to the 1200 kcal minimum.');
+      eq(V.test.noteText('Loss rate capped at 1%/week.', kj), 'Loss rate capped at 1%/week.');
+    });
+  });
+
+  describe('settings sub-view', () => {
+    it('round trip: every field saved; responsiveness maps to the engine drift; manual start in kcal; units switch the display', async () => {
+      // CMA.tdee is frozen (tools/gen_tdee.py): spy by swapping the namespace object, which the view reads per call
+      const seen = [];
+      const realNs = CMA.tdee;
+      CMA.tdee = Object.assign({}, realNs, { runExpenditureModel(recs, opts) { seen.push(opts); return realNs.runExpenditureModel(recs, opts); } });
+      try {
+        S.today = '2026-09-28';
+        S.settings = JSON.parse(JSON.stringify(S.defaults));
+        scenario(person({ n: 90 }));
+        await sub('settings');
+        eq(q('#cma-tdee-s-resp').value, 'balanced'); eq(q('#cma-tdee-s-weekday').value, '1'); eq(q('#cma-tdee-s-goal').value, '-0.5');
+        ok(/Lose 0\.5% per week \(≈ 0\.42 kg\/week\)/.test(text(q('#cma-tdee-s-goal'))), 'goal presets carry the kg/week equivalent: ' + text(q('#cma-tdee-s-goal')));
+        eq(q('#cma-tdee-s-goal').options.length, 8, 'Lose 0.25/0.5/0.75/1.0, Maintain, Gain 0.1/0.25/0.5');
+        q('#cma-tdee-s-resp').value = 'responsive';
+        q('#cma-tdee-s-weekday').value = '3';
+        q('#cma-tdee-s-protein').value = '2.2';
+        q('#cma-tdee-s-fat').value = '0.5';
+        q('#cma-tdee-s-sex').value = 'female';
+        q('#cma-tdee-s-wunit').value = 'lb';
+        q('#cma-tdee-s-eunit').value = 'kJ';
+        q('#cma-tdee-s-aa').checked = true;
+        q('#cma-tdee-s-trust').checked = true;
+        q('#cma-tdee-s-manual').value = '2400';
+        const n0 = S.calls.saveSettings.length;
+        q('.cma-tdee-save').click();
+        await rendered(() => S.calls.saveSettings.length === n0 + 1, 'saved');
+        deepEq(S.calls.saveSettings[n0], {
+          goal: { ratePctPerWeek: -0.5 }, checkInWeekday: 3, responsiveness: 'responsive', manualInitialKcal: 2400, proteinGPerKg: 2.2, fatShare: 0.5,
+          sex: 'female', units: { weight: 'lb', energy: 'kJ' }, activityAware: true, trustCompleteOnly: true, modelStartDate: null
+        });
+        await rendered(() => text(q('.cma-tdee-settings-status')) === 'Saved.', 'saved note');
+        eq(q('#cma-tdee-s-resp').value, 'responsive', 'the re-rendered form shows the stored values');
+        eq(q('#cma-tdee-s-manual').value, String(Math.round(2400 * 4.1868)), 'the starting estimate is shown in kJ now');
+        await sub('overview');
+        const opts = seen[seen.length - 1];
+        eq(opts.config.expenditureDriftKcal, 25, 'Responsive → 25 kcal/day drift');
+        eq(opts.initialExpenditureKcal, 2400);
+        ok(/ kJ\/day ± /.test(text(q('.cma-tdee-big'))), 'energy in kJ: ' + text(q('.cma-tdee-big')));
+        ok(/Trend weight 183\.\d lb/.test(text(q('.cma-tdee-exp'))), 'weight in lb: ' + text(q('.cma-tdee-exp')));
+        ok(/Experimental — follows Cronometer's activity estimate/.test(text(q('.cma-tdee-week'))), 'activity-aware line when enabled');
+        if (REAL) eq(model().current.priorSource, 'manual');
+        S.settings.responsiveness = 'stable'; S.emit('data');
+        await rendered(() => seen.length && seen[seen.length - 1].config.expenditureDriftKcal === 10, 'Stable → 10');
+        S.settings.responsiveness = 'balanced'; S.emit('data');
+        await rendered(() => seen[seen.length - 1].config.expenditureDriftKcal === 15, 'Balanced → 15');
+      } finally {
+        CMA.tdee = realNs;
+        S.settings = JSON.parse(JSON.stringify(S.defaults));
+        S.emit('data');
+      }
+    });
+    it('units: automatic follows Cronometer (kJ account, stone), explicit settings win; unknown preferences fall back to kcal/kg', async () => {
+      const t = V.test, ns = t.normSettings;
+      deepEq(t.unitsFor(ns({}), { prefs: null }), { energy: 'kcal', weight: 'kg' });
+      deepEq(t.unitsFor(ns({}), { prefs: { tef: false, unitsCalories: null, weightUnit: null, assumed: true } }), { energy: 'kcal', weight: 'kg' },
+        "not read: kcal and kg, never Cronometer's defaults (kcal, Pounds) shown as the account's settings");
+      deepEq(t.unitsFor(ns({}), { prefs: { unitsCalories: true, weightUnit: 'Pounds' } }), { energy: 'kcal', weight: 'lb' }, 'read: Pounds');
+      deepEq(t.unitsFor(ns({}), { prefs: { unitsCalories: 'false', weightUnit: 'Stone' } }), { energy: 'kJ', weight: 'st' });
+      deepEq(t.unitsFor(ns({ units: { energy: 'kcal', weight: 'kg' } }), { prefs: { unitsCalories: false, weightUnit: 'Pounds' } }), { energy: 'kcal', weight: 'kg' });
+      eq(t.fmtW(83.17, { weight: 'st' }), '13 st 1.4 lb');
+      eq(t.fmtW(83.17, { weight: 'lb' }), '183.4 lb');
+      eq(t.fmtWDelta(-0.4, { weight: 'kg' }, true), '−0.4 kg');
+      eq(t.fmtWDelta(0.25, { weight: 'st' }, true), '+0.6 lb');
+      eq(t.fmtE(2480, { energy: 'kJ' }), '10,383');
+      S.status.prefs = { tef: false, unitsCalories: false, weightUnit: 'Stone', at: 2 };
+      S.emit('data');
+      await rendered(() => / kJ\/day ± /.test(text(q('.cma-tdee-big'))) && / st /.test(text(q('.cma-tdee-exp'))), 'kJ + stone from the preferences');
+      S.status.prefs = { tef: false, unitsCalories: true, weightUnit: 'Kilograms', at: 3 };
+      S.emit('data');
+      await rendered(() => / kcal\/day ± /.test(text(q('.cma-tdee-big'))) && / kg/.test(text(q('.cma-tdee-exp'))), 'back to kcal/kg');
+    });
+    it('model start date: Reset starts today (warm-up again), "Use all history" clears it; records() gets the date', async () => {
+      await sub('settings');
+      q('.cma-tdee-reset').click();
+      await rendered(() => S.settings.modelStartDate === '2026-09-28', 'reset saved');
+      await sub('overview');
+      await rendered(() => /The estimate starts again from today/.test(text(q('.cma-tdee-exp'))), "reset: today's partial figures are no estimate, got " + text(q('.cma-tdee-exp')));
+      ok(/The first estimate appears tomorrow/.test(text(q('.cma-tdee-exp'))));
+      deepEq(S.calls.records[S.calls.records.length - 1], { modelStartDate: '2026-09-28' });
+      await sub('settings');
+      eq(q('#cma-tdee-s-start').value, '2026-09-28');
+      q('.cma-tdee-allhistory').click();
+      await rendered(() => S.settings.modelStartDate === null, 'cleared');
+      await sub('overview');
+      await rendered(() => chip() !== '' && !/starts again from today/.test(text(q('.cma-tdee-exp'))), 'whole history again');
+    });
+    it('a sync or an error that ends while Settings is open keeps the unsaved edits; Reset and Save keep or store them', async () => {
+      S.settings = JSON.parse(JSON.stringify(S.defaults));
+      scenario(person({ n: 90 }));
+      await sub('overview');
+      let release = null;
+      const realSync = CMA.tdeeData.sync;
+      CMA.tdeeData.sync = function (o) {
+        S.calls.sync.push(JSON.parse(JSON.stringify(o)));
+        S.status.syncing = true; S.emit('status');
+        return new Promise((r) => { release = () => { S.status.syncing = false; S.status.lastDeltaAt = Date.now(); S.emit('data'); S.emit('status'); r(CMA.tdeeData.status()); }; });
+      };
+      try {
+        await rendered(() => q('.cma-tdee-refresh') && !q('.cma-tdee-refresh').disabled, 'refresh button');
+        q('.cma-tdee-refresh').click();
+        await rendered(() => typeof release === 'function', 'the refresh is running');
+        await sub('settings');
+        const goal = q('#cma-tdee-s-goal'), manual = q('#cma-tdee-s-manual'), sex = q('#cma-tdee-s-sex');
+        goal.value = '-1'; goal.dispatchEvent(new Event('change', { bubbles: true }));
+        manual.value = '2222'; manual.dispatchEvent(new Event('input', { bubbles: true }));
+        sex.value = 'female'; sex.dispatchEvent(new Event('change', { bubbles: true }));
+        release();
+        await sleep(300);
+        ok(goal.isConnected && manual.isConnected, 'the form was not rebuilt when the refresh ended');
+        eq(goal.value, '-1'); eq(manual.value, '2222'); eq(sex.value, 'female');
+        S.emit('error');
+        await sleep(200);
+        ok(goal.isConnected, 'nor by an error event');
+        q('.cma-tdee-reset').click();
+        await rendered(() => S.settings.modelStartDate === '2026-09-28' && !goal.isConnected, 'Reset saved the start date and re-rendered');
+        eq(q('#cma-tdee-s-goal').value, '-1'); eq(q('#cma-tdee-s-manual').value, '2222'); eq(q('#cma-tdee-s-sex').value, 'female', 'the other edits survived');
+        eq(q('#cma-tdee-s-start').value, '2026-09-28');
+        const n0 = S.calls.saveSettings.length;
+        q('.cma-tdee-save').click();
+        await rendered(() => S.calls.saveSettings.length === n0 + 1, 'saved');
+        const saved = S.calls.saveSettings[n0];
+        deepEq([saved.goal.ratePctPerWeek, saved.manualInitialKcal, saved.sex, saved.modelStartDate], [-1, 2222, 'female', '2026-09-28']);
+        eq(V.test.draft(), null, 'Save drops the draft');
+      } finally {
+        CMA.tdeeData.sync = realSync;
+        S.status.syncing = false;
+        S.settings = JSON.parse(JSON.stringify(S.defaults)); S.emit('data');
+        await sub('overview');
+      }
+    });
+    it("preferences that could not be read: 'auto' shows kg / kcal and says so; TEF is \"not counted\", not \"off in Cronometer\"; the floor hint follows the unit", async () => {
+      const savedPrefs = S.status.prefs;
+      S.status.prefs = { tef: false, unitsCalories: null, weightUnit: null, at: 5, assumed: true };
+      S.probe = { date: '2026-09-27', consumed: 2143, burned: 2610, parts: { bmr: 1720, activity: 540, exercise: 350, tef: 95.5 }, row: [2143, -350, 0, 1720, 95.5, 0, 0, 0, 0, 400, 140, -467], tefIncluded: false, weighIn: { date: '2026-09-27', kg: 81.4 } };
+      try {
+        scenario(person({ n: 90 }));
+        await rendered(() => q('.cma-tdee-probe') && /TEF not counted \(Cronometer’s TEF setting could not be read\)/.test(text(q('.cma-tdee-probe'))), 'probe line: ' + text(q('.cma-tdee-probe')));
+        ok(/Trend weight \d+\.\d kg/.test(text(q('.cma-tdee-exp'))), 'kg, not a guessed lb: ' + text(q('.cma-tdee-exp')));
+        await sub('settings');
+        eq(text(q('#cma-tdee-s-wunit option[value="auto"]')), 'Automatic (kg — Cronometer’s setting could not be read)');
+        eq(text(q('#cma-tdee-s-eunit option[value="auto"]')), 'Automatic (kcal — Cronometer’s setting could not be read)');
+        S.status.prefs = { tef: false, unitsCalories: false, weightUnit: 'Stone', at: 6, assumed: false };
+        S.emit('status'); await sub('overview'); await sub('settings');
+        eq(text(q('#cma-tdee-s-wunit option[value="auto"]')), 'Automatic (Cronometer: st)');
+        ok(/Only used for the calorie floor \(5,024 \/ 6,280 \/ 5,652 kJ\)\./.test(text(q('.cma-tdee-form'))), 'floor hint in kJ: ' + text(q('.cma-tdee-form')));
+      } finally {
+        S.status.prefs = savedPrefs; S.probe = null; S.emit('data');
+        await sub('overview');
+      }
+    });
+    it('a first sync that paused before the food log was read says so, not "Log your food"', async () => {
+      if (!REAL) return;
+      const saved = { lastFullAt: S.status.lastFullAt, blockedReason: S.status.blockedReason };
+      S.status.lastFullAt = null;
+      S.status.blockedReason = 'Cronometer deployed a new build: TDEE data is unavailable until the decoder is rebuilt (see Diagnostics).';
+      try {
+        scenario(person({ n: 20 }).map(d => Object.assign(d, { intakeKcal: null, burnedKcal: null, burnedParts: null, loggedFood: null })));
+        await rendered(() => /Your food log has not been read yet/.test(text(q('.cma-tdee-exp'))), 'paused first sync: ' + text(q('.cma-tdee-exp')));
+        ok(/Reading is paused: Cronometer deployed a new build/.test(text(q('.cma-tdee-exp'))));
+        ok(!/Log your food/.test(text(q('.cma-tdee-exp'))));
+      } finally { Object.assign(S.status, saved); S.emit('data'); }
+    });
+    it('CSV: the Daily Nutrition and Biometrics file inputs pass the file text to importCsv', async () => {
+      await sub('settings');
+      const put = async (id, name, body) => {
+        const input = q(id);
+        const dt = new DataTransfer();
+        dt.items.add(new File([body], name, { type: 'text/csv' }));
+        input.files = dt.files;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      const nut = 'Date,Energy (kcal)\n2026-01-01,2100\n2026-01-02,1900\n';
+      await put('#cma-tdee-csv-nutrition', 'dailysummary.csv', nut);
+      await rendered(() => S.calls.importCsv.length === 1, 'nutrition read');
+      deepEq(S.calls.importCsv[0], { kind: 'nutrition', text: nut });
+      await rendered(() => /Daily Nutrition CSV: 2 days read, 0 skipped\./.test(text(q('.cma-tdee-msg'))), 'result message');
+      const bio = 'Day,Time,Group,Metric,Unit,Amount\n2026-01-01,07:00 AM,,Weight,kg,80.1\n';
+      await put('#cma-tdee-csv-biometrics', 'biometrics.csv', bio);
+      await rendered(() => S.calls.importCsv.length === 2, 'biometrics read');
+      eq(S.calls.importCsv[1].kind, 'biometrics');
+      vs_msg_clear();
+    });
+    it('"Delete TDEE data" asks first, then disable({forget:true}) and the consent screen returns', async () => {
+      await sub('settings');
+      q('.cma-tdee-del').click();
+      await rendered(() => q('.cma-tdee-del-yes'), 'confirmation');
+      q('.cma-tdee-del-no').click();
+      await rendered(() => q('.cma-tdee-del'), 'cancelled');
+      eq(S.calls.disable.length, 0);
+      q('.cma-tdee-del').click();
+      await rendered(() => q('.cma-tdee-del-yes'), 'confirmation again');
+      q('.cma-tdee-del-yes').click();
+      await rendered(() => q('.cma-tdee-consent'), 'consent screen');
+      deepEq(S.calls.disable[0], { forget: true });
+      ok(/deleted from this browser/.test(text(q('.cma-tdee'))), 'deletion notice');
+      button('Enable').click();
+      await rendered(() => q('.cma-tdee-subnav'), 're-enabled for the next tests');
+      S.status.lastFullAt = Date.now(); S.status.lastDeltaAt = Date.now();
+    });
+  });
+  function vs_msg_clear() { const x = q('.cma-tdee-msg-x'); if (x) x.click(); }
+
+  describe('history, exclusions and nudges (spec §2.3, §6.6)', () => {
+    it('the last 60 days newest first, then older days one page at a time (60 rows at most, however long the history)', async () => {
+      scenario(person({ n: 1826 }));
+      await sub('history');
+      await rendered(() => qa('.cma-tdee-hrow').length === 60, '60 rows of 5 years');
+      ok(q('.cma-tdee').querySelectorAll('*').length < 1200, 'bounded: ' + q('.cma-tdee').querySelectorAll('*').length + ' elements');
+      eq(text(q('.cma-tdee-page')), 'Days 1–60 of 1,826 (newest first)');
+      scenario(person({ n: 90 }));
+      await rendered(() => text(q('.cma-tdee-page')) === 'Days 1–60 of 90 (newest first)', '90 days');
+      eq(qa('.cma-tdee-hrow')[0].dataset.date, '2026-09-28');
+      ok(/\(today\)/.test(text(qa('.cma-tdee-hrow')[0])), 'today marked');
+      eq(text(qa('.cma-tdee-hrow')[1].querySelector('.cma-tdee-c-in')), '2,517');
+      eq(text(qa('.cma-tdee-hrow')[1].querySelector('.cma-tdee-c-w')), '83.2 kg');
+      ok(q('.cma-tdee-newer').disabled, 'no newer page');
+      q('.cma-tdee-older').click();
+      await rendered(() => qa('.cma-tdee-hrow').length === 30 && qa('.cma-tdee-hrow')[0].dataset.date === '2026-07-30', 'the older 30 days');
+      ok(q('.cma-tdee-older').disabled, 'no older page');
+      q('.cma-tdee-newer').click();
+      await rendered(() => qa('.cma-tdee-hrow').length === 60 && qa('.cma-tdee-hrow')[0].dataset.date === '2026-09-28', 'back to the newest');
+    });
+    it('the exclude toggle calls setOverride(date, true); unticking a day you excluded sends null', async () => {
+      const row = () => qa('.cma-tdee-hrow').find(r => r.dataset.date === '2026-09-20');
+      const box = () => row().querySelector('.cma-tdee-excl');
+      eq(box().checked, false);
+      box().click();
+      await rendered(() => S.calls.setOverride.length === 1, 'override');
+      deepEq(S.calls.setOverride[0], ['2026-09-20', true]);
+      await rendered(() => box().checked && /excluded by you/.test(text(row())), 'row shows the exclusion');
+      box().click();
+      await rendered(() => S.calls.setOverride.length === 2, 'cleared');
+      deepEq(S.calls.setOverride[1], ['2026-09-20', null]);
+    });
+    it('partial-day prompt: "Fully logged?" with Exclude / "Yes, I ate little", in the overview and in the history row', async () => {
+      const days = person({ n: 90 });
+      const d = days[days.length - 4];
+      d.intakeKcal = 640; d.partialSuspect = true;
+      scenario(days);
+      await sub('overview');
+      await rendered(() => q('.cma-tdee-partial'), 'overview nudge');
+      ok(/Fri 25 Sep: 640 kcal logged — Fully logged\?/.test(text(q('.cma-tdee-partial'))), 'nudge text: ' + text(q('.cma-tdee-partial')));
+      const n0 = S.calls.setOverride.length;
+      q('.cma-tdee-partial .cma-tdee-p-keep').click();
+      await rendered(() => S.calls.setOverride.length === n0 + 1, 'kept as logged');
+      deepEq(S.calls.setOverride[n0], [d.date, false]);
+      await rendered(() => !q('.cma-tdee-partial'), 'answered: the prompt goes away');
+      delete S.overrides[d.date]; S.emit('data');
+      await sub('history');
+      const row = () => qa('.cma-tdee-hrow').find(r => r.dataset.date === d.date);
+      await rendered(() => row() && /Fully logged\?/.test(text(row())), 'history prompt');
+      ok(row().querySelector('.cma-tdee-excl').checked && /looks partly logged/.test(text(row())), 'excluded until confirmed');
+      row().querySelector('.cma-tdee-p-exclude').click();
+      await rendered(() => S.calls.setOverride.length === n0 + 2, 'excluded');
+      deepEq(S.calls.setOverride[n0 + 1], [d.date, true]);
+      delete S.overrides[d.date]; S.emit('data');
+      await rendered(() => row() && /looks partly logged/.test(text(row())), 'heuristic again');
+      row().querySelector('.cma-tdee-excl').click();
+      await rendered(() => S.calls.setOverride.length === n0 + 3, 'unticked');
+      deepEq(S.calls.setOverride[n0 + 2], [d.date, false], 'unticking a heuristic exclusion says "fully logged"');
+    });
+    it('weigh-in nudge: "You\'ve weighed in once this week — …", dismissible until the next check-in week', async () => {
+      scenario(person({ n: 60, weigh: (t) => t < 52 || t === 59 }));
+      await sub('overview');
+      await rendered(() => q('.cma-tdee-weighin'), 'nudge');
+      eq(text(q('.cma-tdee-weighin > span')), "You've weighed in once this week — 3+ weigh-ins make this more accurate");
+      eq(V.test.weighInNudgeText([{ date: '2026-09-27', weightKg: 80 }, { date: '2026-09-28', weightKg: 80 }], '2026-09-28'), "You've weighed in twice this week — 3+ weigh-ins make this more accurate");
+      eq(V.test.weighInNudgeText([], '2026-09-28'), "You haven't weighed in this week — 3+ weigh-ins make this more accurate");
+      q('.cma-tdee-dismiss-weighin').click();
+      await rendered(() => !q('.cma-tdee-weighin'), 'dismissed');
+      const last = S.calls.saveSettings[S.calls.saveSettings.length - 1];
+      deepEq(last, { nudges: { weighIn: '2026-09-28' } }, 'dismissal stored in the settings (keyed by the check-in week)');
+    });
+    it('"Check the numbers": the most recent full day with the burned parts and the latest weigh-in', async () => {
+      // parts.tef is Cronometer's raw TEF (row[4]); it counts only when the account's preference adds it
+      S.probe = { date: '2026-09-27', consumed: 2143, burned: 2610, parts: { bmr: 1720, activity: 540, exercise: 350, tef: 95.5 }, row: [2143, -350, 0, 1720, 95.5, 0, 0, 0, 0, 400, 140, -467], weighIn: { date: '2026-09-27', kg: 81.4 } };
+      S.emit('data');
+      await rendered(() => /Most recent full day/.test(text(q('.cma-tdee-probe'))), 'probe block');
+      const t = text(q('.cma-tdee-probe'));
+      ok(t.indexOf('Most recent full day: Sun 27 Sep 2026') >= 0, t);
+      ok(t.indexOf('Consumed 2,143 kcal · Burned 2,610 kcal (BMR 1,720 + activity 540 + exercise 350 + TEF off in Cronometer)') >= 0, t);
+      ok(t.indexOf('Latest weigh-in: 81.4 kg (Sun 27 Sep)') >= 0, t);
+      ok(t.indexOf("These should match the diary's Energy Summary for 27 Sep 2026. If they don't, press “Copy these numbers”, add the diary's Consumed and Burned values and paste both into an issue") >= 0, t);
+      ok(/The Diagnostics dump does not contain them\./.test(t), 'no false promise about Diagnostics');
+      ok(/2143, -350, 0, 1720, 95\.5/.test(text(q('.cma-tdee-raw'))), 'raw row available');
+      let copied = null;
+      const orig = navigator.clipboard;
+      try { Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (x) => { copied = x; } }, configurable: true }); } catch (e) { /* no stub */ }
+      try {
+        q('.cma-tdee-copy-numbers').click();
+        await rendered(() => copied !== null, 'copied');
+      } finally { try { Object.defineProperty(navigator, 'clipboard', { value: orig, configurable: true }); } catch (e) { /* ignore */ } }
+      ok(/^Adaptive TDEE check \(Multi-Add for Cronometer\), 2026-09-27\n/.test(copied), copied);
+      ok(copied.indexOf('Burned 2,610 kcal (BMR 1,720 + activity 540 + exercise 350 + TEF off in Cronometer)') >= 0, copied);
+      ok(copied.indexOf('Raw row (kcal, as sent): 2143, -350, 0, 1720, 95.5, 0, 0, 0, 0, 400, 140, -467') >= 0, copied);
+      ok(/Cronometer TEF setting: off/.test(copied) && /Consumed ____/.test(copied), copied);
+      const dump = P.diagnosticsText();
+      ok(dump.indexOf('2143') < 0 && dump.indexOf('2,610') < 0 && dump.indexOf('95.5') < 0, 'the copied numbers are not logged');
+      await rendered(() => q('.cma-tdee-msg-x'), 'the copy notice');
+      eq(q('.cma-tdee-msg-x').getAttribute('aria-label'), 'Dismiss message', 'the × has a label');
+      q('.cma-tdee-msg-x').click();
+      S.probe = Object.assign({}, S.probe, { tefIncluded: true });
+      S.emit('data');
+      await rendered(() => / \+ TEF 96\)/.test(text(q('.cma-tdee-probe'))), 'TEF counted when the probe says so');
+      S.probe = { date: null, consumed: null, burned: null, parts: null, row: null, weighIn: { date: '2026-09-26', kg: 80.5 } };
+      S.emit('data');
+      await rendered(() => /No complete day has been read yet\./.test(text(q('.cma-tdee-probe'))) && /Latest weigh-in: 80\.5 kg \(Sat 26 Sep\)/.test(text(q('.cma-tdee-probe'))), 'a weigh-in without an energy day');
+    });
+  });
+
+  describe('keyboard', () => {
+    it('the focus survives a re-render; the charts read out with the arrow keys', async () => {
+      scenario(person({ n: 60, weigh: (t) => t < 52 || t === 59 }));   // the scenario the next tests expect
+      await sub('history');
+      const box = () => { const r = qa('.cma-tdee-hrow').find(x => x.dataset.date === '2026-09-19'); return r ? r.querySelector('.cma-tdee-excl') : null; };
+      await rendered(() => box(), 'history row');
+      const before = box();
+      before.focus();
+      eq(P.root.activeElement, before, 'focused');
+      S.emit('data');
+      await rendered(() => !before.isConnected && box(), 're-rendered');
+      eq(P.root.activeElement, box(), "the same day's checkbox has the focus again");
+      await sub('overview');
+      const svg = q('.cma-tdee-chart-weight');
+      eq(svg.getAttribute('tabindex'), '0', 'the chart is focusable');
+      const ro = qa('.cma-tdee-readout')[1];
+      eq(ro.getAttribute('aria-live'), 'polite');
+      const latest = text(ro);
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+      ok(/^Sun 27 Sep · trend /.test(text(ro)), 'one day back: ' + text(ro));
+      ok(svg.querySelector('.cma-tdee-l-cursor').getAttribute('d').length > 0, 'cursor drawn');
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+      eq(text(ro), latest, 'End: the latest day');
+    });
+  });
+
+  describe('neutral colours (spec §6: no red/green judgement)', () => {
+    it('the view css names no accent / ok / error token, and no element of the view uses the panel\'s green or red classes', async () => {
+      const css = V.css;
+      ok(!/--accent|--ok\b|--err/.test(css), 'css tokens');
+      ok(!/\b(red|green|lime|crimson)\b/i.test(css), 'no named red/green colours');
+      await sub('overview');
+      const root = q('.cma-tdee');
+      eq(root.querySelectorAll('.cma-btn-primary, .cma-btn-danger, .cma-banner-ok, .cma-notice-error, .cma-ok, .cma-err').length, 0);
+      eq(P.root.querySelectorAll('.cma-footer .cma-btn-primary, .cma-footer .cma-btn-danger').length, 0, 'footer too');
+      const accent = getComputedStyle(P.root.querySelector('.cma')).getPropertyValue('--accent').trim();
+      const probe = document.createElement('div'); probe.style.color = accent; document.body.appendChild(probe);
+      const accentRgb = getComputedStyle(probe).color; probe.remove();
+      const strong = q('.cma-tdee-primary') || q('.cma-tdee-btn');
+      ok(strong, 'a TDEE button to measure');
+      for (const e of [strong, q('.cma-tdee-chip'), q('.cma-tdee-num')]) {
+        const cs = getComputedStyle(e);
+        ok(cs.backgroundColor !== accentRgb && cs.color !== accentRgb, 'not the accent colour: ' + cs.backgroundColor + ' / ' + cs.color);
+      }
+    });
+  });
+
+  describe('diagnostics', () => {
+    it('views.tdee carries counts, ranges and flags only — no weight, intake, burned, expenditure or target (and no nonce)', async () => {
+      S.checkins = JSON.parse(JSON.stringify(S.calls.recordCheckin));   // the three check-ins recorded above (the delete test wiped them)
+      const obj = P.diagnosticsObject();
+      const d = obj.views && obj.views.tdee;
+      ok(d && d.status && d.status.counts && d.status.counts.days === 60, 'counts present');
+      eq(d.status.enabled, true); deepEq(d.checkins, { total: 3, accepted: 2, skipped: 1, lastDate: '2026-10-05' }, 'check-in counts only');
+      ok(d.model && typeof d.model.days === 'number', 'model summary');
+      const json = JSON.stringify(d);
+      const all = P.diagnosticsText();
+      const cur = model().current;
+      ok(TARGETS.length >= 3, 'targets seen by the check-in tests');
+      const forbidden = ['83.17', '83.2', '2517', '2,517', '2653', '2,653', '2617', String(cur.expenditureKcal), String(cur.trendWeightKg)]
+        .concat(TARGETS.map(String), S.checkins.map(c => String(c.expenditureKcal)));
+      for (const v of forbidden) {
+        const re = new RegExp('(^|[^0-9.])' + v.replace(/[.,]/g, '\\$&') + '([^0-9]|$)');
+        ok(!re.test(json), 'view diagnostics leak ' + v);
+        ok(!re.test(all), 'diagnostics dump leaks ' + v);
+      }
+      for (const k of ['weightKg', 'intakeKcal', 'targetKcal', 'expenditureKcal', 'trendWeightKg', 'burnedKcal', 'macros']) ok(json.indexOf('"' + k + '"') < 0, 'key ' + k);
+      ok(all.indexOf(window.__NONCE) < 0, 'no nonce in the dump');
+    });
+  });
+
+  describe('lifecycle', () => {
+    it('one tdee-data listener; unmount drops it and a remount renders again; switching away tells the view', async () => {
+      await openTdee();
+      eq(CMA.events.count('tdee-data'), 1);
+      P.open('input');
+      const n = S.calls.records.length;
+      S.emit('data');
+      await sleep(200);
+      eq(S.calls.records.length, n, 'no recompute while another view is shown');
+      P.unmount();
+      eq(CMA.events.count('tdee-data'), 0, 'unsubscribed on unmount');
+      P.mount();
+      await openTdee();
+      eq(CMA.events.count('tdee-data'), 1, 'one listener again');
+      ok(q('.cma-tdee-exp'), 'rendered after the remount');
+    });
+  });
+
+  // The same view against the REAL data layer (agent-built src/tdee/tdee-data.js), offline: no chrome.storage in a
+  // plain page and no CMA.rpc, so its sync is blocked with a reason and the data comes from CSV files. Proves the
+  // contract (status/ready, enable, importCsv, dayList, records, setOverride, saveSettings, recordCheckin, disable).
+  describe('integration with the real data layer (src/tdee/tdee-data.js, offline: CSV files, no RPC client)', () => {
+    let RD = false;
+    const put = (id, name, body) => {
+      const input = q(id);
+      const dt = new DataTransfer();
+      dt.items.add(new File([body], name, { type: 'text/csv' }));
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    it('the real module replaces the stub; the view shows its consent screen', async () => {
+      const loaded = await loadScript('../src/tdee/tdee-data.js');
+      if (!loaded || !CMA.tdeeData || !CMA.tdeeData._test || CMA.tdeeData.probe === undefined) { ok(true, 'src/tdee/tdee-data.js not available: skipped'); return; }
+      RD = true;
+      CMA.tdeeData._test.configure({ today: () => '2026-09-28', spacingMs: 0, debounceMs: 0 });
+      CMA.tdeeData._test.reset();
+      V.test.reset(); V.test.reinit();
+      P.open('input'); await openTdee();
+      await rendered(() => q('.cma-tdee-consent'), 'consent from the real module');
+      eq(CMA.tdeeData.status().enabled, false);
+    });
+    it('Enable turns reading on; without an RPC client the refresh is paused with the module\'s reason', async () => {
+      if (!RD) return;
+      button('Enable').click();
+      await rendered(() => q('.cma-tdee-subnav') && CMA.tdeeData.status().enabled, 'enabled');
+      await rendered(() => /Refreshing is paused: /.test(text(q('.cma-tdee-sync'))), 'blocked reason shown: ' + text(q('.cma-tdee-sync')));
+      await rendered(() => /Log a weigh-in in Cronometer to start/.test(text(q('.cma-tdee-exp'))), 'empty state');
+    });
+    it('Daily Nutrition + Biometrics CSV files feed the real module: estimate, charts and history appear', async () => {
+      if (!RD) return;
+      const days = person({ n: 60 });
+      const nut = 'Date,Energy (kcal),Protein (g)\n' + days.slice(0, -1).map(d => d.date + ',' + d.intakeKcal + ',150').join('\n') + '\n';
+      const bio = 'Day,Time,Group,Metric,Unit,Amount\n' + days.map(d => d.date + ',07:00 AM,,Weight,kg,' + d.weightKg).join('\n') + '\n';
+      await sub('settings');
+      put('#cma-tdee-csv-nutrition', 'dailysummary.csv', nut);
+      await rendered(() => /Daily Nutrition CSV: 59 days read, 0 skipped\./.test(text(q('.cma-tdee-msg'))), 'nutrition read: ' + text(q('.cma-tdee-msg')));
+      put('#cma-tdee-csv-biometrics', 'biometrics.csv', bio);
+      await rendered(() => /Biometrics CSV: 60 days read, 0 skipped\./.test(text(q('.cma-tdee-msg'))), 'biometrics read: ' + text(q('.cma-tdee-msg')));
+      await sub('overview');
+      await rendered(() => q('.cma-tdee-chip') && q('.cma-tdee-charts'), 'estimate + charts');
+      eq(CMA.tdeeData.status().counts.weighIns, 60);
+      ok(/No Cronometer burned figures for the last 14 days/.test(text(q('.cma-tdee-exp'))), 'no burned in CSV files');
+      if (REAL) { eq(model().current.priorSource, 'intake'); eq(model().days.length, 60); ok(model().days[59].intakeKcal === null, "today's intake is not counted"); }
+      await sub('history');
+      await rendered(() => qa('.cma-tdee-hrow').length === 60, '60 history rows');
+      eq(qa('.cma-tdee-hrow')[0].dataset.date, '2026-09-28');
+    });
+    it('the exclude toggle stores a real override; a check-in is recorded with its time and becomes the target', async () => {
+      if (!RD) return;
+      const row = () => qa('.cma-tdee-hrow').find(r => r.dataset.date === '2026-09-20');
+      row().querySelector('.cma-tdee-excl').click();
+      await rendered(() => { const d = CMA.tdeeData.dayList().find(x => x.date === '2026-09-20'); return d && d.excluded && d.excludedReason === 'user'; }, 'override stored');
+      await rendered(() => row() && row().querySelector('.cma-tdee-excl').checked, 'row re-rendered');
+      await sub('overview');
+      await rendered(() => q('.cma-tdee-checkin') && !q('.cma-tdee-checkin').disabled, 'check-in due');
+      q('.cma-tdee-checkin').click();
+      await rendered(() => q('.cma-tdee-accept'), 'dialog');
+      q('.cma-tdee-accept').click();
+      await rendered(() => q('.cma-tdee-newtarget'), 'accepted');
+      const cis = CMA.tdeeData.checkins();
+      eq(cis.length, 1); eq(cis[0].accepted, true); eq(typeof cis[0].at, 'number'); eq(cis[0].date, '2026-09-28');
+      q('.cma-tdee-done').click();
+      await rendered(() => q('.cma-tdee-checkin') && q('.cma-tdee-checkin').disabled, 'not due again');
+      eq(text(q('.cma-tdee-target .cma-tdee-num')), V.test.fmtInt(cis[0].targetKcal));
+    });
+    it('a goal change saved through the real module re-opens the check-in at once', async () => {
+      if (!RD) return;
+      await sleep(20);
+      await sub('settings');
+      eq(q('#cma-tdee-s-goal').value, '0', "the real module's default goal is Maintain");
+      q('#cma-tdee-s-goal').value = '-0.5';
+      q('.cma-tdee-save').click();
+      await rendered(() => CMA.tdeeData.getSettings().goal.ratePctPerWeek === -0.5 && CMA.tdeeData.getSettings().goalChangedAt > 0, 'saved with goalChangedAt');
+      await sub('overview');
+      await rendered(() => q('.cma-tdee-checkin') && !q('.cma-tdee-checkin').disabled && /Your goal changed/.test(text(q('.cma-tdee-next'))), 're-opened');
+      const d = JSON.stringify(P.diagnosticsObject().views.tdee);
+      ok(d.indexOf('83.17') < 0 && d.indexOf('2517') < 0, 'no weights or intakes in the view diagnostics with the real module either');
+    });
+    it('"Delete TDEE data" makes the real module forget everything; the consent screen returns', async () => {
+      if (!RD) return;
+      await sub('settings');
+      q('.cma-tdee-del').click();
+      await rendered(() => q('.cma-tdee-del-yes'), 'confirmation');
+      q('.cma-tdee-del-yes').click();
+      await rendered(() => q('.cma-tdee-consent'), 'consent screen');
+      eq(CMA.tdeeData.status().enabled, false); eq(CMA.tdeeData.dayList().length, 0); eq(CMA.tdeeData.checkins().length, 0);
+    });
+  });
+
+  CMA.test.run({ timeoutMs: 10000 });
+})();
+</script>
+</body>
+</html>

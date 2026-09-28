@@ -12,6 +12,11 @@ multi-add, so logging a whole meal means one search per item. This extension tak
 
 searches Cronometer for each line, lets you check the matches, and adds them all to the diary date you are viewing.
 
+Since 0.3.0 the panel also has an optional **TDEE** tab: an *adaptive* estimate of the energy you really burn,
+learned from the food and the weight you already log in Cronometer (the approach MacroFactor popularised), with a
+weekly check-in that suggests a calorie and macro target. It reads nothing until you enable it; see
+[*Adaptive TDEE*](#adaptive-tdee).
+
 Plain JavaScript, no build step, no npm, no external servers: everything talks to `cronometer.com` from inside the
 tab you are already logged into.
 
@@ -22,7 +27,9 @@ tab you are already logged into.
 > **Status:** working, live-tested on 2026-09-28 (foods added through the RPC engine and undone; the UI-automation
 > engine also verified). The RPC path is reconstructed from Cronometer's compiled web client and mirrors what the
 > app itself sends. Because Cronometer redeploys often, the extension ships two engines, an undo, a runtime decoder
-> rebuild and a diagnostics dump (see *Reporting a failure*).
+> rebuild and a diagnostics dump (see *Reporting a failure*). The **Adaptive TDEE** tab (0.3.0) is new and its
+> history reads have **not** been checked against a live account yet: compare its *Check the numbers* block with
+> your diary before you rely on it (see *Adaptive TDEE*).
 
 ## Install
 
@@ -143,6 +150,63 @@ otherwise the row asks you to choose.
 
 Switch engines in the Input view or in Settings.
 
+## Adaptive TDEE
+
+The **TDEE** tab (between *Results* and *Diagnostics*) estimates your real total daily energy expenditure from what
+you actually log, instead of from a formula or a wearable:
+
+* **What it computes.** Every day, a small model (a Kalman filter, the upstream *Adaptive TDEE* engine in
+  `vendor/adaptive-tdee/`, used with its maths unchanged) predicts your next weigh-in from your logged intake and its
+  current estimate, and nudges the estimate when the scale disagrees. A salty dinner or a water swing barely moves
+  it; a real change moves it within a couple of weeks. You see the estimate as *2,480 kcal/day ± 90* with a status
+  (*Getting to know you · day 3 of 7*, *Calibrating*, *Up to date*, or *Paused — log food on 4+ of 7 days and weigh in
+  at least weekly*), a comparison with Cronometer's own figure (*Cronometer estimates 2,650 — your data says you burn
+  about 6% less*), charts of the estimate and of your trend weight, and a History list of the days used.
+* **Weekly check-in.** On your check-in day (Monday by default; the first one after a week of data) the tab offers a
+  new calorie target for your goal (lose / maintain / gain, as a percentage of body weight per week) with protein,
+  fat and carbs, and explains why it changed. You **accept** it or **skip this week**; both are recorded, and the
+  target never changes between check-ins. Guardrails: loss is capped at 1% and gain at 0.5% of body weight per
+  week, a calorie floor applies (1200 / 1500 / 1350 kcal by the sex you choose, used for nothing else), and once
+  the estimate is calibrated the target moves at most 250 kcal per week unless you changed your goal (a goal changed
+  and changed back does not count). A check-in comes at most every 6 days, also when you move the check-in day. The
+  optional, experimental *activity-aware* line adds food on days Cronometer says you burned more than your 14-day
+  average; it never lowers the target while the day is still running (today's burned figure is partial) and never
+  goes under the calorie floor.
+* **The target is display only.** Nothing is written back to Cronometer: copy the number and set it yourself in
+  Cronometer → Targets.
+* **Where the data comes from.** When you press **Enable**, the extension reads, through the session of your tab
+  and with the same read requests the web app itself makes (`getCaloriesConsumedAndBurned`, `getBiometrics`,
+  `getCalendarInfo`, `getFirstDayWithData`, `getPreference`): your daily energy intake, Cronometer's
+  energy-burned figures (BMR, activity, exercise and — only if your Cronometer settings count it — the thermic
+  effect of food), your weight history in kg and which days have food logged. It reads up to five years once, then
+  only the last 14 days when you open the tab (at most every 10 minutes; everything again once a week) and, about 30
+  seconds after you stop editing, the days you or the extension just edited in this tab. Today's food and today's
+  (still partial) burned figure are never counted (the day is not over), and a day that looks only partly logged
+  (under half of your usual intake) is skipped until you answer *Fully logged?* — a run of such days stays skipped
+  until you confirm them (about a week of confirmed days makes a lower intake the new normal). You do not need to
+  mark days complete in Cronometer; *Only trust completed days* is an option. You can also import Cronometer's own
+  CSV exports (*Daily Nutrition* = `dailysummary.csv`, *Biometrics* = `biometrics.csv`; weights in kg, lb or st, the
+  earliest weigh-in of a day counts) in the tab's Settings instead.
+* **Consent and storage.** Nothing is read until you press **Enable** in the tab. The copy is kept only in this
+  browser (`chrome.storage.local`, keys listed under *Privacy*), for one Cronometer account at a time: another account
+  on the same browser profile never sees it. **Delete TDEE data** in the tab's Settings removes all of it; removing
+  the extension does too. **Delete TDEE data** in one Cronometer tab also stops the reading in every other open
+  Cronometer tab at once.
+* **Check the numbers.** The Overview shows the most recent complete day as the extension read it — consumed,
+  burned with its parts (BMR + activity + exercise + TEF), the raw values Cronometer sent and your latest weigh-in —
+  so you can compare them with the diary's Energy Summary for that day. If they do not match, press *Copy these
+  numbers*, add the diary's Consumed and Burned values and open an issue (the Diagnostics dump does not contain these
+  numbers; they are your own data, so share only what you want): the history requests were reconstructed from
+  Cronometer's compiled client and have not been checked against a live account yet.
+* **Units** follow your Cronometer preferences (kcal or kJ; kg, lb or stone) unless you pick others in the tab's
+  Settings; when a preference could not be read the tab shows kcal and kg and says so. Colours are neutral on purpose: over or under a target is information, not a judgement.
+* **Disclaimer.** Estimates only, not medical advice. Not suitable during pregnancy or with medical conditions that
+  affect weight or fluid balance.
+
+While Cronometer's new build is being decoded (see *Runtime decoder rebuild*) or the session is not captured, the tab
+shows the stored data and waits; a Cronometer deploy that changes only the TDEE data types turns the tab's refresh
+off ("TDEE sync unavailable: …") without affecting the multi-add engines.
+
 ## How it works
 
 1. A tiny script hooks `XMLHttpRequest` on the page at start-up and mirrors Cronometer's own traffic to the extension.
@@ -193,10 +257,14 @@ Open an issue at <https://github.com/fabbeskw/multi-add-for-cronometer/issues>. 
 into the report, together with the input lines you used. The dump contains: extension version, whether the hook is installed, your user id, the app's current
 permutation and policy hash, the diary groups and where they came from, the diary date, the page address and your
 browser's user-agent string, the last 50 log lines of the capture and of the panel, the decoder status (`registry`:
-active source, build, type count, stored decoder, last rebuild outcome and problems) and a summary of the last
-plan/result. It does **not** contain your session token (shown only as `"nonce": "present"`/`"missing"`) or
+active source, build, type count, stored decoder, last rebuild outcome and problems), a summary of the last
+plan/result and, under `views.tdee`, the TDEE tab's state as counts, date ranges and flags only (how many days and
+weigh-ins are stored, when it last refreshed, which settings are on) — never a weight, an intake, an expenditure or
+a target. It does **not** contain your session token (shown only as `"nonce": "present"`/`"missing"`) or
 cookies. The panel log **does** contain the food names you typed and searched (the capture log carries request
-paths without the search query); remove lines you do not want to share.
+paths without the search query); remove lines you do not want to share. For a TDEE figure that does not match the
+diary, add the text from *Check the numbers* → **Copy these numbers** (the day's consumed and burned figures and the
+raw values Cronometer sent — your own data, copied only when you press it) and the diary's values for that day.
 
 If the RPC engine fails for every row, try the UI automation engine first; it keeps working across deploys because
 it only drives the dialog. A banner *"Cronometer deployed a new build"* in the Input view means the live app no longer
@@ -219,6 +287,13 @@ start the rebuild by hand and shows its outcome; the dump carries the same infor
 * One request at a time with a delay; large batches (50+) take a while on purpose. Server throttling is respected
   (one 5 s back-off, then the row fails).
 * The extension is for the web app at `cronometer.com` only (not the mobile apps, not Cronometer Pro's client view).
+* Adaptive TDEE: the history requests have not been checked against a live account yet (the sign and composition of
+  Cronometer's burned figures, how many days one request may cover, whether accounts without Gold get the full
+  range); use *Check the numbers* and report differences. The history read is limited to five years. The target is
+  display only (nothing is written to Cronometer), the activity-aware daily target is experimental, and the CSV
+  import accepts `YYYY-MM-DD` dates only. The store screenshots do not show the TDEE tab yet.
+* Adaptive TDEE keeps one account's copy at a time: if a second Cronometer account enables the tab in the same
+  browser profile, its data replaces the first account's (it is never shown to the other account).
 
 ## Privacy
 
@@ -231,6 +306,18 @@ start the rebuild by hand and shows its outcome; the dump carries the same infor
   account, so another account on the same browser profile never sees your list) and the ids of the last batch (for
   undo, together with the date, a timestamp and your user id so the button is shown to the right account only).
   Both can be deleted on demand: *Forget saved input* and *Forget last batch* in the Settings tab.
+* **Adaptive TDEE (only after you press *Enable* in the TDEE tab).** The extension then reads your intake, burned
+  and weight history from `cronometer.com` (read-only requests the app itself makes) and keeps a copy in
+  `chrome.storage.local`, each record stamped with your user id and shown only to that account: `cmaTdeeDays` (per
+  day: energy consumed, Cronometer's burned figure and its parts, the first weigh-in in kg, whether food was logged
+  / the day was marked complete, and when it was read), `cmaTdeeSync` (that you enabled it, when it last refreshed,
+  the first day with data, your Cronometer TEF / energy-unit / weight-unit preferences, the last refresh error and
+  what the last refresh could not read),
+  `cmaTdeeOverrides` (days you excluded or confirmed), `cmaTdeeSettings` (goal, check-in day, protein and fat
+  choices, sex for the calorie floor, units, dismissed hints) and `cmaTdeeCheckins` (up to 260 check-ins: date,
+  accepted or skipped, target, estimate, trend weight, goal, macros). This is health data: it never leaves your browser,
+  never appears in logs or in the diagnostics dump (counts only), and **Delete TDEE data** in the tab's Settings
+  removes all five keys.
 * The runtime-rebuilt decoder registry (type names, checksums, layouts derived from Cronometer's public compiled
   code; no personal data) is also kept in `chrome.storage.local` (key `cmaRegistry`, one record, plus
   `cmaRegistryAttempt`: when the last rebuild ran for which build and whether it worked) so it survives a page
@@ -256,6 +343,10 @@ or shows up as `decode` lines in the diagnostics ("response could not be decoded
 answered `//OK` but the reply could not be read, the entry **is** in the diary: the row is shown as added without an
 undo id, the batch stops right there ("stopped: reply unreadable") and the panel asks you to check the diary before
 re-adding anything.
+
+The Adaptive TDEE reads use a few more types (the daily energy rows, weigh-ins, calendar flags). A deploy that
+changes only those is reported by the rebuilt decoder's check and turns the TDEE tab's refresh off ("TDEE sync
+unavailable: …"), never the multi-add engines; the tab keeps showing its stored data.
 
 **Automatic (users):** as soon as the permutations differ the panel starts the *Runtime decoder rebuild* described
 under *How it works* (banner *"Cronometer deployed a new build — rebuilding the decoder from the live app"*, then
@@ -300,13 +391,15 @@ generated registry or a leftover script left beside the shipped ones fails the b
 a Unicode noncharacter (Chrome would refuse to install it) — prints the file list and sizes, and exits non-zero on
 any problem. The zip is written under a temporary name and renamed to the release name only when every check
 passed (a stale release zip is removed first), so a failed build never leaves a package that looks like a good one.
-Run `python tools/check_manifest.py` and `bash tests/run.sh` first; the version in the file name is the manifest's.
-The zip snapshots the tree, so rebuild it after any change to `src/` or `manifest.json` (the 0.2.1 package holds 22
-files: manifest, popup, license, 3 icons and the 16 scripts). `dist/` is a build output and is gitignored: the
-zip of a tagged version is attached to a GitHub Release (<https://github.com/fabbeskw/multi-add-for-cronometer/releases>), which is where the *From a release
+Run `python tools/check_manifest.py`, `python tools/gen_tdee.py --check` and `bash tests/run.sh` first; the version
+in the file name is the manifest's.
+The zip snapshots the tree, so rebuild it after any change to `src/` or `manifest.json` (the 0.3.0 package holds 25
+files: manifest, popup, license, 3 icons and the 19 scripts; `vendor/` — the pristine upstream TDEE engine — and any
+`.mjs` file are never packaged, only the generated `src/tdee/adaptive-tdee.js` is). `dist/` is a build output and is
+gitignored: the zip of a tagged version is attached to a GitHub Release (<https://github.com/fabbeskw/multi-add-for-cronometer/releases>), which is where the *From a release
 zip* install path points.
 
-To check that the package really installs, run `python tools/smoke_extension.py dist/multi-add-for-cronometer-0.2.1.zip`
+To check that the package really installs, run `python tools/smoke_extension.py dist/multi-add-for-cronometer-0.3.0.zip`
 (without an argument it checks the working tree). It starts a headless Chrome on a throw-away profile, installs the
 extension through the DevTools command `Extensions.loadUnpacked` — the same checks as *Load unpacked* — and opens
 the extension's own popup page, expecting its title. Google Chrome 137 and later ignore the `--load-extension`
@@ -337,9 +430,11 @@ before using it, keep batches reasonable, and stop using it if Cronometer asks y
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md): how to run the checks (`tools/check_manifest.py`, `tests/run.sh`,
-`tools/build_zip.py`, `tools/smoke_extension.py --self-test`, `tools/screenshots.py --dry-run --headless`), how to regenerate the decoder registry after a
-Cronometer deploy, the code rules (classic scripts under the `CMA` namespace guard, no `eval`, no Unicode
-noncharacters, the session nonce never logged) and the rule that a change to data handling updates
+`tools/build_zip.py`, `tools/smoke_extension.py --self-test`, `tools/screenshots.py --dry-run --headless`,
+`tools/gen_tdee.py --check`), how to regenerate the decoder registry after a Cronometer deploy, how to update the
+Adaptive TDEE engine (`vendor/adaptive-tdee/` → `python tools/gen_tdee.py`; its maths is never edited by hand), the
+code rules (classic scripts under the `CMA` namespace guard, no `eval`, no Unicode noncharacters, the session nonce
+never logged, no weight or intake in a log or the diagnostics dump) and the rule that a change to data handling updates
 [PRIVACY.md](PRIVACY.md) in the same pull request.
 
 ## License
@@ -348,6 +443,21 @@ MIT — see [LICENSE](LICENSE). Unofficial; not affiliated with Cronometer Softw
 
 ## Changelog
 
+* **0.3.0** (2026-09-28) — **Adaptive TDEE** tab (optional, off until you press *Enable*): an expenditure estimate
+  learned from your logged intake and weight trend, a comparison with Cronometer's burned figure, charts, a History
+  list with per-day exclusions and a partial-day check, a weekly check-in with a display-only calorie and macro
+  target (accept or skip; goal as % of body weight per week; guardrails), CSV import of Cronometer's own exports, a
+  *Check the numbers* block, units from your Cronometer preferences and neutral colours. The history is read with the
+  web app's own read requests (daily energy rows, weigh-ins, calendar flags, first day with data, three preferences)
+  and kept for one account at a time in `chrome.storage.local` (`cmaTdee*`); *Delete TDEE data* removes it; the diagnostics dump
+  carries counts only. The upstream engine is kept pristine in `vendor/adaptive-tdee/` and wrapped by
+  `tools/gen_tdee.py` (`--check` joins the green bar). The panel gained a small view registry (the TDEE tab is its
+  first user), the RPC engine announces its writes so the TDEE data refreshes the edited day, and the packaging
+  checks state that `vendor/` and `.mjs` files never ship. A review round before release made *Delete TDEE data* reach
+  every open Cronometer tab, keeps partly logged days out until you confirm them, leaves today's partial
+  burned figure out of the model, converts stone and orders 12-hour times in the Biometrics CSV import, and keeps
+  unsaved TDEE settings through a refresh (SPEC Appendix J). Not yet checked against a live account: see *Check the
+  numbers*.
 * **0.2.1** (2026-09-28) — no-unit lines never default to 1 g; publishing prep; screenshot tool. In detail: a line
   without a unit (`2 eggs`, `banana`, `1 protein bar`) takes the food's own default measure (the search row's measure,
   else the one the Add Food dialog starts on) and, when that default is plain grams and the food has other measures,

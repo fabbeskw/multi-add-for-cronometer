@@ -10,6 +10,7 @@ Every change must keep all of these passing (Git Bash on Windows, any shell else
 
 ```
 python tools/check_manifest.py        # manifest.json: files/icons exist, load order = tests/load-all.html, CMA guard
+python tools/gen_tdee.py --check      # src/tdee/adaptive-tdee.js + tests/tdee-sim.js match vendor/adaptive-tdee/ byte for byte
 bash tests/run.sh                     # every tests/*.html page in headless Chrome -> ALL TESTS PASSED
 python tools/build_zip.py             # store package -> PACKAGE OK (allow-list, manifest references, noncharacters)
 python tools/smoke_extension.py --self-test   # installs the tree into headless Chrome via DevTools Extensions.loadUnpacked
@@ -35,10 +36,27 @@ bash tests/run.sh                                  # registry-builder.html check
 `tools/gen_registry.py` and the JavaScript port in `src/lib/registry-builder.js` must stay equivalent: a change
 to the parser is made in both, and `tests/registry-builder.html` proves it (same keys, same order, same JSON).
 
+## Updating the Adaptive TDEE engine
+
+The expenditure engine lives pristine in `vendor/adaptive-tdee/` (the upstream ES module, its node tests, the
+simulator, the benchmark and `ADAPTIVE_TDEE_SPEC.md`); its maths is fixed. Never edit `src/tdee/adaptive-tdee.js` or
+`tests/tdee-sim.js`: both are generated. To update: replace the vendor files, then
+
+```
+python tools/gen_tdee.py            # rewrites src/tdee/adaptive-tdee.js (CMA.tdee) and tests/tdee-sim.js (CMA.tdeeSim)
+python tools/gen_tdee.py --check    # byte-compares both with a fresh generation; exit 1 on drift
+bash tests/run.sh                   # tdee.html: the upstream tests, marker/SHA-256 parity, the SPEC section 7 figures
+```
+
+The generator only removes the column-0 `export ` prefixes and refuses anything else (imports, `export default`,
+`export { }`, indented exports, noncharacters). A new upstream node test must also be ported to `tests/tdee.html`
+(the page compares its test names with `adaptive-tdee.test.mjs`); `tests/mock-tdee-evaluate.html` is the manual
+browser port of `evaluate.mjs`.
+
 ## Packaging a release
 
 ```
-python tools/check_manifest.py && bash tests/run.sh && python tools/build_zip.py
+python tools/check_manifest.py && python tools/gen_tdee.py --check && bash tests/run.sh && python tools/build_zip.py
 ```
 
 writes `dist/multi-add-for-cronometer-<version>.zip` (reproducible: two builds of the same tree are
@@ -73,15 +91,26 @@ These come from SPEC §0 and are enforced by `tools/check_manifest.py`, `tools/b
   `1234567`; public food, measure and serving ids may stay). Keep the digit count when the id sits inside a GWT
   body so the byte-equal tests stay meaningful.
 * **Never commit screenshots of a real diary** (store assets, bug reports, docs) without the account owner's review:
-  a diary shows foods, times, notes and the account name.
+  a diary shows foods, times, notes and the account name. The TDEE tab shows weight and intake history, so the rule
+  applies to it with even more reason.
+* **Adaptive TDEE** (SPEC §12): the engine's maths is fixed — change `vendor/adaptive-tdee/` only by replacing it with
+  a new upstream copy and regenerating (above). The data layer reads nothing before the user's **Enable**, re-checks
+  its gate (capture ready, decoder matching, no rebuild running) before every call and the stored consent before every
+  job, follows the other open tabs through `chrome.storage.onChanged` (a Delete TDEE data in one tab stops them all;
+  never write a `cmaTdee*` key from a memory copy that has not adopted the other tabs' changes), and keeps every record
+  stamped with the account id. Weights, intakes, burned figures, estimates and targets never go into a log line, a status
+  text, `lastError` or a `diagnostics()` result (counts, date ranges and flags only; `tests/tdee-data.html` and
+  `tests/tdee-view.html` grep for leaks). "Today" is `CMA.capture.today()` (the local calendar date), never the
+  diary's viewed day and never `toISOString()`. The TDEE view uses neutral colours only: no `--accent` / `--ok` /
+  `--err`, no primary / danger button classes (no red/green judgement of over/under target).
 
 ## Privacy
 
 If a pull request changes what the extension stores, reads, sends or shows (a new `chrome.storage` key, a new
-field in the diagnostics dump, a new request, a new permission), it must update [PRIVACY.md](PRIVACY.md) — the
-data table, the effective date at the top — and the data-usage answers in [STORE-LISTING.md](STORE-LISTING.md),
-in the same PR. The store cross-checks the disclosures against the code, and users are told to check the policy
-when they update.
+field in the diagnostics dump, a new request, a new permission — including a new TDEE read or a new field in a
+`cmaTdee*` record), it must update [PRIVACY.md](PRIVACY.md) — the data table, the effective date at the top — and
+the data-usage answers in [STORE-LISTING.md](STORE-LISTING.md), in the same PR. The store cross-checks the
+disclosures against the code, and users are told to check the policy when they update.
 
 ## Pull requests
 

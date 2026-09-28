@@ -33,8 +33,11 @@
 <script src="../src/lib/dom.js"></script>
 <script src="../src/lib/engine-rpc.js"></script>
 <script src="../src/lib/engine-ui.js"></script>
+<script src="../src/tdee/adaptive-tdee.js"></script>
+<script src="../src/tdee/tdee-data.js"></script>
 <script src="../src/ui/panel.css.js"></script>
 <script src="../src/ui/panel.js"></script>
+<script src="../src/ui/tdee-view.js"></script>
 <script src="../src/content.js"></script>
 <!-- test-only: captured strings + value-graph builders -->
 <script src="fixtures.js"></script>
@@ -47,9 +50,10 @@
     'src/lib/gwt-registry.js', 'src/lib/gwt-stream.js', 'src/lib/registry-builder.js', 'src/lib/registry-store.js',
     'src/lib/rpc.js', 'src/lib/capture.js', 'src/lib/parse.js',
     'src/lib/units.js', 'src/lib/plan.js', 'src/lib/dom.js', 'src/lib/engine-rpc.js', 'src/lib/engine-ui.js',
-    'src/ui/panel.css.js', 'src/ui/panel.js', 'src/content.js',
+    'src/tdee/adaptive-tdee.js', 'src/tdee/tdee-data.js',
+    'src/ui/panel.css.js', 'src/ui/panel.js', 'src/ui/tdee-view.js', 'src/content.js',
   ];
-  const NAMESPACES = ['registry', 'gwt', 'registryBuilder', 'registryStore', 'rpc', 'capture', 'parse', 'units', 'plan', 'dom', 'engineRpc', 'engineUi', 'panelCss', 'panel'];
+  const NAMESPACES = ['registry', 'gwt', 'registryBuilder', 'registryStore', 'rpc', 'capture', 'parse', 'units', 'plan', 'dom', 'engineRpc', 'engineUi', 'tdee', 'tdeeData', 'panelCss', 'panel', 'tdeeView'];
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   function poll(fn, label, timeout) {
     return new Promise((resolve, reject) => {
@@ -237,6 +241,171 @@
       eq(CMA.engineUi.formatQuantity(1.5), CMA.units.formatQuantity(1.5));
       eq(typeof CMA.engineRpc.run, 'function'); eq(typeof CMA.engineRpc.undo, 'function'); eq(typeof CMA.engineRpc.refreshDiary, 'function');
       eq(CMA.plan.rechoose.length >= 3, true, 'rechoose(session, row, hitIndex)');
+    });
+  });
+
+  T.describe('load-all: Adaptive TDEE wiring (engine, data layer, view)', () => {
+    T.it('the engine wrapper, the data layer and the view load in manifest order and meet each other', () => {
+      ok(Object.isFrozen(CMA.tdee), 'CMA.tdee is the frozen engine API');
+      for (const k of ['runExpenditureModel', 'weeklyCheckIn', 'activityAwareDailyTarget', 'normaliseDays', 'addDays', 'daysBetween', 'parseDailyNutritionCsv', 'parseBiometricsCsv']) eq(typeof CMA.tdee[k], 'function', 'CMA.tdee.' + k);
+      ok(/^[0-9a-f]{64}$/.test(CMA.tdee.UPSTREAM_SHA256), 'upstream SHA-256 recorded');
+      for (const k of ['init', 'status', 'enable', 'disable', 'sync', 'dayList', 'records', 'setOverride', 'getSettings', 'saveSettings', 'checkins', 'recordCheckin', 'importCsv', 'probe', 'today', 'diagnostics']) eq(typeof CMA.tdeeData[k], 'function', 'CMA.tdeeData.' + k);
+      deepEq(CMA.tdeeData.KEYS, { DAYS: 'cmaTdeeDays', SYNC: 'cmaTdeeSync', OVERRIDES: 'cmaTdeeOverrides', SETTINGS: 'cmaTdeeSettings', CHECKINS: 'cmaTdeeCheckins' });
+      ok(CMA.events.count('rpc') >= 1 && CMA.events.count('diary-write') >= 1, 'the data layer listens to the app writes (rpc) and to the RPC engine (diary-write)');
+      eq(CMA.tdeeView.def.id, 'tdee');
+      deepEq(CMA.panel.VIEWS, ['input', 'preview', 'results', 'tdee', 'diagnostics', 'settings'], 'the TDEE tab sits just before Diagnostics');
+      deepEq(CMA.panel.views(), [{ id: 'tdee', label: 'TDEE', order: 35 }]);
+    });
+    T.it('nothing is read before consent: in a bare page the data layer is disabled, not ready and blocked', async () => {
+      const st = await CMA.tdeeData.init();
+      eq(st.enabled, false); eq(st.syncing, false); eq(st.ready, false);
+      eq(st.blockedCode, 'no-account', 'no account captured in a bare page');
+      eq(CMA.tdeeData.dayList().length, 0);
+      eq(CMA.tdeeData.probe(), null);
+      ok(/^\d{4}-\d{2}-\d{2}$/.test(CMA.tdeeData.today()), 'today() is a local calendar date');
+    });
+    T.it('the diagnostics dump carries views.tdee (counts and flags only)', () => {
+      const d = CMA.panel.diagnosticsObject();
+      ok(d.views && d.views.tdee && d.views.tdee.engine && d.views.tdee.engine.loaded === true, 'views.tdee.engine');
+      ok(d.views.tdee.data && d.views.tdee.data.enabled === false, 'the data layer summary rides along');
+      const json = JSON.stringify(d.views.tdee);
+      for (const k of ['weightKg', 'intakeKcal', 'burnedKcal', 'targetKcal', 'expenditureKcal']) ok(json.indexOf('"' + k + '"') < 0, 'no ' + k);
+    });
+  });
+
+  T.describe('load-all: Adaptive TDEE end to end (real rpc.js, capture, data layer, engine, view and RPC engine; fetch stubbed)', () => {
+    // Every request is answered by a stub that decodes the real Writer body and encodes a synthetic reply with the
+    // real encoder; anything else throws, so nothing can reach cronometer.com. 45 days: 2200 kcal eaten a day
+    // (logged), BMR 1600 + activity 250 + 50, TEF 150 (not counted: the preference is 'false'), 400 kcal of
+    // exercise yesterday, 80.37 kg every morning at 07:00.
+    const G = CMA.gwt, D = CMA.tdeeData, FX = CMA.fixtures;
+    const SECRET = 'LOADALL-TDEE-SECRET-NONCE-00112233445566';
+    const q = (sel) => CMA.panel.root.querySelector(sel);
+    const today = D.today();
+    const yesterday = CMA.tdee.addDays(today, -1);
+    const first = CMA.tdee.addDays(today, -44);
+    const iso = (d) => d && d.f ? String(d.f[2]).padStart(4, '0') + '-' + String(d.f[1]).padStart(2, '0') + '-' + String(d.f[0]).padStart(2, '0') : null;
+    const dayVal = (s) => { const p = s.split('-').map(Number); return { $t: G.SIG.DAY, f: [p[2], p[1], p[0]] }; };
+    const eaten = (d) => d >= first && d < today;
+    const row = (d) => [eaten(d) ? 2200 : 0, d === yesterday ? -400 : 0, 0, d >= first ? 1600 : 0, d >= first ? 150 : 0, 0, 0, 0, 0, d >= first ? 250 : 0, d >= first ? 50 : 0, 0];
+    const calls = [];
+    let realFetch = null;
+    function reply(method, params) {
+      switch (method) {
+        case 'getFirstDayWithData': return G.encodeResponse(dayVal(first));
+        case 'getPreference': return G.encodeResponse({ 'use.thermic.effect.food': 'false', 'units.calories': 'true', weightUnit: 'Kilograms' }[params[1]] || null, { kind: 's' });
+        case 'getBiometrics': {
+          const from = iso(params[4]) || first, to = iso(params[5]) || today;
+          const pts = [];
+          for (let d = first; d <= today; d = CMA.tdee.addDays(d, 1)) if (d >= from && d <= to) pts.push({ $t: G.SIG.DATA_POINT, f: [dayVal(d), { $t: G.SIG.TIME, f: [7, 0, 0] }, 80.37] });
+          return G.encodeResponse({ $t: G.SIG.DATA_POINT_ARRAY, f: pts });
+        }
+        case 'getCaloriesConsumedAndBurned': {
+          const rows = [];
+          for (let d = iso(params[2]); d < iso(params[3]); d = CMA.tdee.addDays(d, 1)) rows.push({ $t: G.SIG.DOUBLE_ARRAY, f: row(d) });
+          return G.encodeResponse({ $t: G.SIG.DOUBLE_ARRAY_2D, f: rows });
+        }
+        case 'getCalendarInfo': {
+          const items = [];
+          for (let d = iso(params[2]); d <= iso(params[3]); d = CMA.tdee.addDays(d, 1)) {
+            if (eaten(d)) items.push({ $t: G.SIG.CALENDAR_DAY_INFO, f: [false, dayVal(d), null, null, null, true, d === yesterday, true, false, null] });
+          }
+          return G.encodeResponse({ $t: G.SIG.CALENDAR_INFO, f: [items] });
+        }
+        case 'updateDiary': return FX.updateDiaryResponse;
+        default: throw new Error('unexpected request ' + method);
+      }
+    }
+    function install() {
+      realFetch = window.fetch;
+      window.fetch = async function (url, init) {
+        const p = G.parseRequest(String(init && init.body || ''));
+        calls.push({ method: p.method, params: p.params, url: String(url) });
+        if (p.nonce !== SECRET) throw new Error('the request did not carry the captured session');
+        return new Response(reply(p.method, p.params), { status: 200 });
+      };
+      const s = CMA.capture.state;
+      Object.assign(s, { nonce: SECRET, userId: 1234567, permutation: CMA.registry.permutation, policyHash: CMA.registry.policyHash,
+        moduleBase: FX.moduleBase, registryMismatch: false });
+      CMA.events.emit('state', s);
+    }
+    function restore() {
+      if (realFetch) window.fetch = realFetch;
+      Object.assign(CMA.capture.state, { nonce: null, userId: null, permutation: null, policyHash: null, moduleBase: null });
+      CMA.events.emit('state', CMA.capture.state);
+    }
+    const count = (m) => calls.filter((c) => c.method === m).length;
+
+    T.it('Enable -> a full sync through the real rpc.js; records, burned and the view match the served history', async () => {
+      install();
+      try {
+        eq(CMA.capture.ready().ok, true, 'capture ready: ' + CMA.capture.ready().missing.join(','));
+        CMA.panel.open('tdee');
+        await poll(() => q('.cma-tdee-consent'), 'the consent card (nothing read yet)');
+        eq(calls.length, 0, 'no request before Enable');
+        await D.enable();
+        await poll(() => !D.status().syncing && D.status().lastFullAt, 'the first full sync');
+        const st = D.status();
+        eq(st.lastError, null, 'no sync error');
+        eq(st.flagsSource, 'calendar'); eq(st.blockedReason, null);
+        deepEq(calls.slice(0, 5).map((c) => c.method), ['getFirstDayWithData', 'getPreference', 'getPreference', 'getPreference', 'getBiometrics']);
+        ok(count('getCaloriesConsumedAndBurned') >= 1 && count('getCalendarInfo') >= 1, 'energy and calendar read');
+        eq(calls[4].params[4], null, 'whole-history weigh-ins: null Days');
+        const recs = D.records({ modelStartDate: null });
+        const byDate = (d) => recs.find((r) => r.date === d);
+        eq(byDate(today).intakeKcal, null, "today's intake is never counted");
+        eq(byDate(today).burnedKcal, null, "nor today's partial burned (the engine's prior and 14-day average)");
+        eq(D.dayList().find((d) => d.date === today).burnedKcal, 1900, 'the History still shows it');
+        eq(byDate(yesterday).intakeKcal, 2200);
+        eq(byDate(yesterday).burnedKcal, 1600 + 300 + 400, 'burned = BMR + activity + |exercise|, TEF off by preference');
+        eq(byDate(CMA.tdee.addDays(today, -2)).burnedKcal, 1900);
+        eq(byDate(yesterday).weightKg, 80.37);
+        const p = D.probe();
+        eq(p.date, yesterday); eq(p.burned, 2300); eq(p.row.length, 12); eq(p.row[1], -400, 'exercise arrives negative');
+        const m = CMA.tdee.runExpenditureModel(recs);
+        ok(m.current && m.current.status === 'updating', 'the engine runs on the records: ' + (m.current && m.current.status));
+        CMA.panel.open('tdee');
+        await poll(() => q('.cma-tdee-probe') && q('.cma-tdee-exp'), 'the overview with Check the numbers');
+        ok(/Burned 2,300 kcal/.test(q('.cma-tdee-probe').textContent), 'the view shows the burned figure: ' + q('.cma-tdee-probe').textContent.slice(0, 160));
+        ok(/kcal\/day/.test(q('.cma-tdee-exp').textContent), 'the expenditure card shows kcal/day');
+        // the dump: counts only, no nonce
+        const dump = CMA.panel.diagnosticsText();
+        ok(dump.indexOf(SECRET) < 0, 'no nonce in the dump');
+        const views = JSON.stringify(CMA.panel.diagnosticsObject().views.tdee);
+        for (const v of ['80.37', '2200', '2,200', '2300', '2,300', '1900']) {
+          ok(!new RegExp('(^|[^0-9.])' + v.split('.').join('[.]') + '([^0-9]|$)').test(views), 'views.tdee does not carry ' + v);
+        }
+        ok(/"days":\s*4[56]/.test(views), 'the stored day count is there: ' + (views.match(/"days":\s*\d+/) || [''])[0]);
+      } catch (e) { restore(); throw e; }
+    });
+
+    T.it("an RPC-engine batch announces 'diary-write' and the data layer reads the edited days again (the real seam)", async () => {
+      try {
+        // the dirty-day debounce is 30 s (one refetch per meal logged item by item); 2 s here keeps the run short
+        eq(D.CONFIG.DIRTY_DEBOUNCE_MS, 30000);
+        D._test.configure({ debounceMs: 2000 });
+        const n0 = count('getCaloriesConsumedAndBurned');
+        const food = FX.food({ id: 464674, name: 'Chicken breast', defaultMeasureId: 1072101, measures: [FX.measure({ foodId: 464674, id: 1072101, name: 'g', type: 0, grams: 1 })] });
+        const measures = CMA.rpc.measuresOf(food);
+        const item = CMA.parse.lines('50g chicken breast')[0];
+        const pick = CMA.units.pickMeasure(measures, item.unit, item.qty, { hitMeasureId: 1072101 });
+        const r = { item, hit: { id: 464674, name: 'Chicken breast', translationId: 0 }, food, measures, pick, translationId: 0, groupId: 1, position: 1, order: (1 << 16) | 1, status: 'ready' };
+        const y = yesterday.split('-').map(Number);
+        const res = await CMA.engineRpc.run(CMA.capture.session(), { rows: [r], date: { day: y[2], month: y[1], year: y[0] } }, { delayMs: 0, refresh: false });
+        eq(res.added.length, 1, 'added through the stubbed updateDiary');
+        eq(count('updateDiary'), 1);
+        await poll(() => count('getCaloriesConsumedAndBurned') > n0 && !D.status().syncing, 'the dirty-day refetch (debounce 2 s here)', 8000);
+        const last = calls.filter((c) => c.method === 'getCaloriesConsumedAndBurned').pop();
+        eq(iso(last.params[2]), CMA.tdee.addDays(yesterday, -1), 'window from the edited day - 1');
+        eq(iso(last.params[3]), CMA.tdee.addDays(today, 1), 'to today, exclusive end = today + 1');
+      } finally {
+        D._test.configure({});
+        await CMA.engineRpc.clearLastBatch();
+        await D.disable({ forget: true });
+        eq(D.status().enabled, false);
+        CMA.panel.close();
+        restore();
+      }
     });
   });
 
