@@ -5,32 +5,40 @@
  * ends, write RPCs), tdee-weight-history.md, tdee-intake-burned.md; vendor/adaptive-tdee/ADAPTIVE_TDEE_SPEC.md 2, 5.
  *
  * CMA.tdeeData = {
- *   init() -> Promise<status>     loads the CURRENT account's records (capture userId); another account's are ignored
- *   status(), diagnostics()       diagnostics = counts and date ranges only (never a weight or an intake)
+ *   init() -> Promise<status>     loads the CURRENT account's records (capture userId) from its own keys; another
+ *                                 account's are never read into memory, written or removed
+ *   status(), diagnostics()       diagnostics = counts and date ranges only (never a weight or an intake);
+ *                                 otherAccountsStored = how many OTHER accounts have TDEE data here (a count, no ids)
  *   enable() -> Promise<status>   consent: nothing is fetched before it; runs the first full sync (backfill)
- *   disable({forget}) -> Promise  stops syncing; forget:true removes every cmaTdee* key
+ *   disable({forget}) -> Promise  stops syncing; forget:true removes this account's cmaTdee*:<userId> keys (and its
+ *                                 legacy un-suffixed ones, if still there) - never another account's
  *   sync({full, force}) -> Promise<status>   full = whole span, else the 14-day delta (at most every 10 min unless
  *                                 force; a full sync instead when the last one is older than 7 days); single-flight
  *   dayList(), records({modelStartDate}), setOverride(date, true|false|null), getSettings(), saveSettings(partial),
  *   checkins(), recordCheckin(entry), importCsv('nutrition'|'biometrics', text), probe(), today()
+ *   KEYS (the five base names), keyFor(base, userId) -> the account's storage key '<base>:<userId>'
  * }
  * Settings = the shared contract's fields plus nudges {weighIn?, partial?: 'YYYY-MM-DD'} (the view's dismissed
  * nudges); a stored check-in also keeps the view's previousTargetKcal and goalChanged.
  * CMA.events 'tdee-data' {type:'status'|'data'|'error', status} follows every change. Listens to 'rpc' (the app's
  * writes, setUserPreference), 'diary-write' {method, ok, days} (the extension's own writes), 'state', 'registry', and
  * to chrome.storage.onChanged: every open Cronometer tab runs its own copy of this layer over ONE storage, so a Disable
- * or "Delete TDEE data" in another tab stops this one at once, and another tab's check-ins, settings, day decisions
- * and days are adopted instead of being overwritten from this tab's memory.
+ * or "Delete TDEE data" of the SAME account in another tab stops this one at once, and another tab's check-ins,
+ * settings, day decisions and days of the same account are adopted instead of being overwritten from this tab's
+ * memory. Another account's keys (another tab, or this tab before an account switch) never affect this account.
  *
  * Rules: no request before enable() and none while CMA.capture.ready() fails, the decoder mismatches the live build,
  * a decoder rebuild runs or the registry lacks the TDEE types (registry-builder checkOptional 'tdee'). Calls are
  * sequential, >= 250 ms apart; Throttled backs off once, Session aborts. Dates are diary-local: today =
  * CMA.capture.today() (never capture.state.diaryDate, the VIEWED day) and ISO text is built from Day parts. The
  * nonce is never stored or logged; logs carry counts and date ranges only.
- * Storage (each value {userId, ...}): cmaTdeeDays {days: {iso: {i, w, b, bp:[bmr, activity, exercise, tef], c, lf,
- * s, cs?, f}}} (i = row[0] consumed kcal, w = first weigh-in kg, b = burned at fetch time, c = complete, lf =
- * loggedFood, s = 'rpc'|'csv', cs = the fields a CSV file supplied, f = fetchedAt), cmaTdeeSync, cmaTdeeOverrides
- * {days: {iso: true|false}}, cmaTdeeSettings, cmaTdeeCheckins {checkins: [...]} (<= 260).
+ * Storage: PER ACCOUNT, key '<base>:<userId>' (e.g. 'cmaTdeeSettings:1234567'), each value {userId, ...} (checked on
+ * read): cmaTdeeDays {days: {iso: {i, w, b, bp:[bmr, activity, exercise, tef], c, lf, s, cs?, f}}} (i = row[0]
+ * consumed kcal, w = first weigh-in kg, b = burned at fetch time, c = complete, lf = loggedFood, s = 'rpc'|'csv', cs =
+ * the fields a CSV file supplied, f = fetchedAt), cmaTdeeSync, cmaTdeeOverrides {days: {iso: true|false}},
+ * cmaTdeeSettings, cmaTdeeCheckins {checkins: [...]} (<= 260). The un-suffixed keys of 0.3.0 (one account for the
+ * whole browser) are migrated per key when THEIR account loads: copied into an empty keyed slot, removed only after
+ * that write succeeded; another account's legacy value is left alone until that account loads.
  */
 window.CMA = window.CMA || {};
 (function () {
@@ -40,8 +48,11 @@ window.CMA = window.CMA || {};
   // ------------------------------------------------------------------------------------------------
   // constants
   // ------------------------------------------------------------------------------------------------
+  // base names; each account's records live under '<base>:<userId>' (keyFor). The bare base names are the legacy keys
+  // of 0.3.0 (one account per browser), only ever read and removed (migration), never written.
   const KEYS = { DAYS: 'cmaTdeeDays', SYNC: 'cmaTdeeSync', OVERRIDES: 'cmaTdeeOverrides', SETTINGS: 'cmaTdeeSettings', CHECKINS: 'cmaTdeeCheckins' };
   const ALL_KEYS = [KEYS.DAYS, KEYS.SYNC, KEYS.OVERRIDES, KEYS.SETTINGS, KEYS.CHECKINS];
+  const UID_RE = /^[1-9]\d{0,15}$/;
   // Bump when the meaning of a stored energy row changes (a live-verified correction of research/tdee-critic.md 1):
   // stored days fetched with another version are refetched by the next (then forced) full sync.
   const ROW_LAYOUT_VERSION = 1;
@@ -220,6 +231,61 @@ window.CMA = window.CMA || {};
       if (r && typeof r.then === 'function') r.then(function () { finish(true); }, function () { finish(false); });
     }).then(function (v) { return v === true; });
   }
+  /** Every key name in chrome.storage.local (getKeys, Chrome 130+; else a whole get) -> [names] | null (unknown). */
+  function storageKeys() {
+    const s = storage();
+    if (!s) return Promise.resolve(null);
+    if (typeof s.getKeys !== 'function') return storageGet(null).then(function (r) { return r.ok ? Object.keys(r.value) : null; });
+    return bounded(function (finish) {
+      const r = s.getKeys(function (ks) { const err = lastError(); finish(err ? { ok: false, value: {}, error: err } : { ok: true, value: ks }); });
+      if (r && typeof r.then === 'function') r.then(function (ks) { finish({ ok: true, value: ks }); }, function (e) { finish({ ok: false, value: {}, error: String(e && e.message || e) }); });
+    }).then(function (r) { return r.ok && Array.isArray(r.value) ? r.value : null; });
+  }
+
+  // ------------------------------------------------------------------------------------------------
+  // per-account keys: '<base>:<userId>'; the bare base name is the legacy (0.3.0) key
+  // ------------------------------------------------------------------------------------------------
+  function keyFor(base, uid) { return base + ':' + uid; }
+  function keysFor(uid) { return ALL_KEYS.map(function (k) { return keyFor(k, uid); }); }
+  /** A storage key name -> {base, uid} (uid null = the legacy key), or null when it is not a TDEE key. */
+  function parseKey(name) {
+    if (typeof name !== 'string') return null;
+    if (ALL_KEYS.indexOf(name) >= 0) return { base: name, uid: null };
+    const i = name.lastIndexOf(':');
+    if (i < 0) return null;
+    const base = name.slice(0, i), u = name.slice(i + 1);
+    return ALL_KEYS.indexOf(base) >= 0 && UID_RE.test(u) ? { base: base, uid: Number(u) } : null;
+  }
+  function isObj(v) { return !!v && typeof v === 'object'; }
+  function ownedBy(v, uid) { return isObj(v) && v.userId === uid; }
+  // Which accounts have TDEE data in this browser (for a COUNT only; ids never leave this module): keyed = uid ->
+  // Set of base names (from a key listing at load, then chrome.storage.onChanged); legacy = base -> the userId its
+  // legacy value carries (read at load, then onChanged).
+  const accounts = { keyed: new Map(), legacy: new Map() };
+  function noteKeyed(uid, base, present) {
+    let set = accounts.keyed.get(uid);
+    if (present) { if (!set) accounts.keyed.set(uid, set = new Set()); set.add(base); }
+    else if (set) { set.delete(base); if (!set.size) accounts.keyed.delete(uid); }
+  }
+  function noteLegacy(base, v) {
+    if (isObj(v) && Number.isInteger(v.userId) && v.userId > 0) accounts.legacy.set(base, v.userId); else accounts.legacy.delete(base);
+  }
+  function noteListing(names) {
+    accounts.keyed.clear();
+    names.forEach(function (n) { const p = parseKey(n); if (p && p.uid !== null) noteKeyed(p.uid, p.base, true); });
+  }
+  function otherAccountsStored() {
+    const uids = new Set();
+    accounts.keyed.forEach(function (_, uid) { if (uid !== mem.userId) uids.add(uid); });
+    accounts.legacy.forEach(function (uid) { if (uid !== mem.userId) uids.add(uid); });
+    return uids.size;
+  }
+  /** Legacy keys that still hold THIS account's records (a migration that could not write its copy yet). */
+  function ownLegacyKeys() {
+    const out = [];
+    accounts.legacy.forEach(function (uid, base) { if (uid === mem.userId) out.push(base); });
+    return out;
+  }
 
   // ------------------------------------------------------------------------------------------------
   // stored shapes
@@ -372,14 +438,21 @@ window.CMA = window.CMA || {};
       default: break;
     }
   }
-  /** Adopt what storage holds for `uid`; records of another account (or without one) are ignored and never shown. */
+  /** Adopt what storage holds for `uid` (values of its keyed slots and the legacy keys, as read): the keyed record, else
+   *  this account's legacy record (its copy could not be written yet). A record of another account (a legacy key of
+   *  another userId, or a keyed slot whose value carries another userId) is ignored and never shown. */
   function adopt(values, uid) {
     const v = values || {};
     ALL_KEYS.forEach(function (k) {
-      const rec = v[k];
-      if (!rec || typeof rec !== 'object') return;
-      if (rec.userId !== uid) { mem.ignored++; return; }
-      adoptKey(k, rec);
+      const kv = v[keyFor(k, uid)], lv = v[k];
+      let rec = null;
+      if (ownedBy(kv, uid)) rec = kv;
+      else {
+        if (isObj(kv)) mem.ignored++;
+        if (ownedBy(lv, uid) && !isObj(kv)) rec = lv;
+      }
+      if (isObj(lv) && lv.userId !== uid) mem.ignored++;
+      if (rec) adoptKey(k, rec);
     });
   }
   function valueFor(key) {
@@ -405,6 +478,7 @@ window.CMA = window.CMA || {};
     return JSON.stringify(v);
   }
   const ECHO_MAX = 16, ECHO_TTL_MS = 30000;   // writes are bounded to 5 s: an echo older than this never comes
+  // both indexed by the STORAGE key name ('<base>:<userId>'), so nothing of one account is ever taken for another's
   const echoes = {};   // key -> [{ser, at}]: this tab's writes whose onChanged has not arrived yet, oldest first
   const known = {};    // key -> canonical text of what the key holds (or will hold once this tab's writes land)
   // Only while the storage watcher runs: without chrome.storage.onChanged no echo ever comes back, and what the keys
@@ -445,7 +519,8 @@ window.CMA = window.CMA || {};
       mem.unsaved = [{ from: all.reduce(function (m, w) { return minIso(m, w.from); }, all[0].from), to: all.reduce(function (m, w) { return maxIso(m, w.to); }, all[0].to) }];
     }
   }
-  /** Write `keys` for the loaded account. `gen` (optional): skipped when the work it belongs to was cancelled. The
+  /** Write `keys` (base names) to the loaded account's own keyed slots. `gen` (optional): skipped when the work it
+   *  belongs to was cancelled. The
    *  payload is built and handed to chrome.storage synchronously, so a disable()/account switch that starts later
    *  (its removal is queued after this write) always wins. A key that already holds exactly this value is not
    *  written again (so every write this tab makes changes the value and comes back as exactly one storage event). */
@@ -456,8 +531,8 @@ window.CMA = window.CMA || {};
     if (keys.indexOf(KEYS.DAYS) >= 0) mem.unsaved = [];   // the payload below carries them
     if (!storage()) return Promise.resolve(false);
     const obj = {}, sers = {};
-    keys.forEach(function (k) {
-      const v = valueFor(k), ser = watching ? canon(v) : null;
+    keys.forEach(function (base) {
+      const k = keyFor(base, mem.userId), v = valueFor(base), ser = watching ? canon(v) : null;
       if (watching && ser === known[k]) return;
       obj[k] = v; sers[k] = ser;
     });
@@ -1130,26 +1205,29 @@ window.CMA = window.CMA || {};
   // other tabs: every open Cronometer tab runs its own copy of this layer over ONE chrome.storage.local
   // ------------------------------------------------------------------------------------------------
   // chrome.storage.onChanged fires in every extension context, this tab's own writes included (recognised by
-  // isEcho). What another tab wrote is adopted at once:
-  //  * cmaTdeeSync removed (Delete TDEE data), or any cmaTdee* key taken over by another account: this account's
-  //    stored copy is gone - stop, drop the memory copy (as disable({forget}) does here), and remove again any key
-  //    this tab was still writing (its write lands after the deletion and would bring the data back);
-  //  * cmaTdeeSync with enabled false (Disable): stop now; re-assert it if this tab's own write is still on its way;
+  // isEcho). Only the loaded account's OWN keyed entries ('<base>:<userId>') are acted on; another account's keys (its
+  // tab enabling, syncing, disabling or deleting) only update the otherAccountsStored count. What another tab of the
+  // SAME account wrote is adopted at once:
+  //  * cmaTdeeSync:<uid> removed (Delete TDEE data): this account's stored copy is gone - stop, drop the memory copy
+  //    (as disable({forget}) does here), and remove again any key this tab was still writing (its write lands after
+  //    the deletion and would bring the data back);
+  //  * cmaTdeeSync:<uid> with enabled false (Disable): stop now; re-assert it if this tab's own write is still on its way;
   //  * any other key of this account: adopt it (a whole-key write from this tab's stale memory would otherwise drop
   //    the other tab's check-ins, settings, day decisions or CSV days), unless this tab's own newer write to that key
   //    is still on its way (events arrive in write order: that write lands after the other one).
-  /** changes: {key: {value (null = removed), superseded}} -> memory (and, for a withdrawn consent, storage). */
+  // A legacy (un-suffixed) key is acted on only while this tab runs on this account's legacy copy (its keyed slot
+  // holds nothing): its removal then is another tab's Delete TDEE data (a migration writes the keyed copy first).
+  /** changes: {base: {value (null = removed), superseded}} of THIS account -> memory (and, for a withdrawn consent,
+   *  storage). */
   function applyForeign(changes) {
     const uid = mem.userId;
     if (!uid) return;
     const keys = Object.keys(changes).filter(function (k) { return ALL_KEYS.indexOf(k) >= 0; });
     if (!keys.length) return;
-    const obj = function (v) { return !!v && typeof v === 'object'; };
-    const otherAccount = keys.some(function (k) { const v = changes[k].value; return obj(v) && v.userId !== uid; });
-    const deleted = keys.indexOf(KEYS.SYNC) >= 0 && !obj(changes[KEYS.SYNC].value);
-    if (otherAccount || deleted) {
+    const deleted = keys.indexOf(KEYS.SYNC) >= 0 && !isObj(changes[KEYS.SYNC].value);
+    if (deleted) {
       const had = mem.sync.enabled || Object.keys(mem.days).length > 0 || mem.checkins.length > 0;
-      const again = deleted && !otherAccount ? ALL_KEYS.filter(function (k) { return pendingEchoes(k) > 0; }) : [];
+      const again = keysFor(uid).filter(function (k) { return pendingEchoes(k) > 0; });
       cancelWork();
       resetMemory(uid);
       mem.loaded = true;
@@ -1157,8 +1235,7 @@ window.CMA = window.CMA || {};
         again.forEach(function (k) { expectEcho(k, 'null'); });
         storageRemove(again).then(function (ok) { if (!ok) again.forEach(function (k) { dropEcho(k, 'null'); }); });
       }
-      if (had) log(otherAccount ? 'the stored TDEE data now belongs to another account (enabled in another tab): this account\'s copy is not kept'
-        : 'the TDEE data was deleted in another tab: reading stopped');
+      if (had) log('the TDEE data was deleted in another tab: reading stopped');
       emit('status');
       emit('data');
       return;
@@ -1190,19 +1267,36 @@ window.CMA = window.CMA || {};
     try {
       if (area && area !== 'local') return;
       if (!changes || typeof changes !== 'object') return;
+      const uid = mem.userId;
       const foreign = {};
       let any = false;
-      ALL_KEYS.forEach(function (k) {
-        if (!own(changes, k)) return;
-        const nv = changes[k] && typeof changes[k] === 'object' ? changes[k].newValue : undefined;
+      Object.keys(changes).forEach(function (name) {
+        const p = parseKey(name);
+        if (!p) return;
+        const ch = changes[name] && typeof changes[name] === 'object' ? changes[name] : {};
+        const nv = ch.newValue;
+        if (p.uid === null) {
+          noteLegacy(p.base, nv);
+          // this account's legacy record removed while this tab runs on it (its keyed slot holds nothing): another
+          // tab of this account deleted its TDEE data before the copy could be written
+          const kk = uid ? keyFor(p.base, uid) : null;
+          if (kk && nv === undefined && ownedBy(ch.oldValue, uid) && known[kk] === 'null' && !pendingEchoes(kk)) {
+            foreign[p.base] = { value: null, superseded: false };
+            any = true;
+          }
+          return;
+        }
+        noteKeyed(p.uid, p.base, nv !== undefined && nv !== null);
         const ser = canon(nv);
-        if (isEcho(k, ser)) return;
-        const superseded = pendingEchoes(k) > 0;
-        if (!superseded) known[k] = ser;
-        foreign[k] = { value: nv === undefined ? null : nv, superseded: superseded };
+        if (isEcho(name, ser)) return;                 // this tab's own write (for any account it held) coming back
+        if (!uid || p.uid !== uid) return;             // another account: never adopted, never acted on
+        if (isObj(nv) && nv.userId !== uid) return;    // not this account's record: never adopted
+        const superseded = pendingEchoes(name) > 0;
+        if (!superseded) known[name] = ser;
+        foreign[p.base] = { value: nv === undefined ? null : nv, superseded: superseded };
         any = true;
       });
-      if (!any || !mem.userId) return;                  // no account yet: its load reads the current storage
+      if (!any || !uid) return;                        // no account yet: its load reads the current storage
       if (!mem.loaded) { run.foreignWhileLoading = Object.assign(run.foreignWhileLoading || {}, foreign); return; }
       applyForeign(foreign);
     } catch (e) { /* never throw into the storage event */ }
@@ -1219,35 +1313,81 @@ window.CMA = window.CMA || {};
     } catch (e) { return false; }
   }
   /** null while the consent stored for `uid` stands (or storage cannot tell: none, or unreadable / unwritable here, so
-   *  the memory copy is all there is); else the change to apply ({cmaTdeeSync: {value, superseded}}). */
+   *  the memory copy is all there is); else the change to apply ({cmaTdeeSync: {value, superseded}}). Reads the
+   *  account's keyed slot, and its legacy record while that has not been copied yet. */
   async function storedConsentWithdrawn(uid) {
     if (mem.storage || !storage()) return null;
-    const r = await storageGet([KEYS.SYNC]);
+    const kk = keyFor(KEYS.SYNC, uid);
+    const r = await storageGet([kk, KEYS.SYNC]);
     if (!r.ok) return null;
-    const v = r.value[KEYS.SYNC];
-    if (v && typeof v === 'object' && v.userId === uid && v.enabled === true) return null;
-    if (pendingEchoes(KEYS.SYNC)) return null;          // this tab's own write is still on its way
-    if (watching) known[KEYS.SYNC] = canon(v);
+    const kv = r.value[kk], lv = r.value[KEYS.SYNC];
+    const v = isObj(kv) ? kv : (ownedBy(lv, uid) ? lv : null);
+    if (ownedBy(v, uid) && v.enabled === true) return null;
+    if (pendingEchoes(kk)) return null;                 // this tab's own write is still on its way
+    if (watching) known[kk] = canon(kv);
     const out = {};
-    out[KEYS.SYNC] = { value: v && typeof v === 'object' ? v : null, superseded: false };
+    out[KEYS.SYNC] = { value: ownedBy(v, uid) ? v : null, superseded: false };
     return out;
   }
 
   // ------------------------------------------------------------------------------------------------
   // public API
   // ------------------------------------------------------------------------------------------------
+  /**
+   * Copy this account's legacy records (the un-suffixed keys of 0.3.0) into its keyed slots, per key: only into an
+   * EMPTY slot (a keyed value is never overwritten), and the legacy key is removed only after that write succeeded (or
+   * when the slot already held this account's record). A legacy record of another account is never touched. The slots
+   * are read again right before writing: another tab of this account may have migrated, or saved, meanwhile (two tabs
+   * migrating at once write the same copy). -> Promise<values> (the storage values to adopt; the legacy record where
+   * its copy could not be written).
+   */
+  async function migrateLegacy(uid, first) {
+    const again = await storageGet(keysFor(uid).concat(ALL_KEYS));
+    if (!again.ok) return first;                       // nothing is written or removed on a guess
+    const v = again.value;
+    const copy = {}, drop = [];
+    ALL_KEYS.forEach(function (k) {
+      const kk = keyFor(k, uid);
+      if (!ownedBy(v[k], uid)) return;
+      if (ownedBy(v[kk], uid)) drop.push(k);            // already copied (another tab, or a removal that failed)
+      else if (!isObj(v[kk])) copy[kk] = JSON.parse(JSON.stringify(v[k]));
+    });
+    const n = Object.keys(copy).length;
+    if (n) {
+      if (await storageSet(copy)) {
+        Object.keys(copy).forEach(function (kk) { v[kk] = copy[kk]; drop.push(parseKey(kk).base); });
+      } else {
+        log('the stored TDEE data of this account could not be moved to its own keys (kept where it was)');
+        if (!mem.storage && mem.userId === uid) mem.storage = 'write failed';
+      }
+    }
+    if (drop.length && await storageRemove(drop)) {
+      drop.forEach(function (k) { noteLegacy(k, null); delete v[k]; });
+      log('moved ' + drop.length + ' stored TDEE record(s) of this account to its own keys');
+    }
+    return v;
+  }
   function load(uid) {
     const switching = mem.userId !== null && mem.userId !== uid;
     const retry = switching ? null : run.blockedRetry;   // a request made before the account was known survives
     cancelWork();
     run.blockedRetry = retry;
-    if (switching) log('account changed: stored TDEE data of the previous account is not shown');
+    if (switching) log('account changed: the previous account\'s TDEE data stays in its own keys and is not shown');
     resetMemory(uid);
-    const p = storageGet(ALL_KEYS).then(function (r) {
+    const ownKeys = keysFor(uid);
+    const p = Promise.all([storageGet(ownKeys.concat(ALL_KEYS)), storageKeys()]).then(async function (both) {
+      const r = both[0];
+      if (both[1]) noteListing(both[1]);
       if (mem.userId !== uid || mem.loading !== p) return status();   // superseded by another account
       if (r.ok) {
-        if (watching) ALL_KEYS.forEach(function (k) { if (!pendingEchoes(k)) known[k] = canon(r.value[k]); });
-        adopt(r.value, uid);
+        let values = r.value;
+        ALL_KEYS.forEach(function (k) { noteLegacy(k, values[k]); });
+        if (ALL_KEYS.some(function (k) { return ownedBy(values[k], uid); })) {
+          values = await migrateLegacy(uid, values);
+          if (mem.userId !== uid || mem.loading !== p) return status();
+        }
+        if (watching) ownKeys.forEach(function (k) { if (!pendingEchoes(k)) known[k] = canon(values[k]); });
+        adopt(values, uid);
       } else {
         mem.storage = r.none ? 'none' : 'read failed: ' + r.error;
         if (!r.none) { mem.sync.lastError = 'the stored TDEE data could not be read (' + r.error + '): changes are kept for this page only'; log(mem.sync.lastError); }
@@ -1314,6 +1454,7 @@ window.CMA = window.CMA || {};
       counts: { days: c.days, weighIns: c.weighIns, intakeDays: c.intakeDays, burnedDays: c.burnedDays },
       range: c.range, ready: !!(mem.loaded && mem.userId && mem.userId === currentUserId()),
       blockedReason: g ? g.text : null, blockedCode: g ? g.code : null,
+      otherAccountsStored: otherAccountsStored(),
     };
   }
   /** diagnostics(): what the Diagnostics dump may carry - counts, date ranges, flags. Never a weight or an intake. */
@@ -1329,7 +1470,8 @@ window.CMA = window.CMA || {};
       csvDays: csvDays, overrides: Object.keys(mem.overrides).length, checkins: mem.checkins.length,
       energyUnavailable: (mem.sync.energyUnavailable || []).map(function (x) { return x.from + '..' + x.to; }),
       prefs: s.prefs ? { tef: s.prefs.tef, unitsCalories: s.prefs.unitsCalories, weightUnit: s.prefs.weightUnit, assumed: s.prefs.assumed } : null,
-      storage: mem.storage, ignoredOtherAccount: mem.ignored, lastError: s.lastError, notes: s.notes, crossTab: watching,
+      storage: mem.storage, ignoredOtherAccount: mem.ignored, otherAccountsStored: s.otherAccountsStored,
+      lastError: s.lastError, notes: s.notes, crossTab: watching,
     };
   }
   /** enable(): the user's consent to read the diary history of THIS account; runs the first full sync. */
@@ -1346,32 +1488,41 @@ window.CMA = window.CMA || {};
     }
     return sync({ full: true });
   }
-  /** disable({forget}): stop syncing; forget:true deletes every cmaTdee* key (and the memory copy). */
+  /** disable({forget}): stop syncing; forget:true deletes this account's cmaTdee*:<userId> keys (and its own legacy
+   *  records, if still there) and the memory copy - never another account's. */
   async function disable(opts) {
     const forget = !!(opts && opts.forget);
     cancelWork();
     run.phase = 'idle';
     mem.sync.enabled = false;
-    if (forget) {
-      // the removal comes back as this tab's own change - for the keys that exist (Chrome reports no change for a key
-      // that was not there, and a stale expectation would hide another tab's next write to it)
-      const present = ALL_KEYS.filter(function (k) { return known[k] !== 'null'; });
+    if (forget && mem.userId) {
+      // ONLY this account's keys: its keyed slots and its legacy records that were not copied yet; another account's
+      // keys (keyed or legacy) are never touched. The removal comes back as this tab's own change - for the keys that
+      // exist (Chrome reports no change for a key that was not there, and a stale expectation would hide another
+      // tab's next write to it)
+      const mine = keysFor(mem.userId);
+      const all = mine.concat(ownLegacyKeys());
+      const present = mine.filter(function (k) { return known[k] !== 'null'; });
       present.forEach(function (k) { expectEcho(k, 'null'); });
-      let removed = await storageRemove(ALL_KEYS);
+      let removed = await storageRemove(all);
       if (!removed) {
         present.forEach(function (k) { dropEcho(k, 'null'); });
         if (storage()) {
           const blank = {};
-          ALL_KEYS.forEach(function (k) { blank[k] = null; expectEcho(k, 'null'); });
+          all.forEach(function (k) { blank[k] = null; });
+          mine.forEach(function (k) { expectEcho(k, 'null'); });
           removed = await storageSet(blank);
-          if (!removed) ALL_KEYS.forEach(function (k) { dropEcho(k, 'null'); });
+          if (!removed) mine.forEach(function (k) { dropEcho(k, 'null'); });
         }
       }
+      if (removed) all.forEach(function (k) { const p = parseKey(k); if (p.uid === null) noteLegacy(k, null); });
       const uid = mem.userId;
       const wasLoaded = mem.loaded;
       resetMemory(uid);
       mem.loaded = wasLoaded || !!uid;
       log('TDEE data deleted');
+    } else if (forget) {
+      resetMemory(null);                              // no account known: nothing of anyone's is removed
     } else {
       await persist([KEYS.SYNC]);
       log('TDEE history reading turned off');
@@ -1663,7 +1814,7 @@ window.CMA = window.CMA || {};
     init, status, enable, disable, sync, dayList, records, setOverride, getSettings, saveSettings, checkins, recordCheckin,
     importCsv, probe, today, diagnostics,
     burnedFromRow, firstWeighIns,
-    KEYS, ROW_LAYOUT_VERSION, DEFAULT_SETTINGS, WRITE_METHODS, PREF_KEYS, PROFILE_PREF_KEYS,
+    KEYS, keyFor, ROW_LAYOUT_VERSION, DEFAULT_SETTINGS, WRITE_METHODS, PREF_KEYS, PROFILE_PREF_KEYS,
     CONFIG: Object.freeze({ ENERGY_CHUNK_START, ENERGY_CHUNK_MIN, CALENDAR_CHUNK, DELTA_DAYS, DELTA_MIN_INTERVAL_MS, FULL_MAX_AGE_MS,
       HISTORY_MAX_DAYS, FIRST_DAY_FALLBACK_DAYS, PRE_WEIGH_IN_DAYS, NO_WEIGH_IN_DAYS, SPACING_MS, DIRTY_DEBOUNCE_MS, MAX_CHECKINS, PARTIAL }),
     /** Tests only: replace the clock / today / sleep / timers / spacing, and drop every state (memory, jobs, timers). */
@@ -1673,6 +1824,7 @@ window.CMA = window.CMA || {};
         cancelWork(); resetMemory(null); run.running = null; run.runningJob = null; run.pendingPromise = null; run.phase = 'idle'; run.progress = { done: 0, total: 0 };
         run.lastCallEnd = 0; run.layoutCache = { registry: null, result: null };
         Object.keys(echoes).forEach(function (k) { delete echoes[k]; }); Object.keys(known).forEach(function (k) { delete known[k]; });
+        accounts.keyed.clear(); accounts.legacy.clear();
       },
       mem: mem, run: run, gate: gate, canon: canon, csvTime: csvTime, onStorageChanged: onStorageChanged,
     },
