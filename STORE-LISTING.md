@@ -1,95 +1,102 @@
 # Chrome Web Store listing — Multi-Add for Cronometer
 
-Everything needed to fill in the Chrome Web Store **Developer Dashboard** for this extension, plus the publishing
-procedure. Copy the text blocks as they are; replace every `<placeholder>` before submitting:
-`python tools/set_repo_url.py https://github.com/<owner>/multi-add-for-cronometer` fills the privacy-policy, support
-and repository URL placeholders here, in README.md and in PRIVACY.md from the repository URL (idempotent; it prints
-what it changed; the policy URL becomes the `PRIVACY.md` page of the repository, support and contact its *Issues* page). `<Chrome Web Store URL>` (README) and `<item id>` (below) are only known after the review.
+Every text and file the Chrome Web Store **Developer Dashboard** asks for, checked against the store's published
+rules (developer.chrome.com/docs/webstore, September 2026). Copy the fenced blocks as they are: they are plain text,
+the store shows them verbatim. [SUBMISSION-CHECKLIST.md](SUBMISSION-CHECKLIST.md) is the short, ordered version that
+says which block goes into which dashboard field and which steps only the account owner can do.
 
-The package to upload is built with `python tools/build_zip.py` → `dist/multi-add-for-cronometer-<version>.zip`
-(see *Packaging* in README.md). The version in the file name is the `version` in `manifest.json`.
+* Package: `python tools/build_zip.py` → `dist/multi-add-for-cronometer-<version>.zip` (the version is the one in
+  `manifest.json`; this listing is written for **0.3.1**). Name, summary, version, icons and permissions come from
+  the manifest in the zip and cannot be edited in the dashboard: changing them needs a version bump and a new zip.
+* Repository-derived URLs are already filled in (`python tools/set_repo_url.py https://github.com/fabbeskw/multi-add-for-cronometer --check`
+  exits 0). `<item id>` is only known after the review.
+* Character counts in brackets were measured on the text inside the block. The store documents 132 characters for
+  the summary; the limits of the *single purpose*, *permission justification* and *test instructions* fields are
+  not documented (about 1,000 characters is commonly reported), so every block for those fields is kept under 1,000.
 
 ---
 
 ## 1. Store listing tab
 
-### Name (from manifest, max 45 characters)
+### Name (from the manifest; max 45)
 
 ```
 Multi-Add for Cronometer
 ```
 
-The "X for Cronometer" pattern is the accepted way to name a third-party tool without implying it is an official
-Cronometer product. Do **not** use Cronometer's logo, wordmark or colours anywhere in the listing; the icons in
-`icons/` are generic.
+The "X for Cronometer" pattern names a third-party tool without implying it is an official product. No Cronometer
+logo, wordmark or brand colour is used anywhere in the package or the listing; the icons and promo tiles are
+original art.
 
-### Summary (from manifest `description`, max 132 characters — 130 used)
+### Summary (from the manifest `description`; max 132 — 129 used)
+
+One subject (logging in the user's own diary) with two functions, matching the single-purpose text in §2.
 
 ```
-Unofficial: add many foods to your Cronometer web diary in one go, plus an adaptive TDEE estimate. Not affiliated with Cronometer.
+Unofficial, not affiliated: faster Cronometer web diary logging - add a whole list of foods at once and track your adaptive TDEE.
 ```
 
 ### Category
 
-**Tools** — a category the Developer Dashboard actually offers. Since the 2023 category revamp its dropdown is
-the flat list *Tools, Workflow & Planning, Well-being, Developer Tools, Functionality & UI, …*; "Productivity" is
-not selectable any more, it survives only as the store *section* Tools is filed under
-(`chromewebstore.google.com/category/extensions/productivity/tools`). Alternative, if it fits the dashboard's
-wording better: *Well-being* (the Lifestyle section, where health and nutrition tools live). Verify in the
-dashboard before submitting.
+**Tools** ("tools that don't fit into other categories"). The store has no Health & Fitness category;
+*Well-being* ("self-help, mindfulness, and personal development") is the only other defensible choice and fits the
+food diary less well. Pick Tools unless the dashboard's list has changed.
 
 ### Language
 
 **English** (the extension's UI is English only).
 
-### Detailed description (plain text; the store shows it verbatim, no Markdown; keep under ~16,000 characters)
+### Detailed description (plain text; the store shows it verbatim, no Markdown)
+
+The brand word appears five times in this text, URLs included (the store flags "unnatural repetition of the same
+keyword more than 5 times"): keep it at five or fewer when editing. No superlatives, no testimonials, no list of
+sites.
 
 ```
-Multi-Add for Cronometer adds a small panel to the Cronometer web app (cronometer.com) that lets you log a whole meal at once instead of one food at a time.
+Log a whole meal in one step instead of one food at a time, and see what your logging says about the energy you really burn.
 
-The web app's "Add Food to Diary" dialog closes after every add and has no multi-add. With this extension you open the diary, press Alt+Shift+M (or click the Multi-add button), paste or type one food per line, for example
+This unofficial extension adds a small panel to the Cronometer web diary. The web app's Add Food dialog closes after every food; with the panel you open your diary, press Alt+Shift+M (or click the Multi-add button) and type or paste one food per line:
 
   200g chicken breast
   1 1/2 cups rice, cooked
   2 large eggs @breakfast
 
-press "Find foods", check the matches in a preview table (change the matched food, quantity, unit or diary group for any line), then press "Add all". Every line is added to the diary day you are viewing, in the diary group you chose. A batch can be undone with one click for 24 hours.
+Press "Find foods", check the matches in a preview table (change the food, amount, unit or diary group of any line), then press "Add all". Every line goes into the day you are viewing, in the group you chose. A batch added with the fast engine (the default) can be undone with one click for 24 hours.
 
-WHAT IT UNDERSTANDS
-- quantities in grams, kg, oz, lb, ml, l, cups, tbsp, tsp, slices, pieces, servings, "large"/"medium"/"small" and the food's own measures
+WHAT THE LIST UNDERSTANDS
+- grams, kg, oz, lb, ml, l, cups, tbsp, tsp, slices, pieces, servings, large / medium / small and each food's own measures
 - fractions and decimal commas (1 1/2 cups, ½ cup, 1,5 cups)
 - multipliers (2 x 100g yoghurt, eggs x2)
 - group headers (## Dinner, Dinner:) and per-line tags (@lunch)
-- two foods on one line (oats 40 g, milk 200 ml)
-- comments and blank lines are ignored
+- two foods on one line (oats 40 g, milk 200 ml); blank lines and comments are ignored
 
-TWO ENGINES
-- RPC (default, fast): sends the same requests the web app sends when you use its own Add Food dialog, one food at a time with a short delay, then refreshes the diary.
-- UI automation (fallback): drives the app's real Add Food dialog for you, food by food. Slower, but it keeps working even when Cronometer changes its internals.
-If Cronometer ships a new version of its web app, the extension rebuilds the part it needs from the new build automatically (it reads the app's own public script files from cronometer.com); you can also press "Rebuild decoder" in the Diagnostics tab.
+TWO WAYS TO ADD
+- Fast (default): sends the same request the diary sends when you add a food yourself, one food at a time with a short pause, then refreshes the diary.
+- UI automation (fallback): drives the diary's own Add Food dialog for you, food by food. Slower, but independent of the web app's internals.
+When the web app ships a new version, the extension re-reads the app's public script files as text to update the table it uses to understand the diary's replies. Nothing it downloads is ever run. "Rebuild decoder" in the Diagnostics tab does the same on demand.
 
-ADAPTIVE TDEE (OPTIONAL, OFF UNTIL YOU ENABLE IT)
-The panel's TDEE tab estimates how much energy you really burn each day from the food and the weight you already log in Cronometer (an adaptive estimate in the style of MacroFactor), shows how it compares with Cronometer's own burned figure, charts your expenditure and trend weight, and offers a weekly check-in with a suggested calorie and macro target for your goal (lose, maintain or gain). The target is display only: you set it in Cronometer yourself. Nothing is read until you press Enable in the tab; then the extension reads your daily intake, Cronometer's burned figures and your weight history from cronometer.com with the same read requests the web app itself uses, and keeps a copy in your browser only (one button deletes it). You can also import Cronometer's own CSV exports instead. Estimates only, not medical advice; not suitable during pregnancy or with medical conditions that affect weight or fluid balance.
+ADAPTIVE TDEE (OPTIONAL, OFF UNTIL YOU TURN IT ON)
+The panel's TDEE tab turns the food and weigh-ins you already log into an estimate of the energy you really burn each day. It shows the estimate with its uncertainty, compares it with the diary's own burned figure, charts expenditure and trend weight, and offers a weekly check-in with a suggested calorie and macro target for your goal (lose, maintain or gain). The target is a suggestion: you set your targets in the diary yourself. The tab first explains what it reads and stores, and reads nothing until you press Enable. You can also import the diary's own CSV exports. Estimates only, not medical advice; not suitable during pregnancy or with medical conditions that affect weight or fluid balance.
 
 PRIVACY
-- Works only inside your own logged-in Cronometer tab. Nothing leaves cronometer.com.
-- No account with us, no analytics, no telemetry, no third parties, no data sold.
+- Works only inside your own logged-in diary tab. No other website is contacted.
+- No account with us, no analytics, no telemetry, no ads, no third parties, no data sold.
 - Your session is used in memory only and is never stored.
-- Settings, your last input list (remembered by default; switch it off in Settings), the undo information for the last batch (both with your account number, so they are only offered to that account; both deletable in Settings) and a decoder table rebuilt from Cronometer's public code (no personal data) are kept in your browser only.
-- If you enable the TDEE tab: your daily intake, energy-burned and weight history, the tab's settings and its check-in log are kept in your browser only, for your account only, and "Delete TDEE data" removes them. They never appear in the diagnostics dump.
-Full policy: https://github.com/fabbeskw/multi-add-for-cronometer/blob/HEAD/PRIVACY.md
+- Before first use the panel shows what it reads and keeps, and waits for you to press Continue.
+- Kept in your browser only: settings, undo information for the last batch, a decoder table with no personal data and, only if you tick "Remember my last typed list" (off unless you do), your last input list. If you enable the TDEE tab, also your intake, burned and weight history, its settings and check-ins; "Delete TDEE data" removes them.
+The full privacy policy is linked from this listing.
 
 REQUIREMENTS
-- A Cronometer account and the Cronometer WEB app at https://cronometer.com (not the mobile apps).
-- After installing, open https://cronometer.com/#diary and reload the tab once so the extension can see the app start.
+- An account for the Cronometer web app. The mobile apps are not supported.
+- After installing, open your diary at cronometer.com/#diary and reload the tab once.
 
 DISCLAIMER
-This is an unofficial, independent tool. It is not affiliated with, endorsed by or supported by Cronometer Software Inc. "Cronometer" is a trademark of its owner and is used only to describe which website the extension works with. The extension automates actions on your own account through the same requests the web app makes; use it at a reasonable pace and in accordance with Cronometer's Terms of Service. Use at your own risk.
+Unofficial and independent: not affiliated with, endorsed by or supported by Cronometer Software Inc. The name is used only to say which website the extension works with. The extension acts on your own account through the same requests the web app makes; use it at a reasonable pace and within the site's Terms of Service. Use at your own risk.
 
-Source code, issues and support: https://github.com/fabbeskw/multi-add-for-cronometer/issues
+Source code, privacy policy and support: https://github.com/fabbeskw/multi-add-for-cronometer
 ```
 
-### Trademark disclaimer sentence (also paste into any field that asks how third-party marks are used)
+### Trademark sentence (paste into any field that asks how third-party marks are used)
 
 ```
 Multi-Add for Cronometer is an unofficial, independent extension and is not affiliated with, endorsed by or supported by Cronometer Software Inc.; "Cronometer" is a trademark of its owner, used only to identify the website the extension works with, and no Cronometer logo or brand asset is used.
@@ -97,48 +104,47 @@ Multi-Add for Cronometer is an unofficial, independent extension and is not affi
 
 ### Graphic assets
 
-| Asset | Size | Required | Notes |
+The store's images page: "Only the extension icon, a small promotional image, and a screenshot are mandatory."
+
+| Asset | Size / format | Required | File |
 |---|---|---|---|
-| Store icon | 128 × 128 PNG | yes | Use `icons/icon128.png` (generic icon; no Cronometer branding). |
-| Screenshots | **1280 × 800** (preferred) or 640 × 400, PNG or JPEG, no alpha | at least 1, up to 5 | See checklist below; `python tools/screenshots.py` renders them into `store-assets/` (committed). |
-| Small promo tile | 440 × 280 PNG/JPEG | optional | Plain background, extension name, one line ("Log a whole meal in one go"). No Cronometer logo. |
-| Marquee promo tile | 1400 × 560 | optional | Only needed if you want to be considered for featuring; skip for a soft launch. |
+| Store icon | 128 × 128 PNG: 96 × 96 artwork centred with 16 px transparent padding per side; works on light and dark backgrounds | **yes** (taken from the zip) | `icons/icon128.png` |
+| Screenshots | 1280 × 800 (preferred) or 640 × 400, PNG or JPEG, square corners, full bleed (no frame, no padding) | **yes**, at least 1, up to 5 (use all 5) | the five shots below, in order |
+| Small promo tile | 440 × 280 PNG or JPEG, fills the whole tile, little or no text | **yes** (listings without it are shown after those that have it) | `store-assets/promo/small-promo-440x280.png` |
+| Marquee promo tile | 1400 × 560 PNG or JPEG | optional (only used for the featured carousel) | `store-assets/promo/marquee-1400x560.png` |
+| Promo video | YouTube link | optional (the images page names only icon, small tile and screenshot as mandatory) | none |
 
-#### Screenshot checklist (5 shots, all 1280 × 800, rendered by `python tools/screenshots.py` into `store-assets/`)
+The icons and both promo tiles are rendered from the SVG/HTML sources in `graphics/` by `tools/make_graphics.py`
+(original art: a list with a plus; no Cronometer logo, wordmark or colour; no claims such as "Editor's Choice").
+Tile text: the name, the value line "Faster diary logging: a whole meal at once · adaptive TDEE from your log" (one
+subject, two bullets, on the small tile; "Faster diary logging · adaptive TDEE" on the marquee) and
+"Unofficial — not affiliated with Cronometer".
+Promo images go through their own short review after upload and cannot be localised.
 
-1. **Input view** — the panel open over the diary with a realistic list typed in (use ordinary foods, a `## Dinner`
-   header and an `@lunch` tag so the format is visible).
-2. **Preview** — the table after *Find foods*: several ✓ rows, one `?` row with a *Use …* suggestion so the
-   checking step is obvious.
-3. **Results** — the ✓ list after *Add all* with the *Undo this batch* button visible.
-4. **Diary after adding** — the Cronometer diary showing the new entries in their groups (the "why you want this"
-   shot).
-5. **Diagnostics / Settings** — the Diagnostics tab (shows the decoder status, the *Rebuild decoder* button and the "no session token"
-   note) or the Settings tab with the two engines.
+#### The five screenshots (all 1280 × 800, in this order)
 
-The five shots predate 0.3.0 and do not show the **TDEE** tab. `tools/screenshots.py` has no TDEE scenario yet; if
-you replace shot 5 with the TDEE Overview, take it by hand on an account whose owner agreed to show its weight and
-intake (the tab shows health data; blur or use a test account) and record it in `store-assets/manifest.json`.
+| # | Shot | What it shows | Data shown |
+|---|---|---|---|
+| 1 | **Input** | the panel open over the diary with a typed list (`## Dinner` header, a fraction, a size word, an `@snacks` tag) | the sample list |
+| 2 | **Preview** | the table after *Find foods*: matched food, amount, unit, grams and group per line, *Add all* | Cronometer's public food database |
+| 3 | **Diary** | the diary day after *Add all* with the four new entries in Dinner and Snacks (panel closed) | the four sample entries only, on an empty future day, undone after capture |
+| 4 | **TDEE overview** | the TDEE tab: expenditure estimate with its uncertainty, comparison with the diary's burned figure, charts | **synthetic demo history**, no real person's intake or weight |
+| 5 | **TDEE check-in** | the weekly check-in with a suggested calorie and macro target | **synthetic demo history** |
 
-**Generated, not hand-made:** `python tools/screenshots.py` (see `store-assets/README.md`) opens a Chrome window,
-waits for you to log in, installs the extension, runs exactly this scenario on your diary through the panel's real
-buttons (RPC engine; the four entries are added and undone again) and captures the five shots as the page viewport
-(1280 × 800, so there is no URL bar to crop). Before each capture it blurs your name / e-mail in Cronometer's header,
-the Energy Summary / targets widgets and, in the Diagnostics dump, your numeric account id; `store-assets/manifest.json`
-records per file what was blurred. The permutation / policy hash in the dump are the app's public build identifiers and
-may stay; the dump never shows the session token (`"nonce": "present"`). For the `?` row of shot 2 pass `--lines FILE`
-with a line whose unit the food does not have (`2 slices banana`). Before uploading, open every PNG and look for
-anything personal the blur did not cover (a widget Cronometer added since, a name in a place the tool does not know):
-extend the blur with `--blur-selectors` / `--blur-text` and run again rather than editing the PNGs. The diary entries
-visible in the shots are yours by design: capture on a day whose entries you are happy to show, or on an empty day.
+The files are `01-input.png`, `02-preview.png`, `03-diary.png`, `04-tdee-overview.png` and `05-tdee-checkin.png`;
+the capture date and what was blurred are recorded in `store-assets/manifest.json` (written by the live run) and
+explained in `store-assets/README.md`; `python tools/screenshots.py` renders the set from the real extension. Before
+uploading, open every PNG and check that no name, e-mail, account number or real health figure is visible. The
+store's rule is that screenshots "demonstrate the actual user experience" of the current version: all five show the
+real panel of 0.3.1, and the TDEE shots use demo data because the tab shows health data.
 
 ### Additional fields
 
 | Field | Value |
 |---|---|
-| Official URL | leave empty (or the repository page <https://github.com/fabbeskw/multi-add-for-cronometer> — *not* cronometer.com) |
-| Homepage URL | <https://github.com/fabbeskw/multi-add-for-cronometer> (repository) |
-| Support URL | <https://github.com/fabbeskw/multi-add-for-cronometer/issues> (repository *Issues* page, or a contact form) |
+| Official URL | leave empty (it is for a verified site you own; never cronometer.com) |
+| Homepage URL | `https://github.com/fabbeskw/multi-add-for-cronometer` (also `homepage_url` in the manifest since 0.3.1) |
+| Support URL | `https://github.com/fabbeskw/multi-add-for-cronometer/issues` |
 | Mature content | No |
 | Google Analytics ID | leave empty (the extension has no analytics) |
 
@@ -146,69 +152,63 @@ visible in the shots are yours by design: capture on a day whose entries you are
 
 ## 2. Privacy tab
 
-### Single purpose description
+### Single purpose description [≈ 640 characters]
 
 ```
-A companion for the Cronometer web diary: log many foods at once and estimate energy expenditure from the intake and weight already logged there. Everything happens inside the user's logged-in cronometer.com tab: a typed list of foods is added to the Cronometer food diary in one operation instead of one at a time, and, only if the user enables it, an adaptive estimate of daily energy expenditure (with a suggested weekly calorie target the user sets in Cronometer themselves) is computed from the intake, energy-burned and weight entries already in that diary.
+Faster food and energy logging in the user's own Cronometer web diary. The extension works only on cronometer.com, inside the user's logged-in diary tab, and only on that user's diary. It serves this one purpose in two ways: it adds a whole typed list of foods to the diary in one step instead of one search per food, and, optionally and only after the user presses Enable, it turns the food and weight entries already logged in that same diary into an estimate of daily energy expenditure with a suggested weekly calorie target that the user sets in the diary themselves. It has no other function, contacts no other site and shows no ads.
 ```
 
-Both features serve the same diary and work only on data the user logs in Cronometer; the TDEE part is off until
-the user enables it. See §5 for the review risk this wording carries.
+Why this is one purpose and not two: the store's FAQ allows a single purpose defined by "a narrow focus area or
+subject matter", and an extension "can offer various functions related to that focus area". Here the subject is
+the user's own food and energy log on one website; both functions read or write only that log, from the same
+panel, with the same session and the same host permission. The TDEE function does not work without the diary and
+adds no permission. If a reviewer still rejects it under the single-purpose policy, see §6.
 
-### Permission justifications
-
-**storage**
-
-```
-Stores the user's extension settings (engine choice, delay between adds, whether to remember the last input), the last input list (remembered by default, the user can switch it off), the user's numeric Cronometer account id next to that list and next to the ids of the last batch of diary entries (so the undo and the remembered list are only offered to the account that created them; undo is possible for 24 hours, and both records can be deleted by the user at any time from the panel's Settings tab), and a technical decoder table derived from Cronometer's public compiled code. Only if the user enables the optional Adaptive TDEE tab, it also stores a copy of the user's per-day energy intake, Cronometer's energy-burned figures and first daily weigh-in (read from the user's own Cronometer account), the tab's settings, per-day exclusions and weekly check-in log, each record stamped with the account id and shown only to that account; the "Delete TDEE data" button removes them. All of it stays in chrome.storage.local on the user's device. Nothing is synced or transmitted.
-```
-
-**Host permission `https://cronometer.com/*`**
+### Permission justification — `storage` [≈ 770 characters]
 
 ```
-The extension runs only inside the Cronometer web app. It needs this origin to (1) inject its panel into the diary page, (2) observe the app's own requests in the user's tab so it can learn the current session and diary date without asking for credentials, (3) send the same diary requests the app itself sends (food search, add entry, remove entry), (4) after a Cronometer release, download the app's own public script files from cronometer.com (the same files the page loads) to rebuild the table it uses to read the app's responses; that table is stored locally and contains no personal data, and (5) only after the user enables the optional Adaptive TDEE tab, make the read-only requests the web app itself makes for its dashboard, Nutrition Report, weight history, diary calendar and settings (getCaloriesConsumedAndBurned, getBiometrics, getCalendarInfo, getFirstDayWithData, getPreference) to read the user's own energy intake, energy-burned and weight history; nothing is written back. No other host is accessed and no traffic to other hosts is inspected.
+Keeps data on the user's device only (chrome.storage.local; nothing is synced or sent): the extension's settings and whether its first-run notice was acknowledged; the ids of the last batch of added diary entries with the account id, for a 24-hour undo; a decoder table derived from Cronometer's public web client and a note on its last rebuild (no personal data); and, only if the user ticks "Remember my last typed list" (off by default; switching it off deletes it), the last typed food list with the account id, so it is restored only for that account. Only after the user presses Enable in the optional TDEE tab: a copy of the user's daily intake, energy-burned and weight history, the tab's settings, day decisions and check-in log. "Delete TDEE data" removes those.
 ```
 
-**Are you using remote code?** — **No.** All code is packaged in the extension; nothing is loaded from a server and
-`eval` is not used. (The extension *reads* Cronometer's public JavaScript to build a decoding table, but it never
-executes it; say so in the certification text if a reviewer asks.)
+### Permission justification — host permission `https://cronometer.com/*` [≈ 940 characters]
 
-### Data usage disclosures
+```
+The extension works only on the Cronometer web app and contacts no other host. It needs this origin to: (1) show its panel on the diary page; (2) observe, in the user's own tab, the app's same-origin requests to its own server through a page-level XMLHttpRequest hook, to learn the session, account id and diary date without asking for credentials (the session token stays in memory); (3) send the requests the app itself sends when a food is added by hand: food search (the site's own HTTPS endpoint, whose query-parameter format the site defines), add entry, remove entry (undo); (4) after a Cronometer release, download the app's public script files and parse them as TEXT into a data table used to read the app's replies, never executed; (5) only after the user presses Enable in the optional TDEE tab, send the app's own read-only requests for the user's intake, energy-burned and weight history. Nothing is sent to any other server.
+```
 
-The store's User Data policy counts **collecting, transmitting, using or sharing** user data as "handling" it, and
-requires the disclosure **even when the data is only processed or stored locally and never reaches the developer**
-(Chrome Web Store User Data FAQ). Answer by what the code does, not by where the data ends up. Tick:
+### Remote code
 
-| Data type | Tick | Why (what the code does) |
+Answer **"No, I am not using remote code."** If the dashboard offers a justification field, paste:
+
+```
+All code is in the package; there is no eval, no new Function and no script loaded from outside it. After a Cronometer release the extension downloads the web app's own public .cache.js files from cronometer.com and parses them as plain text to rebuild a data table (type names, checksums, field layouts) that its packaged decoder uses; nothing downloaded is executed or interpreted as instructions.
+```
+
+### Data usage — what to tick
+
+The store counts collecting, using or storing data **even locally** as handling it (User Data FAQ: disclosure is
+required "even when data is processed or stored locally on a user's device and is not transmitted"). Tick by what
+the code does:
+
+| Data type (store definition) | Tick | What the extension does |
 |---|---|---|
-| **Health information** | **yes** | the food list the user types is dietary data: it is stored locally by default (`cmaLastInput`), sent to Cronometer's food search and written into the user's diet diary; if the user enables the Adaptive TDEE tab, the per-day energy intake, energy-burned figures and weigh-ins are read from the user's Cronometer account and stored locally (`cmaTdeeDays`, with settings, per-day exclusions and check-ins in `cmaTdeeSettings` / `cmaTdeeOverrides` / `cmaTdeeCheckins`, and the consent, refresh state and three Cronometer preferences in `cmaTdeeSync`) |
-| **Authentication information** | **yes** | the Cronometer session token is read from the app's own traffic, held in memory and sent with every diary request to cronometer.com |
-| **Personally identifiable information** | **yes** | the numeric Cronometer account id is read from the app's traffic, stored locally next to the last batch and the last input (`cmaLastBatch`, `cmaLastInput`) and, when the TDEE tab is enabled, in every `cmaTdee*` record, written to the extension's own log and included in the diagnostics dump the user copies by hand |
-| **Website content** | **yes** | Cronometer's responses (the diary of the day being viewed, the food details; with the TDEE tab enabled, the daily energy rows, weigh-ins, calendar flags and three settings) are decoded to place new entries, to pick measures and to compute the estimate |
-| **User activity** | **yes** (recommended) | the extension observes the network requests the Cronometer web app makes in the user's tab (the page-level XMLHttpRequest hook); the store's own example for this category is network monitoring, so declare it rather than argue about it |
-| Financial and payment information, Personal communications, Location, Web history | no | not handled at all (no other site is observed, `document.cookie` and browsing history are never read) |
+| **Personally identifiable information** ("identification number") | **yes** | the numeric Cronometer account id is read from the app's traffic and stored next to the last input and last batch (`cmaLastInput`, `cmaLastBatch`) and in every `cmaTdee*` record |
+| **Health information** | **yes** | the typed food list (dietary data) is sent to the site's food search, written to the diary and, only if the user ticks *Remember my last typed list*, remembered in `cmaLastInput`; after **Enable**, per-day intake, energy burned and weigh-ins (`cmaTdeeDays`), the TDEE settings, day decisions and check-ins (`cmaTdeeSettings`, `cmaTdeeOverrides`, `cmaTdeeCheckins`) and the consent / refresh record (`cmaTdeeSync`) are stored locally |
+| Financial and payment information | no | not handled |
+| **Authentication information** ("credentials", "authentication cookies") | **yes** | the session token is read from the app's own requests, held in memory only and sent back to cronometer.com with each request; never stored, never logged |
+| Personal communications | no | not handled |
+| Location | no | not handled |
+| Web history | no | no other site and no browsing history is read |
+| **User activity** ("network monitoring") | **yes** | the page-level XMLHttpRequest hook observes the web app's requests to its own server in the user's tab |
+| **Website content** | **yes** | the site's replies (the diary day, food details; after **Enable**, the daily energy rows, weigh-ins, calendar flags and three preferences) are decoded to place entries and compute the estimate |
 
-Every one of these stays on the device or goes only to cronometer.com on the user's own behalf — the certifications
-and the free-text paragraph below say so; an accurate disclosure is what a reviewer cross-checks against the
-`storage` permission and the request hook, and it is shown on the public listing.
+Certify all three statements (they are true):
 
-Then certify all three statements (they are true):
+* not being sold to third parties, outside of the approved use cases — **certify**
+* not being used or transferred for purposes unrelated to the item's single purpose — **certify**
+* not being used or transferred to determine creditworthiness or for lending purposes — **certify**
 
-* *I do not sell or transfer user data to third parties, outside of the approved use cases* — **yes**
-* *I do not use or transfer user data for purposes that are unrelated to my item's single purpose* — **yes**
-* *I do not use or transfer user data to determine creditworthiness or for lending purposes* — **yes**
-
-### Free-text explanation to paste where the dashboard asks for details (or into the reviewer notes)
-
-```
-This extension does not collect or transmit any user data to the developer or to any third party. It has no server, no analytics and no telemetry.
-
-Inside the user's own logged-in cronometer.com tab it observes the Cronometer web app's own start-up requests to obtain the app's session token and the numeric account id, and uses them solely to send the same food-search and diary requests to cronometer.com that the web app sends when the user adds a food by hand. The session token is kept in memory only: never in storage, never in the extension's log and never in the diagnostics dump. The account id is kept in memory, stored locally next to the last batch and the last input list so that undo and the remembered list are only offered to the account that created them, and appears in the diagnostics dump the user copies by hand for a bug report. Food names typed by the user are sent only to Cronometer's own food search. Diary content is read only to place new entries correctly.
-
-chrome.storage.local holds: extension settings; the user's last input list together with the account id (remembered by default; the user can switch "remember last input" off, which deletes the stored copy); the ids of the last batch of added entries with the account id for a 24-hour undo; and a decoder table derived from Cronometer's public compiled JavaScript plus a note about its last rebuild (type names and checksums, a build id, a timestamp and an error text - no personal data; the script files are downloaded from cronometer.com only and analysed as text, never executed). All of it stays on the device and is deleted with the extension.
-
-The optional Adaptive TDEE tab reads nothing until the user presses Enable in it. After that it sends read-only requests to cronometer.com (the same ones the web app uses for its dashboard, Nutrition Report, weight history, diary calendar and settings) to obtain the user's per-day energy intake, Cronometer's energy-burned figures and weigh-ins, computes an expenditure estimate and a suggested weekly target locally, and stores the history, the tab's settings and its check-in log in chrome.storage.local, stamped with the account id and shown only to that account. Nothing is written back to Cronometer, nothing is transmitted anywhere else, the diagnostics dump contains only counts and dates for this data, and the "Delete TDEE data" button removes all of it.
-```
+The matching Limited Use statement is in `PRIVACY.md` §6, one click from the listing.
 
 ### Privacy policy URL
 
@@ -216,107 +216,110 @@ The optional Adaptive TDEE tab reads nothing until the user presses Enable in it
 https://github.com/fabbeskw/multi-add-for-cronometer/blob/HEAD/PRIVACY.md
 ```
 
-Host `PRIVACY.md` at a public URL (a GitHub repository page, GitHub Pages, a gist, or any static host) and paste that
-URL. The store requires a reachable policy for any extension that handles user data; this one is required because
-of the host permission and the session handling.
+`blob/HEAD` resolves to the repository's default branch. The policy lists every storage key and every kind of
+request; it must stay public and reachable for as long as the item is published.
 
 ---
 
-## 3. Distribution tab
+## 3. Test instructions tab
+
+A **dedicated free test account** is part of the submission (SUBMISSION-CHECKLIST step A5): created for the review,
+never the owner's personal account, with about three weeks of synthetic food entries and daily weigh-ins, so the TDEE
+tab shows an estimate instead of "log a few days first". Its login goes **only into this dashboard tab** (the
+username / password fields when the tab has them, otherwise typed by the owner on a line after the block), never
+into the repository, the listing or an issue. Paste exactly one of the two blocks below; neither has a placeholder.
+
+### Test instructions — with the test account (use this one) [≈ 946 characters]
+
+```
+Test account (synthetic data, made for this review): login in this tab. It holds about three weeks of synthetic food entries and daily weigh-ins.
+1. Install, log in, open https://cronometer.com/#diary and RELOAD the tab once (the extension reads the app's start-up requests).
+2. Press Alt+Shift+M (or Ctrl+Alt+M, or the Multi-add button bottom right). The toolbar icon shows these steps. The first time, read the short notice and press Continue.
+3. Paste: 200g chicken breast / 1 cup rice, cooked / 2 large eggs (one per line). Press Find foods, then Add all: the entries appear in the diary. Press Undo this batch to remove them.
+4. TDEE: open the TDEE tab, read the notice, press Enable. After the first read (about a minute) it shows an energy expenditure estimate and a weekly target from the account's history. Settings > Delete TDEE data clears it.
+Nothing leaves cronometer.com. Reviewer notes: see the next field or the repository README.
+```
+
+### Test instructions — without a test account (fallback only) [≈ 909 characters]
+
+```
+Needs a Cronometer web account; a free one from https://cronometer.com is enough for steps 1-3.
+1. Install, log in, open https://cronometer.com/#diary and RELOAD the tab once (the extension reads the app's start-up requests).
+2. Press Alt+Shift+M (or Ctrl+Alt+M, or the Multi-add button bottom right). The toolbar icon shows these steps. The first time, read the short notice and press Continue.
+3. Paste: 200g chicken breast / 1 cup rice, cooked / 2 large eggs (one per line). Press Find foods, then Add all: the entries appear in the diary. Press Undo this batch to remove them.
+4. TDEE (optional): open the TDEE tab, read the notice, press Enable. A new account has no history, so the tab then asks for a few days of food and weight entries first; that is the expected state. Settings > Delete TDEE data clears it.
+Nothing leaves cronometer.com. Reviewer notes: see the next field or the repository README.
+```
+
+### Reviewer notes [≈ 2,303 characters] (paste after the instructions if the field accepts more text; otherwise keep it ready for a reviewer's question)
+
+```
+How it works, for review:
+- src/hook-main.js runs in the page's MAIN world at document_start on cronometer.com only. It wraps XMLHttpRequest to observe the web app's own requests to /cronometer/app, /cronometer/pro and /api/ on the same origin and relays them over a MessageChannel port (not the window message bus) to the content script. That is how the extension learns the session and diary date without asking for a password. Because it must see the app start, the session and account id are already in memory when the first-run notice appears; the notice says so, and neither is ever stored. It sends nothing itself and ignores other hosts.
+- All requests the extension makes go to cronometer.com with credentials same-origin: food search, getFood, getDayInfo, updateDiary (add), removeServing (undo) and, only after the user enables the TDEE tab, five read-only calls (getCaloriesConsumedAndBurned, getBiometrics, getCalendarInfo, getFirstDayWithData, getPreference). The food search uses the web app's own same-origin HTTPS endpoint, whose format (the food name as a query parameter) is defined by the site, not by the extension.
+- src/lib/gwt-registry.js is generated DATA, not code: a table of the web app's serialised types, produced by tools/gen_registry.py in the public repository. The hex strings are the app's public build hashes; short names such as "U0n" are the compiled app's own function names the decoder recognises. Its serviceMethods and policies lists name every RPC method and service of the web client ("adServed", "admin" included) for recognition only; the extension calls only the methods above.
+- After a Cronometer release, src/lib/registry-builder.js downloads the app's public .cache.js files from cronometer.com and parses them as text into the same kind of table. Nothing downloaded is executed; there is no eval anywhere.
+- src/tdee/adaptive-tdee.js is a generated wrapper around the unmodified engine in vendor/adaptive-tdee/ (tools/gen_tdee.py).
+- Consent: the panel shows a first-run notice (what is read and kept, with an unticked, opt-in remember-list choice) and nothing typed is stored before Continue; the TDEE tab reads nothing before its own Enable.
+- No analytics, no other host, no remote code. Source: https://github.com/fabbeskw/multi-add-for-cronometer
+```
+
+---
+
+## 4. Distribution tab
 
 | Setting | Recommended | Why |
 |---|---|---|
 | Payment | Free | |
-| Visibility | **Unlisted** for the first release, **Public** later | Unlisted items are installable by anyone with the link, pass the same review, and can be switched to Public without re-review. This is the soft-launch option: share the link with a few users, wait for the first Cronometer deploy to confirm the runtime rebuild works in the wild, then flip to Public. |
+| Visibility | **Unlisted** for the first release, **Public** later | Unlisted items get the same review but no listing: anyone with the link can install. Share it with a few users, wait for the first Cronometer deploy to confirm the automatic decoder rebuild in the wild, then change the visibility to Public and **republish** (the store's update docs say "change your visibility ... and then republish"; assume it can be reviewed again). |
 | Regions | All regions | |
 
 ---
 
-## 4. Publishing step by step
+## 5. Publishing and updates
 
-1. **Developer account.** Go to <https://chrome.google.com/webstore/devconsole>, sign in with the Google account
-   you want to own the listing, accept the developer agreement and pay the one-time **US$5** registration fee. Set
-   up the *Account* page (publisher name shown on the listing, contact e-mail — it must be verified). Consider
-   enabling 2-step verification on that Google account; the store requires it for publishers.
-2. **Build the package** from a clean, tested tree:
-   ```
-   python tools/check_manifest.py      # ALL CHECKS PASSED
-   python tools/gen_tdee.py --check    # the TDEE engine wrapper matches vendor/adaptive-tdee/ (exit 0)
-   bash tests/run.sh                   # every page PASS
-   python tools/build_zip.py           # PACKAGE OK: dist/multi-add-for-cronometer-0.3.0.zip
-   ```
-   The script refuses to produce a package that contains anything outside the allow-list (`src/` takes `.js`
-   files only, and every one of them must be listed in the manifest) or that references a missing file, so a
-   "PACKAGE OK" zip is exactly what the store will see. `dist/` is gitignored: attach the same zip to a GitHub
-   Release (<https://github.com/fabbeskw/multi-add-for-cronometer/releases>) so the *From a release zip* install path in the README works.
-3. **Load the zip locally once**: unzip it to a temporary folder and *Load unpacked* on `chrome://extensions`, open
-   `https://cronometer.com/#diary`, reload, add two foods, undo them. This catches a manifest/file problem before
-   review does. `python tools/smoke_extension.py dist/multi-add-for-cronometer-0.3.0.zip --self-test` does the
-   install half of that headlessly (DevTools `Extensions.loadUnpacked` + the popup page).
-4. **Upload.** Dashboard → *New item* → drop the zip. The dashboard reads name, version, description and permissions
-   from `manifest.json`.
-5. **Fill the tabs** with the text above: *Store listing* (description, category, language, icon, screenshots,
-   URLs), *Privacy* (single purpose, permission justifications, remote code = No, data usage, certification, privacy
-   policy URL), *Distribution* (free, Unlisted/Public, regions).
-6. **Save draft** and use *Preview* to check the listing. Fix anything the dashboard flags in red (a missing
-   screenshot or justification blocks submission).
-7. **Submit for review.** Leave *Publish automatically after review* on unless you want to time the release.
-8. **Review time.** Most submissions with a single host permission and `storage` are reviewed within 1–3 days;
-   allow up to a couple of weeks for a first submission or after a rejection. The "observe the app's requests"
-   behaviour (the page-level XMLHttpRequest hook) is the part most likely to draw a question — the reviewer notes
-   text in §2 answers it. If rejected, the e-mail names the policy; fix, bump the version, rebuild, re-upload, and
-   reply through the dashboard's appeal/resubmit flow.
-9. **After publication**, the item page is `https://chromewebstore.google.com/detail/<item id>`; put that link in
-   the README *Install* section (replace `<Chrome Web Store URL>` and drop the *coming soon* note) and, if
-   visibility is Unlisted, share it directly.
+The owner-only steps (developer registration and fee, mandatory 2-Step Verification, verified contact e-mail,
+trader / non-trader declaration, Submit) and the field-by-field order are in
+[SUBMISSION-CHECKLIST.md](SUBMISSION-CHECKLIST.md). Facts to plan around:
+
+* **Review time:** "For most extensions, review is completed within a few days, but it can take up to a few weeks."
+  New developers, new extensions and hard-to-review code get closer review; contact developer support if it is
+  pending for more than three weeks.
+* **After approval** the item publishes automatically unless deferred publishing was chosen; a deferred approval
+  must be published within **30 days** or it goes back to draft.
+* **Item page** after publication: `https://chromewebstore.google.com/detail/<item id>`. Put it in the README
+  *Install* section (replace `<Chrome Web Store URL>` and drop *coming soon*).
 
 ### Publishing an update
 
-1. Change `"version"` in `manifest.json` (`0.3.0` → `0.3.1`; the store rejects an upload whose version is not higher
-   than the published one). Add the changelog line to README.md. If the panel changed visibly, regenerate the
-   screenshots (`python tools/screenshots.py`) and upload the new ones with the package.
-2. `python tools/check_manifest.py && python tools/gen_tdee.py --check && bash tests/run.sh && python tools/build_zip.py`.
-3. Dashboard → the item → *Package* → *Upload new package* → drop the new zip → *Submit for review*. Listing text
-   only needs changing if the behaviour changed; the privacy answers must be revisited if data handling changed
-   (and then `PRIVACY.md` and its effective date too).
-4. Users receive the update automatically within a few hours of approval (Chrome checks roughly every 5 hours).
+1. Raise `"version"` in `manifest.json` (the store refuses a package whose version is not higher than the published
+   one) and add the changelog line to README.md.
+2. Green bar: `bash tests/run.sh`, `python tools/check_manifest.py`, `python tools/gen_tdee.py --check`,
+   `python tools/build_zip.py`, `python tools/smoke_extension.py --self-test`,
+   `python tools/screenshots.py --dry-run --headless`, `python tools/make_graphics.py --verify`.
+3. Dashboard → the item → *Package* → *Upload new package* → the new zip → *Submit for review*. If the panel changed
+   visibly, upload new screenshots; if data handling changed, update `PRIVACY.md` (effective date), the Privacy tab
+   answers and this file **before** submitting.
+4. Users get the update automatically within hours of approval.
 
 ---
 
-## 5. Risks to be aware of
+## 6. Risks and how this listing answers them
 
-* **Cronometer's Terms of Service.** The extension automates actions on the user's own account through the same
-  requests the web app makes, at a human-like pace (one request at a time, a delay between adds, server throttling
-  respected). It is nevertheless an unofficial client, and Cronometer could object; the listing, the README and the
-  privacy policy all say so and tell users to stop if asked. Keep the pace limits, never add features that scrape
-  other users' data, and be prepared to unpublish if Cronometer requests it. The TDEE tab's reads are the heaviest
-  part: its first read (and its full refresh, weekly or on *Refresh all*) of up to five years is about 70–90 read
-  requests in a row, 250 ms apart, and it asks for energy windows of up to 92 days - more than the 56 days the app
-  itself ever asks for (a refused window is halved, down to 28 days). After that it reads 3 requests for the last 14
-  days when the tab is opened (at most every 10 minutes) and about 30 seconds after the user's diary edits.
-* **Cronometer deploys can break the RPC engine.** The fast engine decodes Cronometer's GWT-RPC responses with a
-  type registry that is specific to a compiled build. Cronometer redeploys often. Mitigations already shipped:
-  (1) the extension detects a new build from the live permutation hash, **rebuilds the registry itself from the new
-  build's public JavaScript** and activates it, automatically and on demand from Diagnostics; (2) the **UI-automation
-  engine** does not depend on the wire format at all and keeps working meanwhile; (3) an unreadable reply after a
-  successful add stops the batch and tells the user to check the diary, so nothing is duplicated silently.
-  A deploy that changes the *structure* of the client (not just the hashes) can still defeat the rebuild; then a new
-  extension version is needed, which is why the manual `tools/gen_registry.py` route is kept for developers.
-* **Review scrutiny.** A page-level request hook plus a host permission on a health site is the kind of thing a
-  reviewer looks at closely. Everything is explained honestly in §2, and the data-usage boxes are ticked for what
-  the code handles locally too (the store counts local storage and use as handling); do not untick them to make
-  review "easier" — an inaccurate disclosure is grounds for rejection or later removal.
-* **Single-purpose policy (0.3.0).** The Chrome Web Store requires an extension to have a single, narrow purpose.
-  0.3.0 adds a second feature (the Adaptive TDEE tab) to a "multi-add" extension, and the single-purpose statement in
-  §2 was widened honestly to cover both ("a companion for the Cronometer web diary: log many foods at once and
-  estimate energy expenditure from the intake and weight already logged there"). A reviewer may still push back on
-  two features. The fallback is to ship the TDEE tab as a **separate listing** (its own extension built from
-  `src/tdee/` and `src/ui/tdee-view.js` plus the shared capture / rpc layer) and to remove it from this one; do not
-  hide the feature or understate it to get through review.
-* **TDEE data not yet verified live.** The Adaptive TDEE reads were reconstructed from Cronometer's compiled client
-  and have not been checked against a live account (SPEC §12.6). The tab's *Check the numbers* block lets a user
-  compare them with the diary; expect early reports and a data-layer fix (with a `ROW_LAYOUT_VERSION` bump) before
-  recommending the tab widely. The upgrade from 0.2.x also changes what the extension reads and stores (health
-  history after consent), so the privacy answers above must be submitted with this version.
-* **Support load.** Users will report failures caused by Cronometer changes. The Diagnostics dump (no secrets) is
-  designed for that; point the Support URL at an issue tracker and ask for the dump plus the input lines.
+| Risk (store violation code) | What could trigger it | Mitigation in this submission | If it happens |
+|---|---|---|---|
+| **Single purpose** (Red Magnesium / Red Lithium) | bulk add plus a TDEE estimate read as two products | §2 frames one subject (the user's own food and energy log on one site); the TDEE part is optional, off by default, uses no extra permission | ship the TDEE tab as a **separate listing** (its own extension from `src/tdee/`, `src/ui/tdee-view.js` and the shared capture / rpc layer) and remove it here; new publishers may publish two items, so this fits. Never hide or understate the feature to pass review. |
+| **Disclosure and consent** (Purple Nickel; the 2026 rule enforced from 1 August 2026 requires in-product disclosure and an affirmative consent before *any* collection) | the request hook reads the session from page load on (in memory only), before any in-product notice | since 0.3.1 the panel shows a first-run notice (what is read and kept locally, that the session and account id were already read from the page's start-up requests and are held in memory only, nothing sent elsewhere, an unticked opt-in remember-list choice, a link to the policy) and waits for **Continue** before its multi-add views; nothing typed is stored before that, and the typed list only if the user ticks the box; the TDEE tab has its own notice and **Enable**; policy, listing and data-usage answers describe all of it | if a reviewer still asks for consent before the hook observes anything, gate the capture itself behind the acknowledgement (the hook would then need a page reload after Continue) |
+| **Remote code** (Blue Argon) | the decoder rebuild downloads `.cache.js` files | "No remote code" with the explanation in §2 and the reviewer notes: parsed as text, never executed, no eval | point the reviewer at `src/lib/registry-builder.js`; if still refused, drop the runtime rebuild and ship registry updates as new versions (the UI engine keeps working meanwhile) |
+| **Obfuscation** (Red Titanium) | hash strings and short compiled names in `src/lib/gwt-registry.js` | the file is readable generated data with a header; the generator is public; nothing is minified | explain in the reply; link `tools/gen_registry.py` |
+| **Disclosure mismatch / privacy policy** (Purple Lithium, Red Nickel) | ticked boxes, description and code disagreeing; the page-level hook not mentioned | every box ticked for local handling too; the hook, the rebuild and the TDEE reads are named in the description, the justifications and the policy | fix the text, not by unticking; resubmit |
+| **Not working at review** (Yellow Magnesium) | reviewer has no account, or skips the reload; the TDEE tab shows no estimate on an empty account; TDEE history reads not yet verified against a live account (SPEC §12.6) | the account requirement is stated in the description and the popup; test instructions with a reload step; a **required** dedicated test account with about three weeks of synthetic food and weigh-ins, on which the owner verifies the TDEE tab live before submitting (SUBMISSION-CHECKLIST A5, B) | reply with the steps; if a TDEE read broke after a Cronometer deploy, fix it and resubmit |
+| **Metadata** (Yellow Zinc, Yellow Argon) | outdated screenshots, missing required tile, keyword repetition | five current screenshots including the TDEE tab, required small tile, brand word ≤ 5 times | regenerate and resubmit |
+| **Impersonation / trademark** (Red Potassium, Red Silicon) | the name contains the site's brand | "X for Cronometer" naming, "Unofficial" first word of the summary, disclaimer, no brand assets | rename only if the trademark owner or the store asks |
+| **Cronometer's Terms of Service** | an unofficial client automating the user's own account | human pace (one request at a time, 250 ms delay, throttling respected), no scraping of other users; the listing tells users to follow the site's terms | unpublish if Cronometer asks |
+| **Cronometer deploys** | a new build changes the wire format | automatic decoder rebuild, UI-automation fallback, a batch stops on an unreadable reply instead of duplicating | new version; `tools/gen_registry.py` for developers |
+
+The TDEE tab's first read (and its weekly full refresh) of up to five years is about 70–90 read requests in a row,
+250 ms apart, in windows of up to 92 days (a refused window is halved down to 28); afterwards 3 requests for the last
+14 days when the tab is opened (at most every 10 minutes) and about 30 seconds after the user's diary edits. This is
+the heaviest traffic the extension produces and the part to throttle further if Cronometer objects.

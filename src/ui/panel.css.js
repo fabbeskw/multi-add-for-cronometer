@@ -226,6 +226,14 @@ window.CMA.panelCss = `
 .cma-help code { font: 12px ui-monospace, Consolas, Menlo, monospace; background: var(--row-alt); padding: 0 3px; border-radius: 3px; }
 .cma-help ul { margin: 4px 0 0 18px; padding: 0; }
 
+/* First-run notice (shown in place of Input / Preview / Results until Continue) */
+.cma-firstrun { line-height: 1.45; }
+.cma-firstrun-h { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.cma-firstrun ul { margin: 4px 0 8px 18px; padding: 0; }
+.cma-firstrun li { margin: 2px 0; }
+.cma-firstrun-opt { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
+.cma-firstrun a { color: var(--accent); }
+
 /* Preview table */
 .cma-table { width: 100%; border-collapse: collapse; }
 .cma-table th, .cma-table td { padding: 3px 5px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--border); }

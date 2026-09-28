@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <!-- 32 px icon (icons/icon32.png: Windows / high-DPI toolbar): 3 px strokes on the pixel grid, square ends
+       (crisp edges), 1 px of transparent padding. Rendered by tools/make_graphics.py. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1fb89c"/>
+      <stop offset="1" stop-color="#0b8274"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="30" height="30" rx="7" fill="url(#tile)"/>
+  <g fill="#ffffff" shape-rendering="crispEdges">
+    <rect x="6" y="8" width="12" height="3"/>
+    <rect x="6" y="13" width="12" height="3"/>
+    <rect x="6" y="18" width="8" height="3"/>
+    <rect x="20" y="14" width="3" height="11"/>
+    <rect x="16" y="18" width="11" height="3"/>
+  </g>
+</svg>

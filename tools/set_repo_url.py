@@ -40,7 +40,7 @@ import os
 import re
 import sys
 
-FILES = ('README.md', 'PRIVACY.md', 'STORE-LISTING.md', 'popup.html')
+FILES = ('README.md', 'PRIVACY.md', 'STORE-LISTING.md', 'SUBMISSION-CHECKLIST.md', 'popup.html')
 
 # Placeholder -> path appended to the repository URL. Longer names first so that a placeholder that is a prefix
 # of another can never match first (none is today, but the order keeps it that way).

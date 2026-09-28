@@ -43,6 +43,15 @@
  *   mock.entries(groupName) → the serving <tr>s of that group, mock.headerRow(groupName)
  * Successful adds are recorded in window.__added as {name, quantity, measure, group} and their food ids
  * in mock.state.addedIds.
+ *
+ * Day navigation (opt-in, off by default: the arrows then only log and the date label stays fixed):
+ *   mock.useDays({start:'YYYY-MM-DD' (default: the local today), entries:{'YYYY-MM-DD':[{group, name, amount}]},
+ *                 delay:150}) → start
+ * makes `.diary-date-previous` / `.diary-date-next` switch days like the real diary: each day keeps its own serving
+ * rows, the switch lands `delay` ms after the click (the app re-renders after its getDayInfo) and the label reads
+ * like the app's ('Monday, October 5, 2026'); adds made while it is on also record `date` in window.__added.
+ * mock.date() → the ISO day shown (null while off), mock.dayChanges() → how many switches landed.
+ * tools/screenshots.py --dry-run uses it for its empty-future-day search (synthetic seeded entries only).
  */
 window.CMA = window.CMA || {};
 (function () {
@@ -159,8 +168,9 @@ window.CMA = window.CMA || {};
     const dateBtn = el(doc, 'button', 'gwt-Button diary-date-btn', 'Sunday, September 27, 2026');
     const next = el(doc, 'i', 'icon-chevron-right diary-date-next');
     nav.append(prev, dateBtn, next);
-    prev.addEventListener('click', () => { log('date-previous'); });
-    next.addEventListener('click', () => { log('date-next'); });
+    const DEFAULT_DATE_LABEL = dateBtn.textContent;
+    prev.addEventListener('click', () => { log('date-previous'); stepDay(-1); });
+    next.addEventListener('click', () => { log('date-next'); stepDay(1); });
     root.append(nav);
 
     const toolbar = el(doc, 'div', 'button-panel d-flex');
@@ -211,6 +221,42 @@ window.CMA = window.CMA || {};
       for (let tr = h && h.nextElementSibling; tr && !isHeaderRow(tr); tr = tr.nextElementSibling) out.push(tr);
       return out;
     };
+
+    // ---------------------------------------------------------------- optional day navigation (mock.useDays)
+    const days = { on: false, date: null, stash: new Map(), delay: 150, changes: 0 };
+    const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const isoUtc = (iso) => Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10));
+    const isoAdd = (iso, n) => new Date(isoUtc(iso) + n * 86400000).toISOString().slice(0, 10);
+    const dayLabel = (iso) => { const d = new Date(isoUtc(iso)); return WEEKDAY_NAMES[d.getUTCDay()] + ', ' + MONTH_NAMES[d.getUTCMonth()] + ' ' + d.getUTCDate() + ', ' + d.getUTCFullYear(); };
+    const localIso = () => { const d = new win.Date(); const p = (n) => (n < 10 ? '0' : '') + n; return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); };
+    /** A serving row as the Add handler builds it. */
+    const entryRow = (name, amount) => {
+      const tr = el(doc, 'tr', null, null, { 'data-name': name });
+      tr.append(el(doc, 'td', 'diary-time', ''), el(doc, 'td', 'no-left-padding', name), el(doc, 'td', null, amount));
+      return tr;
+    };
+    /** Append a serving row after the group's existing rows (right before the next header row). */
+    const appendToGroup = (group, tr) => {
+      const header = headerRows.get(group) || diaryBody.rows[0];
+      let after = header;
+      while (after.nextElementSibling && !isHeaderRow(after.nextElementSibling)) after = after.nextElementSibling;
+      diaryBody.insertBefore(tr, after.nextElementSibling);
+    };
+    function showDay(iso) {
+      const rows = [];
+      for (const g of o.groups) for (const tr of entriesOf(g)) rows.push([g, tr]);
+      for (const [, tr] of rows) tr.remove();
+      days.stash.set(days.date, rows);
+      days.date = iso;
+      dateBtn.textContent = dayLabel(iso);
+      for (const [g, tr] of days.stash.get(iso) || []) appendToGroup(g, tr);
+      days.stash.delete(iso);
+      days.changes++;
+      log('day ' + iso);
+    }
+    /** An arrow click: nothing but the log while day navigation is off (the default). */
+    function stepDay(n) { if (days.on) later(() => { if (days.on) showDay(isoAdd(days.date, n)); }, days.delay); }
 
     // ---------------------------------------------------------------- generic PrettyDialog (recipe §2, bundle `sm`)
     function prettyDialog(title) {
@@ -486,7 +532,7 @@ window.CMA = window.CMA || {};
           diaryBody.insertBefore(entry, after.nextElementSibling);
           state.adds++;
           state.addedIds.push(food.id);
-          win.__added.push({ name: food.name, quantity: qty, measure, group });
+          win.__added.push(days.on ? { name: food.name, quantity: qty, measure, group, date: days.date } : { name: food.name, quantity: qty, measure, group });
           log('added ' + food.name + ' ' + qty + ' ' + measure + ' → ' + group);
         }, delays.close + delays.refresh);
       });
@@ -580,12 +626,34 @@ window.CMA = window.CMA || {};
       groupBlock(name) { const h = headerRows.get(name); return h ? h.querySelector('.diary-group') : null; },
       entries(name) { return entriesOf(name); },
       get dialog() { return dialog ? dialog.dlg : null; },
+      useDays(opts) {
+        const p = opts || {};
+        days.on = true;
+        days.delay = p.delay == null ? 150 : Math.max(0, Number(p.delay) || 0);
+        days.date = /^\d{4}-\d{2}-\d{2}$/.test(String(p.start || '')) ? String(p.start) : localIso();
+        days.stash.clear();
+        days.changes = 0;
+        dateBtn.textContent = dayLabel(days.date);
+        const seed = p.entries && typeof p.entries === 'object' ? p.entries : {};
+        for (const iso of Object.keys(seed)) {
+          const rows = (Array.isArray(seed[iso]) ? seed[iso] : []).map((e) => [e.group, entryRow(String(e.name), String(e.amount || ''))]);
+          if (iso === days.date) rows.forEach(([g, tr]) => appendToGroup(g, tr));
+          else days.stash.set(iso, rows);
+        }
+        log('day navigation on, ' + days.date);
+        return days.date;
+      },
+      date() { return days.on ? days.date : null; },
+      dayChanges() { return days.changes; },
       reset() {
         for (const t of timers) win.clearTimeout(t);
         timers.clear();
         for (const d of Array.from(doc.querySelectorAll('.pretty-dialog'))) d.remove();
         dialog = null;
         for (const tr of Array.from(diaryBody.rows)) if (!isHeaderRow(tr)) tr.remove();
+        Object.assign(days, { on: false, date: null, changes: 0 });
+        days.stash.clear();
+        dateBtn.textContent = DEFAULT_DATE_LABEL;
         win.__added = [];
         Object.assign(state, { dialogOpen: false, fastPrompts: 0, searches: 0, selections: 0, adds: 0, droppedAdds: 0, closedWithoutAdd: 0, invalidTimePrompts: 0, lastQuery: null, selected: null, measure: null, group: null, addedIds: [], log: [] });
       },

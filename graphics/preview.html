@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Graphics preview</title>
+<!-- A contact sheet of the rendered PNGs (not store material): every icon at 1x and magnified (pixelated) on a
+     light and a dark background, the promo tiles at full and half size on the store's light grey.
+     `python tools/make_graphics.py --preview OUT.png` renders it after the assets. -->
+<style>
+  body { margin: 0; font: 13px "Segoe UI", Arial, sans-serif; background: #ffffff; color: #222; }
+  .band { display: flex; align-items: flex-end; gap: 28px; padding: 18px 24px; }
+  .dark { background: #202124; color: #e8eaed; }
+  .grey { background: #f1f3f4; }
+  figure { margin: 0; text-align: center; }
+  figcaption { margin-top: 6px; font-size: 11px; opacity: 0.7; }
+  .px { image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<div class="band">
+  <figure><img src="../icons/icon16.png"><figcaption>16</figcaption></figure>
+  <figure><img src="../icons/icon32.png"><figcaption>32</figcaption></figure>
+  <figure><img src="../icons/icon48.png"><figcaption>48</figcaption></figure>
+  <figure><img src="../icons/icon128.png"><figcaption>128</figcaption></figure>
+  <figure><img class="px" src="../icons/icon16.png" width="128"><figcaption>16 x8</figcaption></figure>
+  <figure><img class="px" src="../icons/icon32.png" width="128"><figcaption>32 x4</figcaption></figure>
+  <figure><img class="px" src="../icons/icon48.png" width="144"><figcaption>48 x3</figcaption></figure>
+</div>
+<div class="band dark">
+  <figure><img src="../icons/icon16.png"><figcaption>16</figcaption></figure>
+  <figure><img src="../icons/icon32.png"><figcaption>32</figcaption></figure>
+  <figure><img src="../icons/icon48.png"><figcaption>48</figcaption></figure>
+  <figure><img src="../icons/icon128.png"><figcaption>128</figcaption></figure>
+  <figure><img class="px" src="../icons/icon16.png" width="128"><figcaption>16 x8</figcaption></figure>
+  <figure><img class="px" src="../icons/icon32.png" width="128"><figcaption>32 x4</figcaption></figure>
+  <figure><img class="px" src="../icons/icon48.png" width="144"><figcaption>48 x3</figcaption></figure>
+</div>
+<div class="band grey">
+  <figure><img src="../store-assets/promo/small-promo-440x280.png"><figcaption>small promo 440x280</figcaption></figure>
+  <figure><img src="../store-assets/promo/small-promo-440x280.png" width="220"><figcaption>half size</figcaption></figure>
+  <figure><img src="../store-assets/promo/marquee-1400x560.png" width="700"><figcaption>marquee at half size</figcaption></figure>
+</div>
+</body>
+</html>

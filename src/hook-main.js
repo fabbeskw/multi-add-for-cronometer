@@ -2,8 +2,11 @@
  *
  * Runs at document_start in the page's own JS world (manifest "world": "MAIN"), so it has NO chrome.*
  * APIs and must never throw into the page. It relays what the Cronometer app sends/receives to the
- * ISOLATED-world content script over a private MessageChannel port that the content script hands over
- * with its ping (window.postMessage with the port in the transfer list, targetOrigin = location.origin).
+ * ISOLATED-world content script over a MessageChannel port that the content script hands over with its
+ * ping (window.postMessage with the port in the transfer list, targetOrigin = location.origin). The port keeps
+ * the traffic off the window's message bus; it is not a secret: the most recent ping's port wins, so a script
+ * of the page itself could hand over its own port. That gains such a script nothing it cannot already read
+ * (the page can hook its own XMLHttpRequest), and the extension would then stop seeing traffic.
  *
  * Why a port and not window.postMessage for the traffic (review round 2): a `message` event dispatched on
  * `window` is delivered to every listener of every world and every script in that window, and the bundle
@@ -69,7 +72,7 @@
       if (!port) return false;
       try { msg.source = SOURCE; port.postMessage(msg); return true; } catch (e) { port = null; return false; }
     }
-    /** Relayed traffic: the private port when one was adopted, else (port-less pinger) the window. */
+    /** Relayed traffic: the adopted MessageChannel port when there is one, else (port-less pinger) the window. */
     function post(msg) {
       if (!postPort(msg)) postWindow(msg);
     }

@@ -15,6 +15,7 @@ bash tests/run.sh                     # every tests/*.html page in headless Chro
 python tools/build_zip.py             # store package -> PACKAGE OK (allow-list, manifest references, noncharacters)
 python tools/smoke_extension.py --self-test   # installs the tree into headless Chrome via DevTools Extensions.loadUnpacked
 python tools/screenshots.py --dry-run --headless   # the store-screenshot tool's self-check against the mock diary -> SCREENSHOTS PASS
+python tools/make_graphics.py --verify             # icons + store promo tiles: sizes, colour types, transparency (no Chrome) -> GRAPHICS OK
 ```
 
 `bash tests/run.sh page.html` runs one page. How the runner works, what each page covers and how to write a new
@@ -62,10 +63,15 @@ python tools/check_manifest.py && python tools/gen_tdee.py --check && bash tests
 writes `dist/multi-add-for-cronometer-<version>.zip` (reproducible: two builds of the same tree are
 byte-identical). `dist/` is gitignored; release zips are attached to a GitHub Release and uploaded to the Chrome
 Web Store, never committed. Bump `"version"` in `manifest.json` and add a changelog line to README.md first.
-The listing texts and the upload procedure are in [STORE-LISTING.md](STORE-LISTING.md). After a visible change to
-the panel, regenerate the store screenshots with `python tools/screenshots.py` (a Chrome window opens and waits for
-your login; the five PNGs and `manifest.json` under `store-assets/` are committed — see
+The listing texts are in [STORE-LISTING.md](STORE-LISTING.md) and the ordered submission steps in
+[SUBMISSION-CHECKLIST.md](SUBMISSION-CHECKLIST.md). After a visible change to the panel, the store screenshots are
+regenerated with `python tools/screenshots.py` — a live run the account owner does together with the maintainer:
+a Chrome window opens and waits for the owner's login, and the run writes four sample entries to an empty future day
+of the owner's diary and undoes them. Only `store-assets/README.md` and `store-assets/manifest.json` are committed;
+the screenshot PNGs are gitignored (`store-assets/*.png`) and reviewed by the owner before upload (see
 [store-assets/README.md](store-assets/README.md)); the headless dry run in the green bar only proves the tool works.
+The icons and the promo tiles in `store-assets/promo/` (committed: shapes and text only) are rendered from `graphics/`
+by `python tools/make_graphics.py`.
 
 ## Code rules
 
@@ -110,7 +116,9 @@ If a pull request changes what the extension stores, reads, sends or shows (a ne
 field in the diagnostics dump, a new request, a new permission — including a new TDEE read or a new field in a
 `cmaTdee*` record), it must update [PRIVACY.md](PRIVACY.md) — the data table, the effective date at the top — and
 the data-usage answers in [STORE-LISTING.md](STORE-LISTING.md), in the same PR. The store cross-checks the
-disclosures against the code, and users are told to check the policy when they update.
+disclosures against the code, and users are told to check the policy when they update. If the change makes the
+panel's first-run notice (`renderFirstRun` in `src/ui/panel.js`) inaccurate, update its text too and raise
+`NOTICE_VERSION` there, so every user sees the new notice once.
 
 ## Pull requests
 

@@ -1,0 +1,29 @@
+/* Shared styles of the two promo tiles (promo-small.html 440x280, marquee.html 1400x560), rendered by
+   tools/make_graphics.py into store-assets/promo/. Chrome Web Store promo guidance
+   (developer.chrome.com/docs/webstore/images): fill the whole region, saturated colours, not mostly white or
+   light grey (the store page around it is light grey), well-defined edges, little text, still readable at half
+   size, not just a screenshot, no status claims. The background is opaque: the PNG has no transparency. */
+:root {
+  --ink: #072b2e;
+  --ink-2: #0c4a4c;
+  --teal: #1fb89c;
+  --mint: #a6f0dc;
+  --white: #ffffff;
+  --muted: rgba(255, 255, 255, 0.66);
+  --font: "Segoe UI Variable Display", "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; }
+body {
+  font-family: var(--font);
+  color: var(--white);
+  background: radial-gradient(120% 140% at 0% 0%, #0f5c5a 0%, var(--ink-2) 38%, var(--ink) 100%);
+  -webkit-font-smoothing: antialiased;
+}
+.tile { position: relative; width: 100%; height: 100%; overflow: hidden; }
+.icon { display: block; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.35)); }
+.name { font-weight: 700; letter-spacing: -0.01em; line-height: 1.05; }
+.name .for { display: block; font-weight: 600; color: var(--mint); }
+.tagline { color: var(--white); font-weight: 600; }
+.tagline .dot { color: var(--teal); padding: 0 0.35em; }
+.disclaimer { color: var(--muted); font-weight: 400; letter-spacing: 0.01em; }

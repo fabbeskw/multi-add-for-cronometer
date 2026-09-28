@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Multi-Add for Cronometer",
-  "description": "Unofficial: add many foods to your Cronometer web diary in one go, plus an adaptive TDEE estimate. Not affiliated with Cronometer.",
-  "version": "0.3.0",
+  "description": "Unofficial, not affiliated: faster Cronometer web diary logging - add a whole list of foods at once and track your adaptive TDEE.",
+  "version": "0.3.1",
+  "homepage_url": "https://github.com/fabbeskw/multi-add-for-cronometer",
   "minimum_chrome_version": "111",
   "permissions": ["storage"],
   "host_permissions": ["https://cronometer.com/*"],
-  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
   "action": {
     "default_title": "Multi-Add for Cronometer (open cronometer.com/#diary and press Alt+Shift+M)",
     "default_popup": "popup.html"

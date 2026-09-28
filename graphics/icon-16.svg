@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- 16 px icon (icons/icon16.png: toolbar, favicon size): simplified to two rows and a "+" on the pixel grid
+       (2 px strokes, crisp edges) so it stays legible. Rendered by tools/make_graphics.py. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1fb89c"/>
+      <stop offset="1" stop-color="#0b8274"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="16" height="16" rx="4" fill="url(#tile)"/>
+  <g fill="#ffffff" shape-rendering="crispEdges">
+    <rect x="3" y="3" width="10" height="2"/>
+    <rect x="3" y="7" width="4" height="2"/>
+    <rect x="10" y="7" width="2" height="6"/>
+    <rect x="8" y="9" width="6" height="2"/>
+  </g>
+</svg>

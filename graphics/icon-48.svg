@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <!-- 48 px icon (icons/icon48.png: chrome://extensions): the 128 px art redrawn on the pixel grid (4 px strokes,
+       integer coordinates) with 2 px of transparent padding. Rendered by tools/make_graphics.py. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1fb89c"/>
+      <stop offset="1" stop-color="#0b8274"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="44" height="44" rx="10" fill="url(#tile)"/>
+  <g fill="#ffffff">
+    <rect x="10" y="12" width="17" height="4" rx="2"/>
+    <rect x="10" y="19" width="17" height="4" rx="2"/>
+    <rect x="10" y="26" width="12" height="4" rx="2"/>
+    <rect x="30" y="21" width="4" height="14" rx="2"/>
+    <rect x="25" y="26" width="14" height="4" rx="2"/>
+  </g>
+</svg>

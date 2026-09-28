@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Multi-Add for Cronometer: store / install icon (icons/icon128.png), rendered by tools/make_graphics.py.
+       Chrome Web Store image guidance (developer.chrome.com/docs/webstore/images): a 128x128 PNG whose artwork is
+       96x96, centred, with 16 px of transparent padding per side; works on light and dark backgrounds; no edge,
+       no large drop shadow. The tile is the square 16..112; everything outside it stays fully transparent.
+       Motif: a list (three rows, the last one short) plus a "+", i.e. "add many". Original art: no Cronometer
+       logo, wordmark or brand colour. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1fb89c"/>
+      <stop offset="1" stop-color="#0b8274"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="96" height="96" rx="22" fill="url(#tile)"/>
+  <g fill="#ffffff">
+    <rect x="28" y="35" width="42" height="10" rx="5"/>
+    <rect x="28" y="53" width="42" height="10" rx="5"/>
+    <rect x="28" y="71" width="30" height="10" rx="5"/>
+    <rect x="78" y="59" width="10" height="34" rx="5"/>
+    <rect x="66" y="71" width="34" height="10" rx="5"/>
+  </g>
+</svg>

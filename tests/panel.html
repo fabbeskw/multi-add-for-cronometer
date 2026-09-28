@@ -708,7 +708,7 @@
     // window.chrome exists in a plain page too (no .storage/.runtime): it is assignable but NOT deletable,
     // so tests restore the original object instead of `delete window.chrome`.
     const realChrome = window.chrome;
-    const store = {};
+    const store = { cmaNoticeAck: 1 };   // acknowledged: the first-run notice has its own describe below
     const shim = {
       storage: { local: {
         get(keys, cb) { const out = {}; (Array.isArray(keys) ? keys : [keys]).forEach(k => { if (k in store) out[k] = store[k]; }); cb(out); },
@@ -779,7 +779,18 @@
     it('invalid stored settings fall back to defaults', async () => {
       store.cmaSettings = { engine: 'bogus', delayMs: 'x', rememberInput: 'yes' };
       const s = await P.loadSettings();
-      deepEq(s, { engine: 'rpc', delayMs: 250, rememberInput: true });
+      deepEq(s, { engine: 'rpc', delayMs: 250, rememberInput: false });
+      window.chrome = realChrome;
+    });
+    it('rememberInput is opt-in: off by default, only an explicit true (as stored by 0.3.0) keeps it on', async () => {
+      window.chrome = shim;
+      delete store.cmaSettings;
+      eq((await P.loadSettings()).rememberInput, false, 'no stored settings: off');
+      eq(P.DEFAULT_SETTINGS.rememberInput, false);
+      store.cmaSettings = { engine: 'rpc', delayMs: 250, rememberInput: true };
+      eq((await P.loadSettings()).rememberInput, true, 'explicit true kept');
+      store.cmaSettings = { engine: 'rpc', delayMs: 250, rememberInput: 1 };
+      eq((await P.loadSettings()).rememberInput, false, 'anything but true: off');
       window.chrome = realChrome;
     });
     it('diagnostics includes the extension version from chrome.runtime when available', () => {
@@ -787,6 +798,129 @@
       eq(P.diagnosticsObject().extension.version, '0.2.0');
       window.chrome = realChrome;
       eq(P.diagnosticsObject().extension.version, 'unknown');
+    });
+  });
+
+  describe('first-run notice (fake chrome.storage.local; SPEC 8)', () => {
+    const realChrome = window.chrome;
+    let store = {};
+    const shim = {
+      storage: { local: {
+        get(keys, cb) { const out = {}; (Array.isArray(keys) ? keys : [keys]).forEach(k => { if (k in store) out[k] = store[k]; }); cb(out); },
+        set(obj, cb) { Object.assign(store, JSON.parse(JSON.stringify(obj))); cb && cb(); }
+      } },
+      runtime: { getManifest: () => ({ name: 'Multi-Add for Cronometer', version: '0.3.1' }) }
+    };
+    const pause = (ms) => new Promise(r => setTimeout(r, ms));
+    async function fresh(initial) {
+      store = Object.assign({}, initial || {});
+      window.chrome = shim;
+      P.setInput('');
+      await pause(450);                  // let setInput's debounced save pass before the store is inspected
+      store = Object.assign({}, initial || {});
+      await P.loadSettings();
+    }
+    it('a new install shows the notice instead of Input / Preview / Results; Settings, Diagnostics and other tabs stay reachable', async () => {
+      await fresh();
+      eq(P.noticeAcknowledged(), false);
+      P.open('input');
+      ok(q('.cma-firstrun'), 'notice shown');
+      ok(!q('textarea.cma-input'), 'no input box before Continue');
+      ok(/reads and keeps/.test(text(q('.cma-firstrun-h'))), 'heading');
+      ok(/never stored/.test(text(q('.cma-firstrun'))) && /24 hours/.test(text(q('.cma-firstrun'))) && /TDEE tab reads nothing/.test(text(q('.cma-firstrun'))), 'says what is read and kept');
+      const a = q('.cma-firstrun a');
+      eq(a.getAttribute('href'), 'https://github.com/fabbeskw/multi-add-for-cronometer/blob/HEAD/PRIVACY.md');
+      eq(a.getAttribute('rel'), 'noopener noreferrer');
+      ok(!q('#cma-n-remember').checked, 'the remember box is unticked (opt-in)');
+      ok(/already read that session and your account id/.test(text(q('.cma-firstrun'))), 'says the session and account id were read before the notice');
+      ok(q('.cma-footer .cma-consent-accept'), 'Continue button with its stable class');
+      P.open('preview'); ok(q('.cma-firstrun'), 'Preview gated');
+      P.open('results'); ok(q('.cma-firstrun'), 'Results gated');
+      P.open('settings'); ok(q('#cma-s-engine') && !q('.cma-firstrun'), 'Settings reachable');
+      P.open('diagnostics'); ok(!q('.cma-firstrun'), 'Diagnostics reachable');
+      eq(P.diagnosticsObject().panel.firstRunNotice, 'pending');
+      P.close();
+      window.chrome = realChrome;
+    });
+    it('nothing typed is remembered before Continue, even with rememberInput on', async () => {
+      await fresh();
+      P.setInput('banana');
+      await pause(500);
+      ok(!('cmaLastInput' in store), 'no cmaLastInput written');
+      ok(!('cmaNoticeAck' in store), 'no acknowledgement written');
+      P.setInput('');
+      window.chrome = realChrome;
+    });
+    it('Continue with the box ticked stores the acknowledgement, opens the Input view with what was typed and starts remembering it', async () => {
+      await fresh();
+      P.open('input');
+      P.setInput('2 eggs');
+      q('#cma-n-remember').checked = true;
+      q('.cma-footer .cma-consent-accept').click();
+      await waitFor(() => q('textarea.cma-input'), 'input view after Continue');
+      eq(store.cmaNoticeAck, P.NOTICE_VERSION);
+      eq(P.noticeAcknowledged(), true);
+      eq(q('textarea.cma-input').value, '2 eggs', 'typed text kept');
+      await waitFor(() => store.cmaLastInput && store.cmaLastInput.text === '2 eggs', 'input stored after Continue', 3000);
+      eq(P.diagnosticsObject().panel.firstRunNotice, 'acknowledged');
+      eq(store.cmaSettings && store.cmaSettings.rememberInput, true, 'the tick is saved');
+      // a reload keeps it acknowledged
+      await P.loadSettings();
+      P.open('input');
+      ok(!q('.cma-firstrun') && q('textarea.cma-input'), 'no notice after the reload');
+      P.setInput('');
+      P.close();
+      window.chrome = realChrome;
+    });
+    it('Continue with "Remember my last typed list" left unticked keeps the setting off and stores no list', async () => {
+      await fresh();
+      P.open('input');
+      q('.cma-footer .cma-consent-accept').click();
+      await waitFor(() => q('textarea.cma-input'), 'input view after Continue');
+      ok(!(store.cmaSettings && store.cmaSettings.rememberInput), 'setting stays off');
+      eq(P.getSettings().rememberInput, false);
+      P.setInput('salmon 150g');
+      await pause(500);
+      ok(!store.cmaLastInput, 'nothing remembered');
+      await P.saveSettings({ engine: 'rpc', delayMs: 250, rememberInput: true });
+      P.setInput('');
+      P.close();
+      window.chrome = realChrome;
+    });
+    it('a list remembered by 0.3.0 for this account is restored only after Continue with the box ticked', async () => {
+      await fresh({ cmaLastInput: { text: 'old list', userId: CMA.capture.state.userId } });
+      eq(P.getInput(), '', 'not restored while the notice is pending');
+      P.open('input');
+      q('#cma-n-remember').checked = true;
+      q('.cma-footer .cma-consent-accept').click();
+      await waitFor(() => q('textarea.cma-input'), 'input view after Continue');
+      eq(P.getInput(), 'old list', 'restored after Continue');
+      eq(q('textarea.cma-input').value, 'old list');
+      P.setInput('');
+      P.close();
+      window.chrome = realChrome;
+    });
+    it('a list remembered by 0.3.0 is deleted when Continue is pressed with the box unticked', async () => {
+      await fresh({ cmaLastInput: { text: 'old list', userId: CMA.capture.state.userId }, cmaSettings: { engine: 'rpc', delayMs: 250, rememberInput: true } });
+      P.open('input');
+      ok(!q('#cma-n-remember').checked, 'unticked even with an explicit true from 0.3.0');
+      q('.cma-footer .cma-consent-accept').click();
+      await waitFor(() => q('textarea.cma-input'), 'input view after Continue');
+      eq(P.getInput(), '', 'not restored');
+      eq(store.cmaLastInput, '', 'deleted from storage');
+      eq(store.cmaSettings.rememberInput, false, 'setting saved off');
+      P.close();
+      window.chrome = realChrome;
+    });
+    it('an older acknowledgement version shows the notice again; without chrome.storage there is no notice', async () => {
+      await fresh({ cmaNoticeAck: 0 });
+      eq(P.noticeAcknowledged(), false);
+      window.chrome = realChrome;
+      await P.loadSettings();
+      eq(P.noticeAcknowledged(), true, 'nothing can be stored, so nothing to acknowledge');
+      P.open('input');
+      ok(q('textarea.cma-input') && !q('.cma-firstrun'));
+      P.close();
     });
   });
 

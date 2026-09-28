@@ -6,7 +6,10 @@
 Checks
   * manifest.json parses and is manifest_version 3 with the keys the extension relies on;
   * every content_scripts js file, every icon and every web_accessible_resources entry exists;
-  * icons are real PNGs whose pixel size matches their key (16/48/128);
+  * icons are real PNGs whose pixel size matches their key: 16, 48 and 128 are required, 32 is optional, no other
+    size is accepted;
+  * homepage_url, when present, is an https://github.com/<owner>/<repo> URL (the public source, never cronometer.com);
+  * the description is 1..132 characters and starts with "Unofficial" (the store summary; SPEC 11);
   * host_permissions and every content_scripts match target https://cronometer.com/* only (SPEC 0);
   * the MAIN-world entry is exactly src/hook-main.js at document_start;
   * the ISOLATED-world list is exactly what tests/load-all.html loads, in the same order (so the test page
@@ -25,7 +28,11 @@ import sys
 
 ALLOWED_MATCH = 'https://cronometer.com/*'
 KNOWN_KEYS = {'manifest_version', 'name', 'description', 'version', 'minimum_chrome_version', 'permissions',
-              'host_permissions', 'icons', 'action', 'content_scripts', 'web_accessible_resources'}
+              'host_permissions', 'icons', 'action', 'content_scripts', 'web_accessible_resources', 'homepage_url'}
+REQUIRED_ICONS = ('16', '48', '128')
+OPTIONAL_ICONS = ('32',)
+DESCRIPTION_MAX = 132                         # the store summary is the manifest description
+HOMEPAGE_RE = re.compile(r'^https://github\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9._-]{1,100}$')
 NAMESPACE_GUARD = 'window.CMA = window.CMA || {};'
 # (earlier, later): when both scripts are listed, `earlier` must load first
 ORDER_RULES = (
@@ -80,6 +87,29 @@ def main(argv):
     if m.get('host_permissions') != [ALLOWED_MATCH]:
         fail('host_permissions should be exactly [%r], got %r' % (ALLOWED_MATCH, m.get('host_permissions')))
 
+    desc = m.get('description') or ''
+    if not 1 <= len(desc) <= DESCRIPTION_MAX:
+        fail('description must be 1..%d characters (the store summary), got %d' % (DESCRIPTION_MAX, len(desc)))
+    elif not desc.startswith('Unofficial'):
+        fail('description must start with "Unofficial" (the not-affiliated notice), got %r' % desc[:40])
+    else:
+        good('description is %d/%d characters and starts with "Unofficial"' % (len(desc), DESCRIPTION_MAX))
+    if 'homepage_url' in m:
+        hp = m.get('homepage_url')
+        if not isinstance(hp, str) or not HOMEPAGE_RE.match(hp):
+            fail('homepage_url must be https://github.com/<owner>/<repo>, got %r' % (hp,))
+        else:
+            good('homepage_url: %s' % hp)
+    icon_keys = set((m.get('icons') or {}).keys())
+    missing_icons = [k for k in REQUIRED_ICONS if k not in icon_keys]
+    extra_icons = sorted(icon_keys - set(REQUIRED_ICONS) - set(OPTIONAL_ICONS))
+    if missing_icons:
+        fail('icons must include %s (missing %s)' % ('/'.join(REQUIRED_ICONS), ', '.join(missing_icons)))
+    if extra_icons:
+        fail('unexpected icon sizes %s (allowed: %s)' % (', '.join(extra_icons), '/'.join(REQUIRED_ICONS + OPTIONAL_ICONS)))
+    if not missing_icons and not extra_icons:
+        good('icon sizes: %s' % '/'.join(sorted(icon_keys, key=int)))
+
     # ---- files referenced by the manifest -------------------------------------------------------------
     listed = []
     for i, cs in enumerate(m.get('content_scripts') or []):
@@ -92,6 +122,8 @@ def main(argv):
     for size, f in (m.get('icons') or {}).items():
         listed.append(f)
         p = os.path.join(root, f)
+        if not str(size).isdigit():
+            continue                                  # reported above as an unexpected icon size
         if os.path.isfile(p):
             dims = png_size(p)
             if dims is None:

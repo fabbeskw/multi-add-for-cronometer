@@ -16,7 +16,8 @@
  *   CMA.engineUi.run                          (engine 'ui'; gets opts.waitForRefresh from uiRefreshSignal(),
  *                                              which turns the hook's updateDiary responses into the
  *                                              per-row diary-refresh signal of SPEC §7 step 7)
- *   chrome.storage.local                      → settings (cmaSettings) + last input (cmaLastInput), guarded
+ *   chrome.storage.local                      → settings (cmaSettings) + last input (cmaLastInput) + the
+ *                                              first-run notice acknowledgement (cmaNoticeAck), guarded
  *   CMA.registryStore.status / rebuild        → decoder (registry) banner states in the Input view and the
  *   CMA.events 'registry' / 'registry-progress'  Diagnostics "Rebuild decoder" button (SPEC §3.5)
  *
@@ -49,7 +50,17 @@ window.CMA = window.CMA || {};
   const HOST_ID = 'cma-multi-add-host';
   const SETTINGS_KEY = 'cmaSettings';
   const INPUT_KEY = 'cmaLastInput';
-  const DEFAULT_SETTINGS = Object.freeze({ engine: 'rpc', delayMs: 250, rememberInput: true });
+  // First-run notice (SPEC §8): before the multi-add views are shown the first time, the panel says what the
+  // extension reads and keeps and waits for Continue; the acknowledgement is stored as {cmaNoticeAck: version}.
+  // Until then nothing typed is remembered (cmaLastInput), whatever rememberInput says. Raise NOTICE_VERSION
+  // when what the notice says changes materially, so every user sees the new text once.
+  const NOTICE_KEY = 'cmaNoticeAck';
+  const NOTICE_VERSION = 1;
+  const NOTICE_VIEWS = ['input', 'preview', 'results'];
+  const PRIVACY_URL = 'https://github.com/fabbeskw/multi-add-for-cronometer/blob/HEAD/PRIVACY.md';
+  // rememberInput is opt-in (off unless the user ticks it on the first-run notice or in Settings): a remembered list
+  // is a convenience, not needed for the extension's purpose. normSettings keeps an explicit true stored by 0.3.0.
+  const DEFAULT_SETTINGS = Object.freeze({ engine: 'rpc', delayMs: 250, rememberInput: false });
   // Built-in views. Other scripts add views through CMA.panel.registerView (see "View registry" below); the tab
   // order is by `order` (built-ins 10..50, a registered view defaults to 35 = just before Diagnostics).
   const BUILTIN_VIEWS = ['input', 'preview', 'results', 'diagnostics', 'settings'];
@@ -86,6 +97,7 @@ window.CMA = window.CMA || {};
     input: '',
     settings: Object.assign({}, DEFAULT_SETTINGS),
     settingsLoaded: false,
+    noticeAck: null,             // first-run notice: null = not loaded yet, true = acknowledged (or no chrome.storage), false = show it
     defaultGroupId: null,
     dateOverride: null,          // {day, month, year} | null (Input view date input)
     degraded: false,             // plan built for the UI engine without an RPC session (unverified rows)
@@ -302,9 +314,13 @@ window.CMA = window.CMA || {};
     o.engine = o.engine === 'ui' ? 'ui' : 'rpc';
     o.delayMs = Math.max(0, Math.min(60000, Number(o.delayMs) || 0));
     if (!(Number(s && s.delayMs) >= 0)) o.delayMs = DEFAULT_SETTINGS.delayMs;
-    o.rememberInput = o.rememberInput !== false;
+    o.rememberInput = o.rememberInput === true;
     return o;
   }
+  /** The last input is remembered only while the setting is on AND the first-run notice was acknowledged. */
+  function rememberActive() { return !!state.settings.rememberInput && state.noticeAck === true; }
+  /** The multi-add views show the first-run notice instead of their content until it is acknowledged. */
+  function needsNotice(view) { return state.noticeAck === false && NOTICE_VIEWS.indexOf(view) >= 0; }
   /**
    * The stored input is {text, userId}: it is a small piece of dietary data that survives logouts and cache
    * clears in chrome.storage.local, so — like the stored batch (canOfferStoredBatch) — it is restored only for
@@ -319,7 +335,7 @@ window.CMA = window.CMA || {};
   /** Restore the stored input when it belongs to the captured account (or neither side knows the account). */
   function applyStoredInput() {
     const s = state.storedInput;
-    if (!s || !state.settings.rememberInput) return false;
+    if (!s || !rememberActive()) return false;
     const uid = capState().userId;
     if (s.userId != null && uid != null && Number(uid) !== s.userId) {
       // another account is logged in on this profile: never show (or keep) the previous account's food list
@@ -336,9 +352,13 @@ window.CMA = window.CMA || {};
     return true;
   }
   async function loadSettings() {
-    const v = await storageGet([SETTINGS_KEY, INPUT_KEY]);
+    const hasStorage = !!storage();
+    const v = await storageGet([SETTINGS_KEY, INPUT_KEY, NOTICE_KEY]);
     state.settings = normSettings(v && v[SETTINGS_KEY]);
-    state.storedInput = state.settings.rememberInput && v ? parseStoredInput(v[INPUT_KEY]) : null;
+    // Without chrome.storage (plain test pages) nothing can be kept, so there is nothing to acknowledge; with it,
+    // an unreadable or missing record shows the notice (the safe side).
+    state.noticeAck = !hasStorage || (!!v && Number(v[NOTICE_KEY]) >= NOTICE_VERSION);
+    state.storedInput = rememberActive() && v ? parseStoredInput(v[INPUT_KEY]) : null;
     applyStoredInput();
     state.settingsLoaded = true;
     return Object.assign({}, state.settings);
@@ -354,9 +374,34 @@ window.CMA = window.CMA || {};
     inputSaveTimer = setTimeout(() => { inputSaveTimer = null; saveInput(); }, 400);
   }
   async function saveInput() {
-    if (!state.settings.rememberInput) return false;
+    if (!rememberActive()) return false;
     const uid = capState().userId;
     return storageSet({ [INPUT_KEY]: state.input ? { text: state.input, userId: uid != null ? Number(uid) : null } : '' });
+  }
+  /**
+   * Continue on the first-run notice: store the acknowledgement (and the "remember my last typed list" choice made
+   * there, unticked by default; left unticked, a list an earlier version remembered is deleted), restore such a
+   * list for this account when the box was ticked, keep what was typed meanwhile, and
+   * show the view that was asked for. Resolves to whether the acknowledgement could be stored.
+   */
+  async function acknowledgeNotice(opts) {
+    const o = opts || {};
+    state.noticeAck = true;
+    const ok = await storageSet({ [NOTICE_KEY]: NOTICE_VERSION });
+    if (typeof o.rememberInput === 'boolean' && o.rememberInput !== state.settings.rememberInput) await saveSettings({ rememberInput: o.rememberInput });
+    // Left unticked: a list an earlier version remembered (0.3.0 remembered by default) is deleted, not kept.
+    if (!state.settings.rememberInput) { state.storedInput = null; await storageSet({ [INPUT_KEY]: '' }); }
+    if (rememberActive()) {
+      if (!state.storedInput) { const v = await storageGet([INPUT_KEY]); state.storedInput = v ? parseStoredInput(v[INPUT_KEY]) : null; }
+      applyStoredInput();
+      if (state.input) saveInputSoon();
+    }
+    log('first-run notice acknowledged' + (ok ? '' : ' (kept for this page only: chrome.storage unavailable)'));
+    if (state.mounted) {
+      renderView();
+      if (state.open && state.view === 'input' && els.textarea) { try { els.textarea.focus(); } catch (e) { /* ignore */ } }
+    }
+    return ok;
   }
 
   // ---------------------------------------------------------------------------
@@ -397,7 +442,7 @@ window.CMA = window.CMA || {};
     subscribeRegistry();
     watchToolbar();
     loadSettings().then(() => {
-      if (state.view === 'input') renderView();
+      if (state.view === 'input' || needsNotice(state.view)) renderView();
       return loadStoredBatch();
     }).catch(e => log('settings load failed: ' + errText(e)));
     log('panel mounted');
@@ -656,6 +701,7 @@ window.CMA = window.CMA || {};
     if (prev) callView(prev, 'onEvent', 'hidden', null);   // its DOM was just cleared: stop its live updates
     const cv = customViews.get(state.view);
     if (cv) { renderCustomView(cv); return; }
+    if (needsNotice(state.view)) { renderFirstRun(); return; }
     switch (state.view) {
       case 'input': renderInput(); break;
       case 'preview': renderPreview(); break;
@@ -787,6 +833,27 @@ window.CMA = window.CMA || {};
       catch (e) { out[v.id] = { error: errText(e) }; }
     }
     return out;
+  }
+
+  // ---------------------------------------------------------------------------
+  // First-run notice (shown in place of Input / Preview / Results until Continue; see NOTICE_KEY)
+  // ---------------------------------------------------------------------------
+  function renderFirstRun() {
+    // Always rendered unticked: remembering the typed list needs its own affirmative tick (opt-in).
+    const remember = el('input', { id: 'cma-n-remember', type: 'checkbox', checked: false });
+    els.body.appendChild(el('div', { class: 'cma-firstrun', role: 'region', 'aria-label': 'Before you start' },
+      el('div', { class: 'cma-firstrun-h' }, 'Before you start: what Multi-add reads and keeps'),
+      el('ul', null,
+        el('li', null, 'It works only in this Cronometer tab and contacts no other website. There is no account with the developer, no analytics, and nothing is sent to the developer or anyone else.'),
+        el('li', null, 'To find and add foods it uses the session of this tab. It has already read that session and your account id from the start-up requests of this page (that is how it works without asking for your password); both are held in memory only, never stored, and are gone when the tab is closed or reloaded. It sends the same requests the diary sends when you add a food yourself: food search, add entry, and remove entry for Undo.'),
+        el('li', null, 'Kept in this browser only (chrome.storage.local): your settings; the ids of the last batch of entries with your account id, so it can be undone for 24 hours; a decoder table without personal data; and, only if you tick the box below, your last typed list with your account id.'),
+        el('li', null, 'The TDEE tab reads nothing until you press Enable there.')),
+      el('label', { class: 'cma-firstrun-opt', for: 'cma-n-remember' }, remember, ' Remember my last typed list in this browser (optional, off unless ticked; can be changed in Settings)'),
+      el('div', { class: 'cma-muted cma-small' }, 'Full details: ',
+        el('a', { href: PRIVACY_URL, target: '_blank', rel: 'noopener noreferrer' }, 'privacy policy'),
+        '. Unofficial; not affiliated with Cronometer.')));
+    els.footer.appendChild(btn('Continue', () => acknowledgeNotice({ rememberInput: !!remember.checked }),
+      { primary: true, class: 'cma-consent-accept', title: 'I have read this: open the Input view' }));
   }
 
   // ---------------------------------------------------------------------------
@@ -1644,7 +1711,7 @@ window.CMA = window.CMA || {};
       capture: cap,
       captureLog: capLog,
       registry: reg,
-      panel: { view: state.view, settings: Object.assign({}, state.settings), defaultGroupId: state.defaultGroupId, dateOverride: state.dateOverride, plan, result, lastBatch: (CMA.engineRpc && CMA.engineRpc.lastBatch) || state.storedBatch || null, lastRefresh: (CMA.engineRpc && CMA.engineRpc.lastRefresh) || null },
+      panel: { view: state.view, settings: Object.assign({}, state.settings), firstRunNotice: state.noticeAck === true ? 'acknowledged' : state.noticeAck === false ? 'pending' : 'not loaded', defaultGroupId: state.defaultGroupId, dateOverride: state.dateOverride, plan, result, lastBatch: (CMA.engineRpc && CMA.engineRpc.lastBatch) || state.storedBatch || null, lastRefresh: (CMA.engineRpc && CMA.engineRpc.lastRefresh) || null },
       // registered views (registerView): each one's own diagnostics(), which must hold no health data
       views: viewDiagnostics(),
       panelLog: state.log.slice(-LOG_TAIL)
@@ -1795,6 +1862,7 @@ window.CMA = window.CMA || {};
     findFoods, addAll, undo, uiRefreshSignal, rebuildRegistry,
     diagnosticsText, diagnosticsObject,
     loadSettings, saveSettings, getSettings: () => Object.assign({}, state.settings),
+    acknowledgeNotice, noticeAcknowledged: () => state.noticeAck,
     setInput: (text) => { state.input = String(text == null ? '' : text); if (els.textarea) els.textarea.value = state.input; updateFindButton(); saveInputSoon(); },
     getInput: () => state.input,
     ensureToolbarButton,
@@ -1803,7 +1871,7 @@ window.CMA = window.CMA || {};
     get host() { return host; },
     get root() { return root; },
     get VIEWS() { return viewIds(); },
-    DEFAULT_SETTINGS, SETTINGS_KEY, INPUT_KEY, HOST_ID
+    DEFAULT_SETTINGS, SETTINGS_KEY, INPUT_KEY, NOTICE_KEY, NOTICE_VERSION, HOST_ID
   };
   // view definitions queued by a script that loaded before panel.js (registerView's fallback, see above)
   if (Array.isArray(CMA.panelViewQueue)) {

@@ -35,8 +35,9 @@ tab you are already logged into.
 
 Three ways in; all of them end with the same *reload the Cronometer tab once* step.
 
-**From the Chrome Web Store** — *coming soon.* Once the listing is approved the store page will be
-`<Chrome Web Store URL>` (see *Publishing*): open it, click **Add to Chrome**, then continue at step 5 below.
+**Install from the Chrome Web Store** — *coming soon* (0.3.1 is prepared for submission). Once the listing is
+approved the store page will be `<Chrome Web Store URL>` (see *Publishing*): open it, click **Add to Chrome**, then
+continue at step 5 below.
 
 **From a release zip** (no git, no Python; only Chrome's *Developer mode*):
 
@@ -62,10 +63,15 @@ No sign-in, no API key: it uses the session of the tab you are in.
 
 ## Screenshots
 
-The store screenshots (1280 × 800: input, preview, results, the diary afterwards, diagnostics) live in
-[store-assets/](store-assets/) and double as a visual tour. They are rendered by `python tools/screenshots.py`
-(`python tools/screenshots.py --help` lists the modes and the output names), so they can be regenerated after any
-change to the panel instead of being retaken by hand.
+The five store screenshots (1280 × 800: the input list, the preview, the diary after *Add all*, the TDEE overview
+and the TDEE weekly check-in) live in [store-assets/](store-assets/) and double as a visual tour. They are rendered
+by `python tools/screenshots.py` (`python tools/screenshots.py --help` lists the modes and the output names), so they
+can be regenerated after any change to the panel instead of being retaken by hand. They are privacy-safe: personal
+UI is blurred, the multi-add shots are taken on an empty future day of the diary that holds only the four sample
+entries the tool adds (and removes again afterwards), and the two TDEE shots use synthetic demo history, never a
+real person's intake or weight. The PNGs are not committed (a live run shows the owner's diary page); until the
+owner's live run of the current version, `store-assets/` holds no uploadable set. The store promo tiles are in
+[store-assets/promo/](store-assets/promo/).
 
 ## Usage
 
@@ -74,6 +80,9 @@ Alt+Shift also switches the input language), click the **Multi-add** button in t
 **MULTI** button that appears next to **FOOD** in the diary toolbar. (The extension's toolbar icon only shows these
 instructions; the panel appears on pages where the Cronometer app runs, not on the logged-out landing page or the blog.
 Ctrl+Alt+M is ignored while you are typing in a text field, because Windows reports AltGr as Ctrl+Alt.)
+
+The first time, the panel shows a short notice of what the extension reads and keeps (with the choice *Remember my
+last typed list*) in place of the Input view; press **Continue** to start. It is shown once per browser profile.
 
 1. **Input** – paste or type one food per line (format below). Pick the default group, check the diary date (taken
    from the diary you are viewing; you can override it) and press **Find foods**.
@@ -95,8 +104,9 @@ Ctrl+Alt+M is ignored while you are typing in a text field, because Windows repo
    diary did not refresh by itself — the summary says when the extension could not confirm the refresh) or **Done**.
 
 Settings (engine, delay between adds, remember last input) are in the **Settings** tab and are stored in your
-browser profile only. *Remember last input* is **on by default**: the list you typed is kept (with your account id)
-so it is back when you reopen the panel; switch it off there to stop, which also clears the stored copy.
+browser profile only. *Remember last input* is **off unless you tick it** (the first-run notice shows it as an
+unticked box, *Remember my last typed list*): when it is on, the list you typed is kept (with your account id) so it
+is back when you reopen the panel; switch it off to stop, which also clears the stored copy.
 
 ### Input format cheat-sheet
 
@@ -291,7 +301,7 @@ start the rebuild by hand and shows its outcome; the dump carries the same infor
   Cronometer's burned figures, how many days one request may cover, whether accounts without Gold get the full
   range); use *Check the numbers* and report differences. The history read is limited to five years. The target is
   display only (nothing is written to Cronometer), the activity-aware daily target is experimental, and the CSV
-  import accepts `YYYY-MM-DD` dates only. The store screenshots do not show the TDEE tab yet.
+  import accepts `YYYY-MM-DD` dates only.
 * Adaptive TDEE keeps one account's copy at a time: if a second Cronometer account enables the tab in the same
   browser profile, its data replaces the first account's (it is never shown to the other account).
 
@@ -301,11 +311,14 @@ start the rebuild by hand and shows its outcome; the dump carries the same infor
   other server. There is no analytics and no telemetry.
 * The session token is kept in memory in the tab and is redacted from every log line and from the diagnostics dump.
   It is never written to `chrome.storage`.
-* `chrome.storage.local` holds only your settings, the last input text (remembered by default — switch *remember
-  last input* off in Settings to stop and clear it; stored together with your user id and restored only for that
+* `chrome.storage.local` holds only your settings, the last input text (only if you ticked *Remember my last typed
+  list* — switch *remember last input* off in Settings to stop and clear it; stored together with your user id and
+  restored only for that
   account, so another account on the same browser profile never sees your list) and the ids of the last batch (for
   undo, together with the date, a timestamp and your user id so the button is shown to the right account only).
-  Both can be deleted on demand: *Forget saved input* and *Forget last batch* in the Settings tab.
+  Both can be deleted on demand: *Forget saved input* and *Forget last batch* in the Settings tab. Nothing typed is
+  stored before you press **Continue** on the first-run notice, whose acknowledgement is kept as `cmaNoticeAck` (a
+  version number, nothing personal).
 * **Adaptive TDEE (only after you press *Enable* in the TDEE tab).** The extension then reads your intake, burned
   and weight history from `cronometer.com` (read-only requests the app itself makes) and keeps a copy in
   `chrome.storage.local`, each record stamped with your user id and shown only to that account: `cmaTdeeDays` (per
@@ -324,13 +337,17 @@ start the rebuild by hand and shows its outcome; the dump carries the same infor
   reload. Rebuilding it downloads Cronometer's own script files from `cronometer.com` inside your tab, exactly as
   the page itself does; they are analysed as text, never executed.
 * `document.cookie` is never read.
-* The full policy is in [PRIVACY.md](PRIVACY.md); the store listing links to the copy in this repository
-  (`tools/set_repo_url.py` fills that link, see *Publishing*).
-* The page-level relay between the two extension worlds travels over a private `MessageChannel` port that the
-  extension's content script hands to its page-level hook; only the handshake ("ping"/"pong", which carries no
-  data) is ever visible to other scripts on the cronometer.com page (including Cronometer's own third-party SDKs),
-  and nothing is relayed before that handshake. The relay carries only same-origin request metadata and the
-  response bodies the extension decodes. Traffic to other hosts is never relayed or inspected.
+* The full policy is in [PRIVACY.md](PRIVACY.md): it lists every `chrome.storage.local` key and every kind of
+  request, and states that the use of the data adheres to the Chrome Web Store User Data Policy, including the
+  Limited Use requirements. The store listing links to the copy in this repository (`tools/set_repo_url.py` fills
+  that link, see *Publishing*).
+* The page-level relay between the two extension worlds travels over a `MessageChannel` port that the
+  extension's content script hands to its page-level hook, not over the window's message bus: only the handshake
+  ("ping"/"pong", which carries no data) is visible to other scripts listening on the cronometer.com page
+  (including Cronometer's own third-party SDKs), and nothing is relayed before that handshake. The port is not a
+  secret (the latest ping's port wins, so a script of the page could hand over its own and would gain nothing it
+  cannot already read by hooking the page's requests itself). The relay carries only same-origin request metadata
+  and the response bodies the extension decodes. Traffic to other hosts is never relayed or inspected.
 * The panel lives in a *closed* shadow root: page scripts cannot read what you typed, the search hits or the
   diagnostics dump through the DOM.
 
@@ -369,8 +386,9 @@ python tools/check_manifest.py                    # manifest.json sanity (files,
 bash tests/run.sh                                 # all test pages must print ALL TESTS PASSED
 ```
 
-Then reload the extension on `chrome://extensions` (or bump the version and publish, see below). `tools/make_icons.py`
-regenerates the icons.
+Then reload the extension on `chrome://extensions` (or bump the version and publish, see below).
+`python tools/make_graphics.py` re-renders the icons and the store promo tiles from their SVG/HTML sources in
+`graphics/` (headless Chrome; `--verify` checks the committed PNGs without Chrome).
 
 Tests run in headless Chrome without node: `bash tests/run.sh [page.html]` — see `tests/README-tests.md` for the
 list of pages, the runner flags and how to add a page.
@@ -393,13 +411,13 @@ any problem. The zip is written under a temporary name and renamed to the releas
 passed (a stale release zip is removed first), so a failed build never leaves a package that looks like a good one.
 Run `python tools/check_manifest.py`, `python tools/gen_tdee.py --check` and `bash tests/run.sh` first; the version
 in the file name is the manifest's.
-The zip snapshots the tree, so rebuild it after any change to `src/` or `manifest.json` (the 0.3.0 package holds 25
-files: manifest, popup, license, 3 icons and the 19 scripts; `vendor/` — the pristine upstream TDEE engine — and any
+The zip snapshots the tree, so rebuild it after any change to `src/` or `manifest.json` (the 0.3.1 package holds 26
+files: manifest, popup, license, 4 icons (16, 32, 48, 128) and the 19 scripts; `vendor/` — the pristine upstream TDEE engine — and any
 `.mjs` file are never packaged, only the generated `src/tdee/adaptive-tdee.js` is). `dist/` is a build output and is
 gitignored: the zip of a tagged version is attached to a GitHub Release (<https://github.com/fabbeskw/multi-add-for-cronometer/releases>), which is where the *From a release
 zip* install path points.
 
-To check that the package really installs, run `python tools/smoke_extension.py dist/multi-add-for-cronometer-0.3.0.zip`
+To check that the package really installs, run `python tools/smoke_extension.py dist/multi-add-for-cronometer-0.3.1.zip`
 (without an argument it checks the working tree). It starts a headless Chrome on a throw-away profile, installs the
 extension through the DevTools command `Extensions.loadUnpacked` — the same checks as *Load unpacked* — and opens
 the extension's own popup page, expecting its title. Google Chrome 137 and later ignore the `--load-extension`
@@ -409,16 +427,24 @@ DevTools-pipe client both tools use lives in `tools/cdp.py`.
 
 ## Publishing
 
-See [STORE-LISTING.md](STORE-LISTING.md): it holds every text block for the Developer Dashboard (summary, detailed
-description, single-purpose statement, permission justifications, data-usage answers, trademark disclaimer), the
-screenshot checklist, the step-by-step upload procedure (developer account, Unlisted soft launch, review times,
-updates) and the risks to keep in mind. The privacy policy to host is [PRIVACY.md](PRIVACY.md); the listing, the policy and
+[SUBMISSION-CHECKLIST.md](SUBMISSION-CHECKLIST.md) is the ordered path to *Submit for review*: which file or text
+goes into which Developer Dashboard field, and which steps only the account owner can do (register and pay the fee,
+2-Step Verification, verify the contact e-mail, the trader / non-trader declaration, pressing Submit), plus what to
+do on a rejection. [STORE-LISTING.md](STORE-LISTING.md) holds every text block it refers to (summary, detailed
+description, single-purpose statement, permission justifications, remote-code answer, data-usage answers, test
+instructions and reviewer notes, trademark sentence), the graphic assets (icon, the required 440 × 280 small promo
+tile and the optional marquee in `store-assets/promo/`, the five screenshots), the distribution settings (Unlisted
+first) and the review risks with their mitigations. The privacy policy to host is [PRIVACY.md](PRIVACY.md); the listing, the policy and
 this README refer to the repository through angle-bracket URL placeholders (repository, releases, issues, hosted
 policy) that `python tools/set_repo_url.py https://github.com/<owner>/multi-add-for-cronometer` fills in one go
 (idempotent, prints every replacement, `--check` fails while any placeholder is left). The five store screenshots
-are not taken by hand: `python tools/screenshots.py` renders them from the real extension over your diary (see
+are not taken by hand: `python tools/screenshots.py` renders them from the real extension (shots 1-3 on an empty
+future day of the owner's diary with four sample entries that are undone afterwards, the TDEE shots over synthetic
+demo data; see
 *Screenshots* above and [store-assets/README.md](store-assets/README.md) for what each shot shows, what is blurred
-and how to regenerate them); its `--dry-run --headless` self-check is part of the test green bar.
+and how to regenerate them); its `--dry-run --headless` self-check is part of the test green bar, and
+`python tools/screenshots.py --check-store` says whether `store-assets/` holds an uploadable set (exactly the five
+live shots of a completed run; the dry-run pictures of the mock page are never uploaded).
 
 ## Terms of service
 
@@ -443,6 +469,29 @@ MIT — see [LICENSE](LICENSE). Unofficial; not affiliated with Cronometer Softw
 
 ## Changelog
 
+* **0.3.1** (2026-09-28) — Chrome Web Store submission build. **First-run notice**: before the multi-add views are
+  shown the first time, the panel says what the extension reads and keeps (including that the tab's session and
+  account id were already read from the page's start-up requests and are held in memory only, the *Remember my last
+  typed list* choice and a link to the privacy policy) and waits for **Continue**; nothing typed is stored before
+  that (new key `cmaNoticeAck`, a version number). Remembering the typed list is now **opt-in** (off unless ticked;
+  0.3.0 remembered it by default, and a list 0.3.0 kept is deleted when the notice is continued without the tick).
+  Nothing new is read or sent. The store summary now names one subject (faster diary logging) with its two
+  functions. The TDEE consent text no longer names a
+  third-party app, and `src/lib/gwt-registry.js` carries a reviewer note in its generated header. Store graphics: a new icon set (the 128 px store icon now has 96 × 96 artwork with 16 px of transparent
+  padding, as the store's image guidance asks; a 32 px icon joins 16/48/128) and the required 440 × 280 small promo
+  tile plus the optional 1400 × 560 marquee in `store-assets/promo/`, all rendered from `graphics/` by
+  `tools/make_graphics.py`. Privacy-safe screenshots: the set is now input, preview, diary, TDEE overview and TDEE
+  check-in, and the TDEE shots use synthetic demo history; `tools/screenshots.py` also blurs the Water card and the
+  Daily Target Editor's profile name, refuses a capture when a shown entry row is not one it added, arms its undo
+  before Add all and never undoes an older stored batch, refuses to start next to old pictures, writes UTC times, and
+  `--check-store` confirms `store-assets/` holds exactly the five live shots. Homepage link: `homepage_url` in the manifest points
+  `chrome://extensions` at the public source. The listing texts were checked against the store's published rules
+  (single purpose framed as one subject, permission justifications under 1,000 characters, remote-code answer,
+  data-usage answers, test instructions and reviewer notes, brand word at most five times in the description,
+  corrected review-time and visibility facts); `PRIVACY.md` lists every storage key and request type and states the
+  Limited Use commitment; new `SUBMISSION-CHECKLIST.md`. `tools/check_manifest.py` accepts `homepage_url` (a GitHub
+  repository URL) and an optional 32 px icon, and requires a description of at most 132 characters that starts with
+  "Unofficial".
 * **0.3.0** (2026-09-28) — **Adaptive TDEE** tab (optional, off until you press *Enable*): an expenditure estimate
   learned from your logged intake and weight trend, a comparison with Cronometer's burned figure, charts, a History
   list with per-day exclusions and a partial-day check, a weekly check-in with a display-only calorie and macro

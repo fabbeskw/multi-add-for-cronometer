@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Marquee promo tile 1400x560</title>
+<!-- Chrome Web Store marquee promo tile (optional; only used if the item is featured in the marquee carousel,
+     developer.chrome.com/docs/webstore/images). Rendered by tools/make_graphics.py into
+     store-assets/promo/marquee-1400x560.png at exactly 1400x560, device scale factor 1, opaque.
+     The illustration on the right is abstract (shapes only), not a screenshot and not Cronometer's UI. -->
+<link rel="stylesheet" href="promo.css">
+<style>
+  .left { position: absolute; left: 96px; top: 0; bottom: 0; width: 640px; display: flex; flex-direction: column; justify-content: center; }
+  .brand { display: flex; align-items: center; }
+  .icon { width: 208px; height: 208px; margin-left: -26px; margin-right: 10px; }
+  .name { font-size: 72px; }
+  .name .for { font-size: 42px; margin-top: 8px; }
+  .tagline { font-size: 30px; margin-top: 34px; }
+  .disclaimer { position: absolute; left: 96px; bottom: 40px; font-size: 18px; }
+
+  .card { position: absolute; background: #f7fbfa; border-radius: 22px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35); overflow: hidden; }
+  .list { left: 820px; top: 70px; width: 470px; height: 390px; }
+  .list .head { height: 58px; background: var(--teal); display: flex; align-items: center; padding: 0 24px; }
+  .list .head i { display: block; height: 12px; border-radius: 6px; background: rgba(255, 255, 255, 0.9); width: 150px; }
+  .row { display: flex; align-items: center; height: 54px; padding: 0 24px; border-bottom: 2px solid #e3eeeb; }
+  .row:last-of-type { border-bottom: 0; }
+  .tick { width: 26px; height: 26px; border-radius: 50%; background: var(--teal); position: relative; flex: 0 0 auto; }
+  .tick::after { content: ""; position: absolute; left: 8px; top: 5px; width: 7px; height: 12px; border: solid #fff; border-width: 0 3.5px 3.5px 0; transform: rotate(45deg); }
+  .food { height: 12px; border-radius: 6px; background: #b9cfca; margin-left: 18px; }
+  .qty { height: 12px; border-radius: 6px; background: #d6e4e1; margin-left: auto; width: 64px; }
+  .btn { position: absolute; right: 24px; bottom: 20px; width: 150px; height: 40px; border-radius: 10px; background: #0b8274; display: flex; align-items: center; justify-content: center; }
+  .btn i { display: block; width: 18px; height: 18px; position: relative; }
+  .btn i::before, .btn i::after { content: ""; position: absolute; background: #fff; border-radius: 2px; }
+  .btn i::before { left: 7px; top: 0; width: 4px; height: 18px; }
+  .btn i::after { left: 0; top: 7px; width: 18px; height: 4px; }
+
+  .chart { left: 700px; top: 330px; width: 300px; height: 170px; padding: 20px 22px; }
+  .chart svg { display: block; }
+</style>
+</head>
+<body>
+<div class="tile">
+  <div class="left">
+    <div class="brand">
+      <img class="icon" src="icon-128.svg" alt="">
+      <div class="name" data-fit="name">Multi-Add<span class="for">for Cronometer</span></div>
+    </div>
+    <div class="tagline" data-fit="tagline">Faster diary logging<b class="dot">&middot;</b>adaptive TDEE</div>
+  </div>
+  <div class="disclaimer" data-fit="disclaimer">Unofficial &mdash; not affiliated with Cronometer</div>
+
+  <div class="card list">
+    <div class="head"><i></i></div>
+    <div class="row"><span class="tick"></span><span class="food" style="width:190px"></span><span class="qty"></span></div>
+    <div class="row"><span class="tick"></span><span class="food" style="width:140px"></span><span class="qty" style="width:52px"></span></div>
+    <div class="row"><span class="tick"></span><span class="food" style="width:210px"></span><span class="qty"></span></div>
+    <div class="row"><span class="tick"></span><span class="food" style="width:120px"></span><span class="qty" style="width:44px"></span></div>
+    <div class="btn"><i></i></div>
+  </div>
+
+  <div class="card chart">
+    <svg width="256" height="130" viewBox="0 0 256 130">
+      <g stroke="#e3eeeb" stroke-width="2">
+        <line x1="0" y1="20" x2="256" y2="20"/><line x1="0" y1="65" x2="256" y2="65"/><line x1="0" y1="110" x2="256" y2="110"/>
+      </g>
+      <g fill="#b9cfca">
+        <circle cx="8" cy="92" r="4"/><circle cx="36" cy="70" r="4"/><circle cx="64" cy="84" r="4"/><circle cx="92" cy="58" r="4"/>
+        <circle cx="120" cy="66" r="4"/><circle cx="148" cy="44" r="4"/><circle cx="176" cy="56" r="4"/><circle cx="204" cy="38" r="4"/>
+        <circle cx="232" cy="46" r="4"/>
+      </g>
+      <path d="M8 86 C 60 76, 110 62, 150 54 S 220 42, 248 40" fill="none" stroke="#0b8274" stroke-width="5" stroke-linecap="round"/>
+    </svg>
+  </div>
+</div>
+</body>
+</html>

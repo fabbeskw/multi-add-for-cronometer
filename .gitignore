@@ -18,8 +18,21 @@ tools/_*.py
 # PNGs themselves are NOT: a live `python tools/screenshots.py` run captures a real account's diary. They are
 # uploaded to the store after the account owner has reviewed them (force-add a reviewed set if you want it in git).
 # The dry-run/ subfolder is the tool's self-check output against the mock diary, rewritten on every green-bar run.
+# The promo tiles in store-assets/promo/ ARE committed (shapes and text only, no account data): the pattern above
+# matches only the top folder; the negation keeps them tracked even if it is ever widened.
+# Any picture below store-assets/ (also a live --out subfolder) except the promo tiles; the negation must stay last.
 store-assets/*.png
+store-assets/**/*.png
+store-assets/**/*.jpg
+store-assets/**/*.jpeg
 store-assets/dry-run/
+!store-assets/promo/*.png
+
+# A Chrome profile for tools/screenshots.py --profile holds a logged-in Cronometer session (the tool refuses a
+# profile inside the repository; these catch the usual names anyway).
+/chrome-profile*/
+/.profile*/
+/profile*/
 
 # editor / OS droppings
 *.bak

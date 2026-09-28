@@ -1,5 +1,15 @@
 /* GENERATED FILE - do not edit. Produced by tools/gen_registry.py (SPEC section 3.2)
  * from all.js (permutation 0A1C16E148676A90CBB128E4829A562F, mtime 2026-09-27T19:28:28Z).
+ * For reviewers: this file is DATA, not logic - a lookup table of the Cronometer web client's serialised types
+ * that the packaged decoder (src/lib/gwt-stream.js) reads. The 32-digit hex strings are Cronometer's public build
+ * (permutation) and serialisation-policy hashes; short names such as "U0n" are function names of the compiled web
+ * client that the decoder recognises. Nothing in it runs besides this one assignment. The generator is public:
+ * tools/gen_registry.py in https://github.com/fabbeskw/multi-add-for-cronometer
+ * "serviceMethods" and "policies" list every RPC method and service name found in the web client, for recognition
+ * only (a rebuilt table is checked to still contain the methods the extension uses). The extension itself calls
+ * only the REST food search, getFood, getDayInfo, updateDiary, removeServing and, after the TDEE tab is enabled,
+ * getCaloriesConsumedAndBurned, getBiometrics, getCalendarInfo, getFirstDayWithData and getPreference
+ * (PRIVACY.md section 5); names such as "adServed" or "admin" in these lists are never called.
  * Entry kinds: class {f:[wire-order field kinds]} | enum | box {t} | list | singleton | empty {t} |
  * arrays | map {pre?} | set {pre?} | date {f?} | array {e} | unknown {why}.
  * Field kinds: i int, z bool, s string, o object, d double, l long, b byte, h short, f float, c char.
