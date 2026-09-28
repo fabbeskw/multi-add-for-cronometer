@@ -5,40 +5,34 @@
  * ends, write RPCs), tdee-weight-history.md, tdee-intake-burned.md; vendor/adaptive-tdee/ADAPTIVE_TDEE_SPEC.md 2, 5.
  *
  * CMA.tdeeData = {
- *   init() -> Promise<status>     loads the CURRENT account's records (capture userId) from its own keys; another
- *                                 account's are never read into memory, written or removed
- *   status(), diagnostics()       diagnostics = counts and date ranges only (never a weight or an intake);
- *                                 otherAccountsStored = how many OTHER accounts have TDEE data here (a count, no ids)
+ *   init() -> Promise<status>     loads the CURRENT account's records (capture userId) from its own keys
+ *   status(), diagnostics()       counts and date ranges only (never a weight or an intake), otherAccountsStored
  *   enable() -> Promise<status>   consent: nothing is fetched before it; runs the first full sync (backfill)
- *   disable({forget}) -> Promise  stops syncing; forget:true removes this account's cmaTdee*:<userId> keys (and its
- *                                 legacy un-suffixed ones, if still there) - never another account's
+ *   disable({forget}) -> Promise  stops syncing; forget:true removes THIS account's keys (never another's)
  *   sync({full, force}) -> Promise<status>   full = whole span, else the 14-day delta (at most every 10 min unless
  *                                 force; a full sync instead when the last one is older than 7 days); single-flight
  *   dayList(), records({modelStartDate}), setOverride(date, true|false|null), getSettings(), saveSettings(partial),
  *   checkins(), recordCheckin(entry), importCsv('nutrition'|'biometrics', text), probe(), today()
- *   KEYS (the five base names), keyFor(base, userId) -> the account's storage key '<base>:<userId>'
  * }
  * Settings = the shared contract's fields plus nudges {weighIn?, partial?: 'YYYY-MM-DD'} (the view's dismissed
  * nudges); a stored check-in also keeps the view's previousTargetKcal and goalChanged.
  * CMA.events 'tdee-data' {type:'status'|'data'|'error', status} follows every change. Listens to 'rpc' (the app's
  * writes, setUserPreference), 'diary-write' {method, ok, days} (the extension's own writes), 'state', 'registry', and
  * to chrome.storage.onChanged: every open Cronometer tab runs its own copy of this layer over ONE storage, so a Disable
- * or "Delete TDEE data" of the SAME account in another tab stops this one at once, and another tab's check-ins,
- * settings, day decisions and days of the same account are adopted instead of being overwritten from this tab's
- * memory. Another account's keys (another tab, or this tab before an account switch) never affect this account.
+ * or "Delete TDEE data" of the SAME account in another tab stops this one at once, and that tab's check-ins, settings,
+ * day decisions and days are adopted instead of being overwritten. Another account's keys never affect this one.
  *
  * Rules: no request before enable() and none while CMA.capture.ready() fails, the decoder mismatches the live build,
  * a decoder rebuild runs or the registry lacks the TDEE types (registry-builder checkOptional 'tdee'). Calls are
  * sequential, >= 250 ms apart; Throttled backs off once, Session aborts. Dates are diary-local: today =
  * CMA.capture.today() (never capture.state.diaryDate, the VIEWED day) and ISO text is built from Day parts. The
  * nonce is never stored or logged; logs carry counts and date ranges only.
- * Storage: PER ACCOUNT, key '<base>:<userId>' (e.g. 'cmaTdeeSettings:1234567'), each value {userId, ...} (checked on
- * read): cmaTdeeDays {days: {iso: {i, w, b, bp:[bmr, activity, exercise, tef], c, lf, s, cs?, f}}} (i = row[0]
- * consumed kcal, w = first weigh-in kg, b = burned at fetch time, c = complete, lf = loggedFood, s = 'rpc'|'csv', cs =
- * the fields a CSV file supplied, f = fetchedAt), cmaTdeeSync, cmaTdeeOverrides {days: {iso: true|false}},
- * cmaTdeeSettings, cmaTdeeCheckins {checkins: [...]} (<= 260). The un-suffixed keys of 0.3.0 (one account for the
- * whole browser) are migrated per key when THEIR account loads: copied into an empty keyed slot, removed only after
- * that write succeeded; another account's legacy value is left alone until that account loads.
+ * Storage: PER ACCOUNT, key keyFor(base, userId) = '<base>:<userId>', each value {userId, ...}: cmaTdeeDays {days:
+ * {iso: {i, w, b, bp:[bmr, activity, exercise, tef], c, lf, s, cs?, f}}} (i = row[0] consumed kcal, w = first
+ * weigh-in kg, b = burned at fetch time, c = complete, lf = loggedFood, s = 'rpc'|'csv', cs = the fields a CSV file
+ * supplied, f = fetchedAt), cmaTdeeSync, cmaTdeeOverrides {days: {iso: true|false}}, cmaTdeeSettings, cmaTdeeCheckins
+ * {checkins: [...]} (<= 260). The bare base names (0.3.0, one account per browser) are migrated per key when THEIR
+ * account loads (SPEC 12.5).
  */
 window.CMA = window.CMA || {};
 (function () {
