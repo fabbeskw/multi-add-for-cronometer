@@ -252,7 +252,8 @@
       ok(/stored only in this browser/.test(t) && /sent nowhere else/.test(t), 'where it is stored');
       ok(/which days have food logged or are marked complete/.test(t) && /three of your Cronometer settings \(TEF, kcal or kJ, weight unit\)/.test(t), 'the flags and settings are named too');
       ok(/up to five years at first/.test(t) && /after you edit the diary in this tab \(also while the panel is closed\)/.test(t), 'how much and when');
-      ok(/for one Cronometer account at a time: enabling it for another account replaces the stored copy/.test(t) && !/kept per account/.test(t), 'one account at a time');
+      ok(/kept separately for each Cronometer account that enables it: one account never sees or changes another’s copy/.test(t) && !/replaces the stored copy/.test(t), 'per account');
+      ok(/removes this account’s copy/.test(t), 'Delete TDEE data removes this account copy only');
       const a = q('.cma-tdee-consent a');
       eq(a.getAttribute('href'), 'https://github.com/fabbeskw/multi-add-for-cronometer/blob/HEAD/PRIVACY.md');
       eq(a.getAttribute('rel'), 'noopener noreferrer');

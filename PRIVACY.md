@@ -63,6 +63,8 @@ Cronometer's own page may load).
 These eleven keys are the complete list. Nothing else is stored, and nothing is synced: `chrome.storage.sync`,
 `localStorage`, `sessionStorage`, IndexedDB and cookies are not used.
 
+The five Adaptive TDEE records are kept **per Cronometer account**: each key ends with the account's numeric id (`cmaTdeeDays:<user id>` and so on), so a second account used in the same browser gets its own separate copy and never sees, changes or deletes another account's. Copies written by version 0.3.0 under the bare names are moved to the account's own keys the next time that account opens the panel.
+
 | Key | Written when | Contents | Personal data? | Removed by |
 |---|---|---|---|---|
 | `cmaSettings` | you save the panel's *Settings*, or tick *Remember my last typed list* on the first-run notice (or press **Continue** with it unticked after an earlier version had it on) | engine choice (RPC or UI automation), delay between adds, whether to remember the last input (off unless you tick it) | no | *Reset* in Settings restores the defaults; removing the extension |
@@ -71,11 +73,11 @@ These eleven keys are the complete list. Nothing else is stored, and nothing is 
 | `cmaLastBatch` | a batch is added with the RPC engine | the diary date, the ids of the added entries, their count, a timestamp and your user id | yes (account id; the entry ids point into your diary) | *Forget last batch*; undoing the whole batch; replaced by the next batch; discarded 24 hours after it was created (checked when the extension loads); removing the extension |
 | `cmaRegistry` | the extension rebuilds its decoder after a Cronometer release, or you press *Rebuild decoder* | a table describing the data types of Cronometer's compiled web client (type names, numeric checksums, field layouts, the build id) | **no** | replaced by the next rebuild; removing the extension |
 | `cmaRegistryAttempt` | each decoder rebuild | when the last rebuild ran, for which build, whether it worked and its error text (so a failed rebuild is not retried on every page load) | **no** | replaced by the next attempt; removing the extension |
-| `cmaTdeeDays` | only after you press **Enable** in the TDEE tab (a CSV you import there adds to it) | the per-day history described in section 3, with your user id | **yes — health data** | **Delete TDEE data**; removing the extension |
-| `cmaTdeeSync` | only after **Enable** | your user id, that you enabled the tab and when, the first day with data, the last refresh times, three of your Cronometer settings (whether Cronometer counts the thermic effect of food, kcal or kJ, your weight unit), technical refresh details, the last refresh error text and a note of what the last refresh could not read (no health values) | yes (account id, consent record) | **Delete TDEE data**; removing the extension |
-| `cmaTdeeOverrides` | you exclude or confirm a day in the TDEE History | the dates you excluded or confirmed, with your user id | yes (health-related) | **Delete TDEE data**; removing the extension |
-| `cmaTdeeSettings` | you save the TDEE settings | goal (lose / maintain / gain rate), check-in weekday, estimate responsiveness, optional starting estimate, protein and fat choices, sex (used only for the minimum-calorie floor), units, model start date, dismissed hints, with your user id | yes (health-related) | **Delete TDEE data**; removing the extension |
-| `cmaTdeeCheckins` | you accept or skip a weekly check-in | up to 260 check-ins: date, accepted or skipped, suggested target, estimate and its uncertainty, trend weight, goal rate as chosen and as applied, macros, with your user id | **yes — health data** | **Delete TDEE data**; removing the extension |
+| `cmaTdeeDays:<user id>` | only after you press **Enable** in the TDEE tab (a CSV you import there adds to it) | the per-day history described in section 3, with your user id | **yes — health data** | **Delete TDEE data**; removing the extension |
+| `cmaTdeeSync:<user id>` | only after **Enable** | your user id, that you enabled the tab and when, the first day with data, the last refresh times, three of your Cronometer settings (whether Cronometer counts the thermic effect of food, kcal or kJ, your weight unit), technical refresh details, the last refresh error text and a note of what the last refresh could not read (no health values) | yes (account id, consent record) | **Delete TDEE data**; removing the extension |
+| `cmaTdeeOverrides:<user id>` | you exclude or confirm a day in the TDEE History | the dates you excluded or confirmed, with your user id | yes (health-related) | **Delete TDEE data**; removing the extension |
+| `cmaTdeeSettings:<user id>` | you save the TDEE settings | goal (lose / maintain / gain rate), check-in weekday, estimate responsiveness, optional starting estimate, protein and fat choices, sex (used only for the minimum-calorie floor), units, model start date, dismissed hints, with your user id | yes (health-related) | **Delete TDEE data**; removing the extension |
+| `cmaTdeeCheckins:<user id>` | you accept or skip a weekly check-in | up to 260 check-ins: date, accepted or skipped, suggested target, estimate and its uncertainty, trend weight, goal rate as chosen and as applied, macros, with your user id | **yes — health data** | **Delete TDEE data**; removing the extension |
 
 ## 5. Every kind of network request
 
@@ -138,9 +140,11 @@ permission, and it contains no remotely loaded code: every line of code it runs 
     (otherwise it is replaced by your next batch, deleted when you undo the batch completely, and discarded 24
     hours after it was created the next time the extension loads). The decoder table is replaced by the next
     rebuild and holds no personal data; or
-  * press **Delete TDEE data** in the Settings of the TDEE tab: it deletes every Adaptive TDEE record
-    (`cmaTdeeDays`, `cmaTdeeSync`, `cmaTdeeOverrides`, `cmaTdeeSettings`, `cmaTdeeCheckins`) at once and stops the
-    reading — in every open Cronometer tab — until you press **Enable** again.
+  * press **Delete TDEE data** in the Settings of the TDEE tab: it deletes every Adaptive TDEE record of the
+    Cronometer account you are logged in with (`cmaTdeeDays:<user id>`, `cmaTdeeSync:<user id>`,
+    `cmaTdeeOverrides:<user id>`, `cmaTdeeSettings:<user id>`, `cmaTdeeCheckins:<user id>`) at once and stops the
+    reading for that account — in every open Cronometer tab — until you press **Enable** again. Another account's
+    copy in the same browser is not touched; log in with that account to delete it, or remove the extension.
 * Changes you make to your Cronometer diary through the extension live in your Cronometer account and are governed
   by Cronometer's own privacy policy; you can remove entries in Cronometer, or with the extension's *Undo this batch*
   button right after adding them (batches added with the default fast engine; the UI-automation engine has no undo).

@@ -198,9 +198,9 @@ you actually log, instead of from a formula or a wearable:
   CSV exports (*Daily Nutrition* = `dailysummary.csv`, *Biometrics* = `biometrics.csv`; weights in kg, lb or st, the
   earliest weigh-in of a day counts) in the tab's Settings instead.
 * **Consent and storage.** Nothing is read until you press **Enable** in the tab. The copy is kept only in this
-  browser (`chrome.storage.local`, keys listed under *Privacy*), for one Cronometer account at a time: another account
-  on the same browser profile never sees it. **Delete TDEE data** in the tab's Settings removes all of it; removing
-  the extension does too. **Delete TDEE data** in one Cronometer tab also stops the reading in every other open
+  browser (`chrome.storage.local`, keys listed under *Privacy*), separately for each Cronometer account: another
+  account on the same browser profile gets its own copy and never sees or changes yours. **Delete TDEE data** in
+  the tab's Settings removes the logged-in account's copy; removing the extension removes all of them. **Delete TDEE data** in one Cronometer tab also stops the reading in every other open
   Cronometer tab at once.
 * **Check the numbers.** The Overview shows the most recent complete day as the extension read it — consumed,
   burned with its parts (BMR + activity + exercise + TEF), the raw values Cronometer sent and your latest weigh-in —
@@ -321,7 +321,7 @@ start the rebuild by hand and shows its outcome; the dump carries the same infor
   version number, nothing personal).
 * **Adaptive TDEE (only after you press *Enable* in the TDEE tab).** The extension then reads your intake, burned
   and weight history from `cronometer.com` (read-only requests the app itself makes) and keeps a copy in
-  `chrome.storage.local`, each record stamped with your user id and shown only to that account: `cmaTdeeDays` (per
+  `chrome.storage.local`, under keys that end with your user id (`cmaTdeeDays:<user id>` and so on), so each account has its own copy: `cmaTdeeDays` (per
   day: energy consumed, Cronometer's burned figure and its parts, the first weigh-in in kg, whether food was logged
   / the day was marked complete, and when it was read), `cmaTdeeSync` (that you enabled it, when it last refreshed,
   the first day with data, your Cronometer TEF / energy-unit / weight-unit preferences, the last refresh error and
@@ -330,7 +330,7 @@ start the rebuild by hand and shows its outcome; the dump carries the same infor
   choices, sex for the calorie floor, units, dismissed hints) and `cmaTdeeCheckins` (up to 260 check-ins: date,
   accepted or skipped, target, estimate, trend weight, goal, macros). This is health data: it never leaves your browser,
   never appears in logs or in the diagnostics dump (counts only), and **Delete TDEE data** in the tab's Settings
-  removes all five keys.
+  removes the logged-in account's five keys.
 * The runtime-rebuilt decoder registry (type names, checksums, layouts derived from Cronometer's public compiled
   code; no personal data) is also kept in `chrome.storage.local` (key `cmaRegistry`, one record, plus
   `cmaRegistryAttempt`: when the last rebuild ran for which build and whether it worked) so it survives a page
@@ -492,13 +492,16 @@ MIT — see [LICENSE](LICENSE). Unofficial; not affiliated with Cronometer Softw
   Limited Use commitment; new `SUBMISSION-CHECKLIST.md`. `tools/check_manifest.py` accepts `homepage_url` (a GitHub
   repository URL) and an optional 32 px icon, and requires a description of at most 132 characters that starts with
   "Unofficial".
+  **Per-account TDEE storage** (found live): every Cronometer account used in the same browser now keeps its own TDEE
+  copy (`cmaTdee*:<user id>`); before, enabling the tab for a second account replaced the first account's settings
+  and check-ins. 0.3.0 copies migrate automatically.
 * **0.3.0** (2026-09-28) — **Adaptive TDEE** tab (optional, off until you press *Enable*): an expenditure estimate
   learned from your logged intake and weight trend, a comparison with Cronometer's burned figure, charts, a History
   list with per-day exclusions and a partial-day check, a weekly check-in with a display-only calorie and macro
   target (accept or skip; goal as % of body weight per week; guardrails), CSV import of Cronometer's own exports, a
   *Check the numbers* block, units from your Cronometer preferences and neutral colours. The history is read with the
   web app's own read requests (daily energy rows, weigh-ins, calendar flags, first day with data, three preferences)
-  and kept for one account at a time in `chrome.storage.local` (`cmaTdee*`); *Delete TDEE data* removes it; the diagnostics dump
+  and kept in `chrome.storage.local` (`cmaTdee*`, per account since 0.3.1); *Delete TDEE data* removes it; the diagnostics dump
   carries counts only. The upstream engine is kept pristine in `vendor/adaptive-tdee/` and wrapped by
   `tools/gen_tdee.py` (`--check` joins the green bar). The panel gained a small view registry (the TDEE tab is its
   first user), the RPC engine announces its writes so the TDEE data refreshes the edited day, and the packaging

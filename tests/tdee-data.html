@@ -246,6 +246,9 @@
   const realCapture = CMA.capture, realRpc = CMA.rpc, realChrome = window.chrome;
   const NONCE = 'NONCE-SECRET-1f3a9c';
   const UID = 1234567, UID_B = 7654321;
+  // per-account storage keys ('<base>:<userId>'); the bare base names are the legacy keys of 0.3.0
+  const kA = (base, uid) => base + ':' + (uid || UID);
+  const BASES = ['cmaTdeeCheckins', 'cmaTdeeDays', 'cmaTdeeOverrides', 'cmaTdeeSettings', 'cmaTdeeSync'];
   let clock = 0, TODAY = '2026-09-28', timers = [], server = null;
   const store = {};
   const writes = [];
@@ -253,7 +256,8 @@
   const seen = [];   // 'tdee-data' events
   EV.on('tdee-data', (ev) => { seen.push(ev.type); });
   const chromeShim = { runtime: {}, storage: { local: {
-    get(keys, cb) { const out = {}; [].concat(keys).forEach((k) => { if (own(store, k)) out[k] = JSON.parse(JSON.stringify(store[k])); }); setTimeout(() => cb(out), 0); },
+    get(keys, cb) { const out = {}; (keys === null ? Object.keys(store) : [].concat(keys)).forEach((k) => { if (own(store, k)) out[k] = JSON.parse(JSON.stringify(store[k])); }); setTimeout(() => cb(out), 0); },
+    getKeys(cb) { const ks = Object.keys(store); setTimeout(() => cb(ks), 0); },
     set(obj, cb) { const c = JSON.parse(JSON.stringify(obj)); Object.keys(c).forEach((k) => { store[k] = c[k]; }); writes.push(Object.keys(c)); setTimeout(() => { if (cb) cb(); }, 0); },
     remove(keys, cb) { [].concat(keys).forEach((k) => { delete store[k]; }); setTimeout(() => { if (cb) cb(); }, 0); },
   } } };
@@ -401,7 +405,7 @@
       await enabledWithStandard();
       const st = D.status();
       eq(st.enabled, true); eq(st.blockedCode, null); eq(st.phase, 'done'); eq(st.syncing, false);
-      eq(store.cmaTdeeSync.userId, UID); eq(store.cmaTdeeSync.enabled, true);
+      eq(store[kA('cmaTdeeSync')].userId, UID); eq(store[kA('cmaTdeeSync')].enabled, true);
       ok(callsOf('getCaloriesConsumedAndBurned').length >= 1);
       ok(seen.indexOf('data') >= 0 && seen.indexOf('status') >= 0, "'tdee-data' events: " + seen.slice(0, 5).join(','));
     });
@@ -863,7 +867,7 @@
       eq(D.CONFIG.DIRTY_DEBOUNCE_MS, 30000);
       writes.length = 0;
       await D.sync({ force: true });
-      eq(writes.filter((w) => w.indexOf('cmaTdeeDays') >= 0).length, 1, 'writes: ' + JSON.stringify(writes));
+      eq(writes.filter((w) => w.indexOf(kA('cmaTdeeDays')) >= 0).length, 1, 'writes: ' + JSON.stringify(writes));
     });
     T.it("the extension's own writes ('diary-write', fetch-based: never relayed as 'rpc') mark days dirty too", async () => {
       await enabledWithStandard();
@@ -901,12 +905,12 @@
       await D.sync();
       eq(server.calls[0] && server.calls[0].method, 'getFirstDayWithData', 'stamps from the future: a full sync');
     });
-    T.it('after disable() no app write triggers a request; disable({forget}) deletes every cmaTdee* key', async () => {
+    T.it("after disable() no app write triggers a request; disable({forget}) deletes every cmaTdee*:<userId> key of this account", async () => {
       await enabledWithStandard();
       ok(Object.keys(store).length >= 2);
       await D.disable();
-      eq(store.cmaTdeeSync.enabled, false);
-      ok(store.cmaTdeeDays && Object.keys(store.cmaTdeeDays.days).length === 59, 'data kept');
+      eq(store[kA('cmaTdeeSync')].enabled, false);
+      ok(store[kA('cmaTdeeDays')] && Object.keys(store[kA('cmaTdeeDays')].days).length === 59, 'data kept');
       server.calls.length = 0;
       EV.emit('rpc', { type: 'rpc', method: 'updateDiary', ok: true, parsed: { params: [NONCE, UID, []] } });
       await advance(5000); await waitIdle();
@@ -917,7 +921,7 @@
       await D.setOverride('2026-09-01', true);
       await D.saveSettings({ sex: 'female' });
       await D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 2000 });
-      deepEq(Object.keys(store).sort(), ['cmaTdeeCheckins', 'cmaTdeeDays', 'cmaTdeeOverrides', 'cmaTdeeSettings', 'cmaTdeeSync']);
+      deepEq(Object.keys(store).sort(), BASES.map((b) => kA(b)));
       await D.disable({ forget: true });
       await ticks(3);
       deepEq(Object.keys(store), [], 'every key removed');
@@ -950,7 +954,7 @@
       eq(entry(ok2).excludedReason, 'user');
       await D.setOverride(ok2, null);
       eq(entry(ok2).excluded, false);
-      deepEq(store.cmaTdeeOverrides, { userId: UID, days: { [low]: false } });
+      deepEq(store[kA('cmaTdeeOverrides')], { userId: UID, days: { [low]: false } });
       await throws(() => D.setOverride('2026-9-1', true), /YYYY-MM-DD/);
       await throws(() => D.setOverride(low, 'yes'), /true, false or null/);
     });
@@ -999,19 +1003,20 @@
 
   // ================================================================================================
   T.describe('data layer: accounts, storage, privacy', () => {
-    T.it('records of another account are ignored and never shown; an account switch cancels its sync', async () => {
+    T.it('records of another account are never read or shown; an account switch cancels its sync', async () => {
       await enabledWithStandard();
       const saved = JSON.parse(JSON.stringify(store));
       await freshStart({ init: false });
       seedStandard();
-      Object.assign(store, saved);                       // storage holds account A's records
+      Object.assign(store, saved);                       // storage holds account A's records, under A's own keys
       fakeCap.state.userId = UID_B;
       await D.init();
       eq(D.status().ready, true); eq(D.status().enabled, false, "A's consent is not B's");
       eq(D.dayList().length, 0); eq(D.status().counts.days, 0);
-      eq(D.diagnostics().ignoredOtherAccount, 2);
+      eq(D.diagnostics().ignoredOtherAccount, 0, "B never reads A's keys");
+      eq(D.diagnostics().otherAccountsStored, 1, 'one other account has TDEE data here');
       deepEq(D.checkins(), []);
-      eq(store.cmaTdeeDays.userId, UID, 'nothing overwritten by reading');
+      eq(JSON.stringify(store), JSON.stringify(saved), 'nothing written or removed by reading');
       // back to A through the capture 'state' event: A's data is back
       fakeCap.state.userId = UID;
       EV.emit('state', fakeCap.state);
@@ -1028,7 +1033,7 @@
       await p; await waitIdle(); await ticks(5);
       eq(D.status().ready, true);
       eq(D.dayList().length, 0, "B sees none of A's rows");
-      eq(store.cmaTdeeDays.userId, UID);
+      eq(store[kA('cmaTdeeDays')].userId, UID);
       eq(D.status().phase, 'idle');
       ok(server.calls.every((c) => c.userId === UID), 'no request for B');
     });
@@ -1049,11 +1054,11 @@
     });
     T.it('stored format: {userId, days: {iso: {i, w, b, bp, c, lf, s, f}}}; a reload reads it back', async () => {
       await enabledWithStandard();
-      const rec = store.cmaTdeeDays.days['2026-09-19'];
+      const rec = store[kA('cmaTdeeDays')].days['2026-09-19'];
       deepEq(Object.keys(rec).sort(), ['b', 'bp', 'c', 'f', 'i', 'lf', 's'].sort());
       deepEq(rec.bp, [1600, 300, 400, 150]); eq(rec.i, 2000); eq(rec.b, 2300); eq(rec.s, 'rpc'); eq(rec.lf, true); eq(rec.c, true);
-      eq(store.cmaTdeeDays.days['2026-09-20'].w, 80.37);
-      eq(store.cmaTdeeSync.rowLayoutVersion, D.ROW_LAYOUT_VERSION);
+      eq(store[kA('cmaTdeeDays')].days['2026-09-20'].w, 80.37);
+      eq(store[kA('cmaTdeeSync')].rowLayoutVersion, D.ROW_LAYOUT_VERSION);
       const before = JSON.stringify(D.dayList());
       const saved = JSON.parse(JSON.stringify(store));
       await freshStart({ init: false });
@@ -1083,7 +1088,7 @@
     T.it('a stored row layout version that differs forces a full sync', async () => {
       await enabledWithStandard();
       const saved = JSON.parse(JSON.stringify(store));
-      saved.cmaTdeeSync.rowLayoutVersion = 0;
+      saved[kA('cmaTdeeSync')].rowLayoutVersion = 0;
       await freshStart({ init: false });
       Object.assign(store, saved);
       await D.init();
@@ -1098,10 +1103,10 @@
       eq(s.goalChangedAt, null);
       s = await D.saveSettings({ goal: { ratePctPerWeek: -0.5 } });
       eq(s.goalChangedAt, clock);
-      eq(store.cmaTdeeSettings.userId, UID); eq(store.cmaTdeeSettings.goal.ratePctPerWeek, -0.5);
+      eq(store[kA('cmaTdeeSettings')].userId, UID); eq(store[kA('cmaTdeeSettings')].goal.ratePctPerWeek, -0.5);
       for (let i = 0; i < 262; i++) await D.recordCheckin({ date: addDays('2021-01-04', i * 7), accepted: i % 2 === 0, targetKcal: 2000 + i });
       eq(D.checkins().length, 260); eq(D.checkins()[0].targetKcal, 2002);
-      eq(store.cmaTdeeCheckins.checkins.length, 260);
+      eq(store[kA('cmaTdeeCheckins')].checkins.length, 260);
       await throws(() => D.recordCheckin({ date: 'monday' }), /YYYY-MM-DD/);
       eq(server.calls.length, 0);
     });
@@ -1110,7 +1115,7 @@
       let s = await D.saveSettings({ nudges: { weighIn: '2026-09-28', partial: 'monday', 'x y': '2026-09-28', evil: { a: 1 } } });
       deepEq(s.nudges, { weighIn: '2026-09-28' }, 'short names with a YYYY-MM-DD value only');
       s = await D.saveSettings({ nudges: { weighIn: '2026-09-28', partial: '2026-09-28' } });
-      deepEq(store.cmaTdeeSettings.nudges, { weighIn: '2026-09-28', partial: '2026-09-28' });
+      deepEq(store[kA('cmaTdeeSettings')].nudges, { weighIn: '2026-09-28', partial: '2026-09-28' });
       await D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 2150, previousTargetKcal: 2300, goalChanged: true, at: clock });
       await D.recordCheckin({ date: '2026-09-28', accepted: false, targetKcal: 2100, previousTargetKcal: 'x' });
       D._test.reset();
@@ -1122,6 +1127,203 @@
       eq(cis[1].previousTargetKcal, null); eq(cis[1].goalChanged, false);
       ok(JSON.stringify(D.diagnostics()).indexOf('nudges') < 0 && JSON.stringify(D.diagnostics()).indexOf('2300') < 0, 'neither reaches the diagnostics');
       eq(server.calls.length, 0);
+    });
+  });
+
+  // ================================================================================================
+  T.describe('per-account storage: two accounts over ONE chrome.storage ("<base>:<userId>" keys, legacy migration)', () => {
+    // Live 2026-09-28: a second account that enabled the tab in the same browser replaced the first account's
+    // records (one set of keys for the whole browser); its settings, overrides and accepted check-ins were lost.
+    async function switchTo(uid) {
+      fakeCap.state.userId = uid;
+      EV.emit('state', fakeCap.state);
+      for (let i = 0; i < 500 && !D.status().ready; i++) await ticks(1);
+      await waitIdle();
+      ok(D.status().ready, 'loaded ' + uid);
+    }
+    const keysOf = (uid) => Object.keys(store).filter((k) => k.endsWith(':' + uid)).sort();
+    const snap = (uid) => JSON.stringify(keysOf(uid).map((k) => [k, store[k]]));
+    /** the legacy layout of 0.3.0: one account's records under the bare base names */
+    function toLegacy(uid) { BASES.forEach((b) => { if (own(store, kA(b, uid))) { store[b] = store[kA(b, uid)]; delete store[kA(b, uid)]; } }); }
+    async function setUpA() {
+      await enabledWithStandard();
+      await D.saveSettings({ sex: 'female', proteinGPerKg: 2.2, goal: { ratePctPerWeek: -0.5 } });
+      await D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 2150, previousTargetKcal: 2300 });
+      await D.setOverride('2026-09-02', true);
+    }
+    function expectA(msg) {
+      eq(D.status().enabled, true, msg);
+      eq(D.dayList().length, 59, msg);
+      eq(D.getSettings().sex, 'female', msg); eq(D.getSettings().proteinGPerKg, 2.2, msg); eq(D.getSettings().goal.ratePctPerWeek, -0.5, msg);
+      deepEq(D.checkins().map((c) => [c.date, c.accepted, c.targetKcal, c.previousTargetKcal]), [['2026-09-28', true, 2150, 2300]], msg);
+      eq(entry('2026-09-02').override, true, msg);
+    }
+    T.it("A, then B in the same tab (an account switch) enables and syncs: A's settings, check-in, override and days stay intact", async () => {
+      await setUpA();
+      deepEq(keysOf(UID), BASES.map((b) => kA(b)), "A's records under A's own keys");
+      ok(BASES.every((b) => !own(store, b)), 'no legacy key written');
+      const a0 = snap(UID);
+      await switchTo(UID_B);
+      eq(D.status().enabled, false); eq(D.dayList().length, 0); eq(D.checkins().length, 0); eq(D.getSettings().sex, 'other');
+      eq(D.diagnostics().otherAccountsStored, 1);
+      server.calls.length = 0;
+      await D.enable(); await waitIdle();
+      ok(server.calls.length > 0 && server.calls.every((c) => c.userId === UID_B), 'B read its own history');
+      await D.saveSettings({ sex: 'male' });
+      await D.recordCheckin({ date: '2026-09-28', accepted: false, targetKcal: 1700 });
+      await D.setOverride('2026-09-03', true);
+      await D.sync({ force: true }); await waitIdle();
+      deepEq(keysOf(UID_B), BASES.map((b) => kA(b, UID_B)), "B's records under B's own keys");
+      ok(BASES.every((b) => store[kA(b, UID_B)].userId === UID_B));
+      eq(snap(UID), a0, "nothing of A's written or removed");
+      await switchTo(UID);
+      expectA("A's records are back");
+      eq(entry('2026-09-03').override, null, "B's day decision is not shown");
+      eq(D.diagnostics().otherAccountsStored, 1);
+      eq(snap(UID), a0, 'loading writes nothing');
+      await switchTo(UID_B);
+      eq(D.getSettings().sex, 'male'); deepEq(D.checkins().map((c) => c.accepted), [false]); eq(entry('2026-09-02').override, null);
+    });
+    T.it("B's Delete TDEE data leaves A's keys untouched, and A's leaves B's", async () => {
+      await setUpA();
+      await switchTo(UID_B);
+      await D.enable(); await waitIdle();
+      await D.saveSettings({ sex: 'male' });
+      const a0 = snap(UID);
+      await D.disable({ forget: true }); await ticks(3);
+      deepEq(keysOf(UID_B), [], "B's keys removed");
+      eq(snap(UID), a0, "A's keys untouched");
+      eq(D.dayList().length, 0); eq(D.getSettings().sex, 'other'); eq(D.diagnostics().otherAccountsStored, 1);
+      await switchTo(UID);
+      expectA("A after B's Delete");
+      await switchTo(UID_B);
+      await D.enable(); await waitIdle();
+      await D.saveSettings({ sex: 'male' });
+      const b1 = snap(UID_B);
+      await switchTo(UID);
+      await D.disable({ forget: true }); await ticks(3);
+      deepEq(keysOf(UID), [], "A's keys removed");
+      eq(snap(UID_B), b1, "B's keys untouched by A's Delete");
+      eq(D.diagnostics().otherAccountsStored, 1);
+      await switchTo(UID_B);
+      eq(D.status().enabled, true); eq(D.getSettings().sex, 'male');
+    });
+    T.it("A's Delete still on its way when the tab switches to B: only A's keys go, B's records load and stay intact", async () => {
+      await setUpA();
+      await switchTo(UID_B);
+      await D.enable(); await waitIdle();
+      await D.saveSettings({ sex: 'male' });
+      await D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 1800 });
+      await switchTo(UID);
+      const b0 = snap(UID_B);
+      const p = D.disable({ forget: true });            // its removal is still on its way ...
+      fakeCap.state.userId = UID_B;                      // ... when the tab switches to B
+      EV.emit('state', fakeCap.state);
+      await p;
+      for (let i = 0; i < 500 && !D.status().ready; i++) await ticks(1);
+      await waitIdle();
+      deepEq(keysOf(UID), [], "A's keys removed");
+      eq(snap(UID_B), b0, "B's keys untouched");
+      ok(D.status().ready, 'B loaded');
+      eq(D.status().enabled, true, "B's consent is still known (A's Delete did not drop B's memory copy)");
+      eq(D.getSettings().sex, 'male'); eq(D.checkins().length, 1); ok(D.dayList().length > 20);
+      await D.setOverride('2026-09-05', true);
+      eq(store[kA('cmaTdeeSettings', UID_B)].sex, 'male', "a later write of B keeps B's settings");
+      eq(store[kA('cmaTdeeCheckins', UID_B)].checkins.length, 1);
+    });
+    T.it("legacy migration: A's un-suffixed records move to A's keys when A loads; the legacy keys go only after the copy", async () => {
+      await setUpA();
+      toLegacy(UID);
+      deepEq(Object.keys(store).sort(), BASES);
+      const legacy = JSON.parse(JSON.stringify(store));
+      D._test.reset();
+      writes.length = 0;
+      await D.init();
+      expectA('read through the migration');
+      deepEq(Object.keys(store).sort(), BASES.map((b) => kA(b)), 'copied, and the legacy keys removed');
+      BASES.forEach((b) => deepEq(store[kA(b)], legacy[b], b + ' copied as it was'));
+      eq(writes.length, 1, 'one write for the copy: ' + JSON.stringify(writes));
+      eq(D.diagnostics().otherAccountsStored, 0);
+      const after = JSON.stringify(store);
+      writes.length = 0;
+      D._test.reset();
+      await D.init();
+      eq(JSON.stringify(store), after, 'idempotent: a second load changes nothing'); eq(writes.length, 0);
+      expectA('after a reload');
+    });
+    T.it("legacy records of ANOTHER account stay until that account loads; then they move to that account's keys", async () => {
+      await setUpA();
+      toLegacy(UID);                                     // the legacy keys hold A's records
+      const legacy = JSON.stringify(BASES.map((b) => store[b]));
+      D._test.reset();
+      fakeCap.state.userId = UID_B;
+      await D.init();
+      eq(D.status().enabled, false); eq(D.dayList().length, 0); eq(D.checkins().length, 0); eq(D.getSettings().sex, 'other');
+      eq(D.diagnostics().ignoredOtherAccount, 5, "A's legacy records are not B's");
+      eq(D.diagnostics().otherAccountsStored, 1);
+      eq(JSON.stringify(BASES.map((b) => store[b])), legacy, 'left alone');
+      await D.enable(); await waitIdle();
+      await D.saveSettings({ sex: 'male' });
+      await D.disable({ forget: true }); await ticks(3);
+      eq(JSON.stringify(BASES.map((b) => store[b])), legacy, "B's enable, writes and Delete never touch A's legacy records");
+      await D.enable(); await waitIdle();
+      await D.saveSettings({ sex: 'male' });
+      const b0 = snap(UID_B);
+      await switchTo(UID);
+      expectA("A's legacy records, read from A's keys now");
+      ok(BASES.every((b) => !own(store, b)), 'the legacy keys are gone');
+      deepEq(keysOf(UID), BASES.map((b) => kA(b)));
+      eq(snap(UID_B), b0, "B's keys untouched by A's migration");
+    });
+    T.it('a keyed slot is never overwritten by a legacy record; a legacy record whose slot is filled is just removed', async () => {
+      await freshStart({ init: false });
+      store[kA('cmaTdeeSettings')] = { userId: UID, sex: 'male' };
+      store.cmaTdeeSettings = { userId: UID, sex: 'female', proteinGPerKg: 2.2 };
+      store.cmaTdeeCheckins = { userId: UID, checkins: [{ date: '2026-09-21', accepted: true, targetKcal: 2000 }] };
+      await D.init();
+      eq(D.getSettings().sex, 'male', 'the keyed value wins'); eq(D.getSettings().proteinGPerKg, 1.8);
+      deepEq(store[kA('cmaTdeeSettings')], { userId: UID, sex: 'male' }, 'not overwritten');
+      eq(D.checkins().length, 1);
+      eq(store[kA('cmaTdeeCheckins')].checkins.length, 1, 'the empty slot got the copy');
+      ok(!own(store, 'cmaTdeeSettings') && !own(store, 'cmaTdeeCheckins'), 'both legacy keys removed');
+    });
+    T.it('a failed keyed write keeps the legacy records (the data is shown from them); the next load moves them', async () => {
+      await setUpA();
+      toLegacy(UID);
+      const legacy = JSON.stringify(store);
+      D._test.reset();
+      logs.length = 0;
+      const realSet = chromeShim.storage.local.set;
+      chromeShim.storage.local.set = function (obj, cb) {
+        setTimeout(() => { chromeShim.runtime.lastError = { message: 'QUOTA_BYTES quota exceeded' }; try { if (cb) cb(); } finally { delete chromeShim.runtime.lastError; } }, 0);
+      };
+      try {
+        await D.init();
+        expectA('shown from the legacy records');
+        eq(JSON.stringify(store), legacy, 'the legacy records stay, nothing removed');
+        ok(logs.some((l) => /could not be moved/.test(l)), logs.join('\n'));
+      } finally { chromeShim.storage.local.set = realSet; }
+      D._test.reset();
+      await D.init();
+      expectA('after the next load');
+      deepEq(Object.keys(store).sort(), BASES.map((b) => kA(b)));
+    });
+    T.it('diagnostics: otherAccountsStored is a count only, never another account id', async () => {
+      await setUpA();
+      const third = 5550002, fourth = 5550003;
+      store[kA('cmaTdeeSync', UID_B)] = { userId: UID_B, enabled: true };
+      store[kA('cmaTdeeDays', third)] = { userId: third, days: {} };
+      store.cmaTdeeSettings = { userId: fourth, sex: 'male' };   // a legacy record of a fourth account
+      D._test.reset();
+      logs.length = 0;
+      await D.init();
+      const dg = D.diagnostics();
+      eq(dg.otherAccountsStored, 3); eq(D.status().otherAccountsStored, 3);
+      eq(dg.ignoredOtherAccount, 1, "the fourth account's legacy record");
+      const dump = JSON.stringify(dg) + JSON.stringify(D.status()) + logs.join('\n');
+      [UID_B, third, fourth].forEach((u) => ok(dump.indexOf(String(u)) < 0, u + ' must not appear'));
+      eq(store.cmaTdeeSettings.userId, fourth, "the fourth account's legacy record is left alone");
+      expectA('A unaffected');
     });
   });
 
@@ -1202,7 +1404,7 @@
       eq(entry('2026-07-03').excluded, false);
       eq(entry('2026-09-05').intakeKcal, 2000, 'the RPC value was kept');
       eq(entry('2026-09-20').weightKg, 80.37);
-      eq(store.cmaTdeeDays.days['2026-07-01'].s, 'csv');
+      eq(store[kA('cmaTdeeDays')].days['2026-07-01'].s, 'csv');
       // the RPC later covers 07-01..07-03: its values win where it has one, the CSV value stays where it has none
       server.food['2026-07-01'] = { consumed: 2300, complete: true };
       server.weighIns.push({ date: '2026-07-02', time: null, value: 81.9 });
@@ -1268,8 +1470,8 @@
       m.days['2020-01-05'] = { i: 2100, w: 82, b: 1900, bp: [1600, 300, 0, 150], c: true, lf: true, s: 'rpc', f: 1 };
       m.days['2020-01-06'] = { i: 2000, w: null, b: null, bp: null, c: null, lf: null, s: 'csv', cs: 'i', f: 1 };
       await D.sync({ full: true });
-      ok(!store.cmaTdeeDays.days['2020-01-05'], 'an old Cronometer day is gone from storage');
-      ok(!!store.cmaTdeeDays.days['2020-01-06'], 'an imported CSV day is kept');
+      ok(!store[kA('cmaTdeeDays')].days['2020-01-05'], 'an old Cronometer day is gone from storage');
+      ok(!!store[kA('cmaTdeeDays')].days['2020-01-06'], 'an imported CSV day is kept');
       eq(D.dayList()[0].date, '2020-01-06');
     });
     T.it('biometrics CSV: stone and lb amounts converted per row, the EARLIEST weigh-in by 12- or 24-hour time, unknown units skipped', async () => {
@@ -1302,7 +1504,7 @@
       await throws(() => D.importCsv('nutrition', 'Day,Time,Group,Metric,Unit,Amount\n2026-01-01,,Body,Weight,kg,80\n'), /no Energy \(kcal\) or Energy \(kJ\) column/);
       await throws(() => D.importCsv('nutrition', 'Food,Energy (kcal)\nOats,150\n'), /no Date column/);
       eq(D.dayList().length, 0, 'nothing stored');
-      ok(!store.cmaTdeeDays, 'nothing written');
+      ok(!store[kA('cmaTdeeDays')], 'nothing written');
     });
   });
 
@@ -1328,24 +1530,32 @@
     T.it("another tab's Disable (enabled false stored): stops here too, the data stays, the consent is not re-written", async () => {
       await enabledWithStandard();
       server.calls.length = 0;
-      store.cmaTdeeSync.enabled = false;
+      store[kA('cmaTdeeSync')].enabled = false;
       EV.emit('rpc', { type: 'rpc', method: 'updateDiary', ok: true, parsed: { params: [NONCE, UID, []] } });
       await advance(2000); await waitIdle();
       eq(server.calls.length, 0);
       eq(D.status().enabled, false);
-      eq(store.cmaTdeeSync.enabled, false, 'not switched back on');
+      eq(store[kA('cmaTdeeSync')].enabled, false, 'not switched back on');
       eq(D.dayList().length, 59, 'a Disable keeps the data');
     });
-    T.it('another account enabled the tab meanwhile (cmaTdeeSync of another userId): nothing is read or written for this one', async () => {
+    T.it("another account enabled meanwhile (its own keys): this account keeps syncing and never touches them", async () => {
       await enabledWithStandard();
       server.calls.length = 0;
-      store.cmaTdeeSync = Object.assign({}, store.cmaTdeeSync, { userId: UID_B });
-      const before = JSON.stringify(store);
+      store[kA('cmaTdeeSync', UID_B)] = Object.assign({}, store[kA('cmaTdeeSync')], { userId: UID_B });
+      store[kA('cmaTdeeSettings', UID_B)] = { userId: UID_B, sex: 'male' };
+      const before = JSON.stringify([store[kA('cmaTdeeSync', UID_B)], store[kA('cmaTdeeSettings', UID_B)]]);
       EV.emit('rpc', { type: 'rpc', method: 'updateDiary', ok: true, parsed: { params: [NONCE, UID, []] } });
       await advance(2000); await waitIdle();
-      eq(server.calls.length, 0);
-      eq(JSON.stringify(store), before, "the other account's records are untouched");
-      eq(D.status().enabled, false);
+      ok(server.calls.length > 0 && server.calls.every((c) => c.userId === UID), 'the edit was read again, for this account only');
+      eq(JSON.stringify([store[kA('cmaTdeeSync', UID_B)], store[kA('cmaTdeeSettings', UID_B)]]), before, "the other account's records are untouched");
+      eq(D.status().enabled, true); eq(D.dayList().length, 59); eq(D.getSettings().sex, 'other', "nothing of B's adopted");
+      // the stored consent of THIS account gone (a Delete in another tab): stops, B's keys stay
+      delete store[kA('cmaTdeeSync')];
+      server.calls.length = 0;
+      EV.emit('rpc', { type: 'rpc', method: 'updateDiary', ok: true, parsed: { params: [NONCE, UID, []] } });
+      await advance(2000); await waitIdle();
+      eq(server.calls.length, 0); eq(D.status().enabled, false);
+      eq(JSON.stringify([store[kA('cmaTdeeSync', UID_B)], store[kA('cmaTdeeSettings', UID_B)]]), before);
     });
   });
 
@@ -1363,7 +1573,8 @@
     const sharedChrome = { runtime: {}, storage: {
       onChanged: { addListener(f) { listeners.push(f); }, removeListener(f) { const i = listeners.indexOf(f); if (i >= 0) listeners.splice(i, 1); } },
       local: {
-        get(keys, cb) { const o = {}; [].concat(keys).forEach((k) => { if (own(shared, k)) o[k] = sortKeys(clone(shared[k])); }); setTimeout(() => cb(o), 0); },
+        get(keys, cb) { const o = {}; (keys === null ? Object.keys(shared) : [].concat(keys)).forEach((k) => { if (own(shared, k)) o[k] = sortKeys(clone(shared[k])); }); setTimeout(() => cb(o), 0); },
+        getKeys(cb) { const ks = Object.keys(shared); setTimeout(() => cb(ks), 0); },
         set(obj, cb) {
           const ch = {};
           Object.keys(obj).forEach((k) => {
@@ -1450,22 +1661,22 @@
     T.it("no lost updates: check-ins, settings and day decisions made in either tab all survive the other tab's writes", async () => {
       await A.D.recordCheckin({ date: '2026-09-21', accepted: true, targetKcal: 2000 }); await settle();
       await B.D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 2100 }); await settle();
-      deepEq(shared.cmaTdeeCheckins.checkins.map((c) => c.date), ['2026-09-21', '2026-09-28'], 'both check-ins stored');
+      deepEq(shared[kA('cmaTdeeCheckins')].checkins.map((c) => c.date), ['2026-09-21', '2026-09-28'], 'both check-ins stored');
       eq(A.D.checkins().length, 2, "A sees B's check-in");
       await B.D.saveSettings({ sex: 'female' }); await settle();
       await A.D.saveSettings({ proteinGPerKg: 2.2 }); await settle();
-      deepEq([shared.cmaTdeeSettings.sex, shared.cmaTdeeSettings.proteinGPerKg], ['female', 2.2]);
+      deepEq([shared[kA('cmaTdeeSettings')].sex, shared[kA('cmaTdeeSettings')].proteinGPerKg], ['female', 2.2]);
       deepEq([B.D.getSettings().sex, B.D.getSettings().proteinGPerKg], ['female', 2.2]);
       await A.D.setOverride('2026-09-20', true); await settle();
       await B.D.setOverride('2026-09-21', false); await settle();
-      deepEq(shared.cmaTdeeOverrides.days, { '2026-09-20': true, '2026-09-21': false });
+      deepEq(shared[kA('cmaTdeeOverrides')].days, { '2026-09-20': true, '2026-09-21': false });
       eq(A.D.dayList().find((d) => d.date === '2026-09-21').override, false);
     });
     T.it("a tab's own writes coming back never roll its memory back (quick successive saves, keys reported sorted)", async () => {
       A.D.saveSettings({ fatShare: 0.25 });
       await A.D.saveSettings({ fatShare: 0.5 });
       await settle();
-      eq(A.D.getSettings().fatShare, 0.5); eq(B.D.getSettings().fatShare, 0.5); eq(shared.cmaTdeeSettings.fatShare, 0.5);
+      eq(A.D.getSettings().fatShare, 0.5); eq(B.D.getSettings().fatShare, 0.5); eq(shared[kA('cmaTdeeSettings')].fatShare, 0.5);
       eq(A.D.getSettings().sex, 'female', 'nothing else lost');
     });
     T.it('Delete TDEE data in A: B stops at once - an app write in B sends nothing and no key comes back', async () => {
@@ -1487,7 +1698,7 @@
       const n0 = A.calls.length;
       A.write(); await settle(60);
       eq(A.calls.length, n0, 'no request from A');
-      eq(shared.cmaTdeeSync.enabled, false, 'the consent stays withdrawn');
+      eq(shared[kA('cmaTdeeSync')].enabled, false, 'the consent stays withdrawn');
     });
     T.it('a Delete in B while A is in the middle of a sync: A stops, merges and writes nothing', async () => {
       await A.D.enable(); await settle();
@@ -1502,25 +1713,78 @@
       deepEq(Object.keys(shared), [], 'nothing written back after the deletion');
       eq(A.D.status().enabled, false); eq(A.D.dayList().length, 0);
     });
-    T.it('another account enables the tab in a third tab: A (the first account) drops its copy and stops', async () => {
+    T.it('another account in a third tab enables, syncs, saves, disables and deletes: the first account is never affected', async () => {
       await A.D.enable(); await settle();
+      await A.D.saveSettings({ sex: 'female', fatShare: 0.25 }); await settle();
+      await A.D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 2150 }); await settle();
+      await A.D.setOverride('2026-09-24', true); await settle();
+      const mineA = () => JSON.stringify(BASES.map((b) => shared[kA(b)]));
+      const theirs = () => Object.keys(shared).filter((k) => k.endsWith(':' + UID_B)).sort();
+      const snapA = mineA(), daysA = A.D.dayList().length;
+      ok(daysA > 20);
       const C = await tab('C', UID_B);
+      eq(C.D.status().enabled, false, "A's consent is not C's"); eq(C.D.dayList().length, 0); eq(C.D.checkins().length, 0);
+      eq(C.D.getSettings().sex, 'other'); eq(C.D.diagnostics().otherAccountsStored, 1);
+      ok(JSON.stringify(C.D.diagnostics()).indexOf(String(UID)) < 0, "a count only: never the other account's id");
       await C.D.enable(); await settle();
-      eq(shared.cmaTdeeSync.userId, UID_B, "the second account's records replace the first's (one account at a time)");
-      eq(A.D.status().enabled, false); eq(A.D.dayList().length, 0, "A shows nothing of B's and keeps nothing of its own");
+      await C.D.saveSettings({ sex: 'male' }); await C.D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 1800 });
+      await C.D.setOverride('2026-09-25', true);
+      await C.D.sync({ full: true, force: true }); await settle();
+      ok(C.calls.indexOf('energy') >= 0, 'C read its own history');
+      deepEq(theirs(), BASES.map((b) => kA(b, UID_B)), "C's records under C's own keys");
+      eq(mineA(), snapA, "nothing of A's overwritten");
+      eq(A.D.status().enabled, true); eq(A.D.dayList().length, daysA); eq(A.D.getSettings().sex, 'female'); eq(A.D.getSettings().fatShare, 0.25);
+      deepEq(A.D.checkins().map((c) => [c.date, c.accepted, c.targetKcal]), [['2026-09-28', true, 2150]], "A's accepted check-in, nothing of C's");
+      eq(A.D.dayList().find((d) => d.date === '2026-09-24').override, true);
+      eq(A.D.dayList().find((d) => d.date === '2026-09-25').override, null, "C's day decision is not A's");
+      eq(A.D.diagnostics().otherAccountsStored, 1);
+      ok(JSON.stringify(A.D.diagnostics()).indexOf(String(UID_B)) < 0, "a count only: never the other account's id");
+      await C.D.disable(); await settle();
+      eq(A.D.status().enabled, true, "C's Disable is not A's");
       const n0 = A.calls.length;
       A.write(); await settle(60);
-      eq(A.calls.length, n0, 'no request from A');
-      eq(shared.cmaTdeeSync.userId, UID_B, "A never writes over the other account's records");
+      ok(A.calls.length > n0, 'A still reads its edits');
+      await C.D.disable({ forget: true }); await settle();
+      deepEq(theirs(), [], "C's Delete TDEE data removed C's keys");
+      ok(!!shared[kA('cmaTdeeSync')] && shared[kA('cmaTdeeSync')].enabled === true, "A's keys stay");
+      eq(A.D.status().enabled, true); eq(A.D.getSettings().sex, 'female'); eq(A.D.checkins().length, 1);
+      eq(A.D.diagnostics().otherAccountsStored, 0, 'the count follows the other tab');
+      eq(C.D.status().enabled, false); eq(C.D.checkins().length, 0);
+    });
+    T.it('legacy records of one account, two of its tabs loading at once: the same copy, then they keep following each other', async () => {
+      const uid4 = 5550004;
+      shared.cmaTdeeSync = { userId: uid4, enabled: false, firstDay: '2026-06-01' };
+      shared.cmaTdeeSettings = { userId: uid4, sex: 'female', proteinGPerKg: 2.2 };
+      shared.cmaTdeeCheckins = { userId: uid4, checkins: [{ date: '2026-09-21', accepted: true, targetKcal: 2000 }] };
+      shared.cmaTdeeOverrides = { userId: uid4, days: { '2026-09-20': true } };
+      shared.cmaTdeeDays = { userId: uid4, days: { '2026-09-20': { i: 2000, w: 80, s: 'rpc' } } };
+      const legacy = BASES.map((b) => JSON.stringify(sortKeys(shared[b])));
+      const both = await Promise.all([tab('P', uid4), tab('Q', uid4)]);
+      const P = both[0], Q = both[1];
+      const settleBoth = async () => { await sleep(40); for (const t of both) for (let i = 0; i < 200 && t.D._test.run.running; i++) await sleep(5); await sleep(10); };
+      await settleBoth();
+      ok(BASES.every((b) => !own(shared, b)), 'the legacy keys are gone');
+      deepEq(BASES.map((b) => JSON.stringify(sortKeys(shared[kA(b, uid4)]))), legacy, 'copied as they were');
+      both.forEach((t) => {
+        eq(t.D.getSettings().sex, 'female', t.name); eq(t.D.checkins().length, 1, t.name);
+        eq(t.D.dayList().find((d) => d.date === '2026-09-20').override, true, t.name); eq(t.D.status().enabled, false, t.name);
+      });
+      await P.D.saveSettings({ fatShare: 0.5 }); await settleBoth();
+      eq(Q.D.getSettings().fatShare, 0.5, "Q adopts P's save right after the migration");
+      await Q.D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 2100 }); await settleBoth();
+      eq(P.D.checkins().length, 2, "P adopts Q's check-in");
+      eq(shared[kA('cmaTdeeCheckins', uid4)].checkins.length, 2);
+      eq(shared[kA('cmaTdeeSettings', uid4)].fatShare, 0.5);
     });
     T.it("a Delete when some keys were never stored: the other tab's next write to such a key is still adopted", async () => {
       const uid3 = 5550001;
       const D1 = await tab('D1', uid3), E1 = await tab('E1', uid3);
       const settleBoth = async () => { await sleep(40); for (const t of [D1, E1]) for (let i = 0; i < 200 && t.D._test.run.running; i++) await sleep(5); await sleep(10); };
       await D1.D.enable(); await settleBoth();
-      deepEq(Object.keys(shared).sort(), ['cmaTdeeDays', 'cmaTdeeSync'], 'no overrides, settings or check-ins stored yet');
+      const mine = () => Object.keys(shared).filter((k) => k.endsWith(':' + uid3)).sort();
+      deepEq(mine(), [kA('cmaTdeeDays', uid3), kA('cmaTdeeSync', uid3)], 'no overrides, settings or check-ins stored yet');
       await D1.D.disable({ forget: true }); await settleBoth();
-      deepEq(Object.keys(shared), []);
+      deepEq(mine(), []);
       await E1.D.enable(); await settleBoth();
       eq(D1.D.status().enabled, true, "D1 follows E1's consent");
       await E1.D.setOverride('2026-09-22', true); await settleBoth();

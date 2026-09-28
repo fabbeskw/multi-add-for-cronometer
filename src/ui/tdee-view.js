@@ -686,7 +686,7 @@ window.CMA = window.CMA || {};
     const c = card('cma-tdee-consent', 'Adaptive TDEE');
     c.appendChild(el('div', { class: 'cma-tdee-consent-h' }, 'Your real energy expenditure, learned from your own log'));
     c.appendChild(el('p', null, 'Estimates how much energy you actually burn from the food you log and how your weight trends (an adaptive method also used by dedicated nutrition-coaching apps), shows how that compares with Cronometer’s estimate, and suggests a calorie and macro target once a week.'));
-    c.appendChild(el('p', null, 'When you enable it, the extension reads from Cronometer, through the session of this tab (the same requests the app itself makes): your daily energy intake, Cronometer’s energy-burned figures (BMR, activity, exercise, thermic effect of food) and your weight history, plus which days have food logged or are marked complete, the first day with data and three of your Cronometer settings (TEF, kcal or kJ, weight unit). It reads up to five years at first, then recent days when you open this tab and after you edit the diary in this tab (also while the panel is closed). The copy is stored only in this browser (chrome.storage.local, for one Cronometer account at a time: enabling it for another account replaces the stored copy) and is sent nowhere else. “Delete TDEE data” in the TDEE settings removes it.'));
+    c.appendChild(el('p', null, 'When you enable it, the extension reads from Cronometer, through the session of this tab (the same requests the app itself makes): your daily energy intake, Cronometer’s energy-burned figures (BMR, activity, exercise, thermic effect of food) and your weight history, plus which days have food logged or are marked complete, the first day with data and three of your Cronometer settings (TEF, kcal or kJ, weight unit). It reads up to five years at first, then recent days when you open this tab and after you edit the diary in this tab (also while the panel is closed). The copy is stored only in this browser (chrome.storage.local, kept separately for each Cronometer account that enables it: one account never sees or changes another’s copy) and is sent nowhere else. “Delete TDEE data” in the TDEE settings removes this account’s copy.'));
     c.appendChild(el('p', { class: 'cma-small' }, 'Privacy policy: ',
       el('a', { href: PRIVACY_URL, target: '_blank', rel: 'noopener noreferrer', class: 'cma-tdee-link' }, 'PRIVACY.md'),
       ' (what is stored and how to delete it).'));
@@ -1401,10 +1401,10 @@ window.CMA = window.CMA || {};
     const del = card('cma-tdee-delete', 'Stored TDEE data');
     if (!vs.confirmDelete) {
       del.appendChild(el('div', { class: 'cma-tdee-actions' },
-        btn('Delete TDEE data', () => { vs.confirmDelete = true; rerender(false); }, { class: 'cma-tdee-del', title: 'Delete every stored day, setting and check-in of the TDEE view from this browser' }),
-        el('span', { class: 'cma-muted cma-small' }, 'Removes the stored history, settings and check-ins from this browser and stops reading.')));
+        btn('Delete TDEE data', () => { vs.confirmDelete = true; rerender(false); }, { class: 'cma-tdee-del', title: 'Delete every stored day, setting and check-in of the TDEE view for this Cronometer account from this browser (other accounts keep theirs)' }),
+        el('span', { class: 'cma-muted cma-small' }, 'Removes this account’s stored history, settings and check-ins from this browser and stops reading (other Cronometer accounts keep theirs).')));
     } else {
-      del.appendChild(el('div', { class: 'cma-tdee-actions' }, el('strong', null, 'Delete all stored TDEE data?'),
+      del.appendChild(el('div', { class: 'cma-tdee-actions' }, el('strong', null, 'Delete all stored TDEE data of this account?'),
         btn('Yes, delete', () => deleteData(), { class: 'cma-tdee-del-yes' }),
         btn('Cancel', () => { vs.confirmDelete = false; rerender(false); }, { class: 'cma-tdee-del-no' })));
     }
@@ -1490,7 +1490,7 @@ window.CMA = window.CMA || {};
       log('TDEE data deleted on request');
       vs.dialog = null; vs.sub = 'overview'; vs.confirmDelete = false; vs.settingsNote = ''; vs.model = null; vs.dismissed = {}; vs.draft = null; vs.historyPage = 0;
       bump();
-      note('info', 'The TDEE data was deleted from this browser.');
+      note('info', 'The TDEE data of this account was deleted from this browser.');
       rerender(true);
     });
   }

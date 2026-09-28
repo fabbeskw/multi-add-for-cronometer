@@ -1165,8 +1165,8 @@ the numeric account id is stored next to the last batch and the last input and a
 data-usage boxes are ticked for what is handled locally too (Health, Authentication, PII, Website content, User
 activity — the store counts local storage and use as handling). Since 0.3.0 both also describe the Adaptive TDEE
 tab: nothing is read before the user presses **Enable**; then the per-day intake, Cronometer's burned figures and
-the weight history are read through five read-only RPCs and kept for one account at a time under the five `cmaTdee*` keys with the
-TDEE settings and the check-in log; **Delete TDEE data** removes them; the dump carries counts only. STORE-LISTING's
+the weight history are read through five read-only RPCs and kept per Cronometer account under that account's five
+`cmaTdee*:<userId>` keys with the TDEE settings and the check-in log; **Delete TDEE data** removes the current account's; the dump carries counts only. STORE-LISTING's
 single-purpose statement is widened honestly ("a companion for the Cronometer web diary: log many foods at once and
 estimate energy expenditure from the intake and weight already logged there") and §5 names the single-purpose
 review risk (fallback: ship the TDEE tab as a separate listing). `SUBMISSION-CHECKLIST.md` (0.3.1) is the ordered
@@ -1317,21 +1317,27 @@ preference reader `bOf` (getPreference). Signatures, bodies and return shapes ar
 
 ### 12.3 Data layer (src/tdee/tdee-data.js, CMA.tdeeData)
 ```
-init() → Promise<status>          loads the stored records of the CURRENT capture account (no network); records of
-                                  another userId are ignored (counted in diagnostics().ignoredOtherAccount), never
-                                  shown; it also runs on the first capture 'state' that carries a userId
+init() → Promise<status>          loads the stored records of the CURRENT capture account from its own keys (no
+                                  network; migrates its legacy records, §12.5); another account's keys are never read
+                                  into memory, written or removed; a legacy record of another userId is ignored
+                                  (counted in diagnostics().ignoredOtherAccount), never shown; it also runs on the
+                                  first capture 'state' that carries a userId, and on every account change
 status() → {enabled, syncing, phase ('idle'|'first-day'|'prefs'|'biometrics'|'energy'|'calendar'|'done'|'error'),
             progress {done, total}, lastFullAt, lastDeltaAt, firstDay, lastError (a sync that FAILED, or unreadable
             storage), notes (what the last SUCCESSFUL sync could not read: a refused preference, calendar or energy
             window - information, not a failure), flagsSource 'calendar'|'none', energyChunk, prefs {tef,
             unitsCalories, weightUnit, at, assumed}|null, counts {days, weighIns, intakeDays, burnedDays},
             range {from, to}|null, ready (the loaded records belong to the current account),
-            blockedReason (user-facing text)|null, blockedCode}
+            blockedReason (user-facing text)|null, blockedCode, otherAccountsStored (how many OTHER Cronometer
+            accounts have TDEE data in this browser: a count only, never their ids)}
             prefs: unitsCalories / weightUnit are null while NOT READ (never Cronometer's defaults kcal / Pounds
             presented as the account's); a preference read and found absent is the app's default; assumed = TEF has
             never been read (TEF assumed off); 'true' is compared case-insensitively, like the app's alo()
-enable() → Promise<status>        the user's consent for THIS account (stored in cmaTdeeSync), then a full sync
-disable({forget}) → Promise<status>   stops syncing; forget:true removes every cmaTdee* key and the memory copy
+enable() → Promise<status>        the user's consent for THIS account (stored in cmaTdeeSync:<userId>), then a full sync
+disable({forget}) → Promise<status>   stops syncing; forget:true (Delete TDEE data) removes THIS account's
+                                  cmaTdee*:<userId> keys (and its own legacy records, if still there) and the memory
+                                  copy - never another account's keys, keyed or legacy (nor, after an
+                                  account switch during the removal, the new account's memory copy)
 sync({full, force}) → Promise<status>   single flight (12.4)
 dayList() → [{date, intakeKcal, weightKg, burnedKcal, burnedParts {bmr, activity, exercise, tef}|null, complete,
             loggedFood, excluded, excludedReason 'user'|'partial'|'incomplete'|null, partialSuspect,
@@ -1345,24 +1351,35 @@ importCsv('nutrition'|'biometrics', text) → Promise<{imported, skipped, unknow
 probe() → {date, consumed, burned, parts, row (the 12 raw numbers, only when read in this page), tefIncluded,
            weighIn {date, kg}|null} | null      the most recent full day; memory only, never in diagnostics
 today() → the local 'YYYY-MM-DD' (CMA.capture.today())
-diagnostics() → counts, date ranges, flags, storage state; never a weight or an intake
-also: burnedFromRow(row, tef), firstWeighIns(points), KEYS, ROW_LAYOUT_VERSION, DEFAULT_SETTINGS, CONFIG, _test
+diagnostics() → counts, date ranges, flags, storage state, ignoredOtherAccount, otherAccountsStored (counts);
+                                  never a weight, an intake or another account's id
+also: burnedFromRow(row, tef), firstWeighIns(points), KEYS (the five base names), keyFor(base, userId),
+      ROW_LAYOUT_VERSION, DEFAULT_SETTINGS, CONFIG, _test
 ```
 `CMA.events` `'tdee-data'` `{type: 'status'|'data'|'error', status, error?}` follows every change. The data layer
 listens to `'rpc'` (the app's writes, setUserPreference), `'diary-write'` (the RPC engine's own writes, §6.4),
 `'state'`, `'registry'` and `'registry-progress'`, and to `chrome.storage.onChanged` (other tabs, below).
-**Other tabs.** Every open Cronometer tab runs its own copy of the data layer over ONE `chrome.storage.local`.
-`chrome.storage.onChanged` reports every change to every tab, the writer's own included: each write is remembered
-(canonical JSON with sorted keys, because Chrome reports stored dictionaries with sorted keys) until its echo comes
-back, and a key that already holds the same value is not written again. What another tab wrote is adopted at once:
-`cmaTdeeSync` removed (Delete TDEE data) or any `cmaTdee*` key holding another account's record → this tab cancels
-its work and drops its memory copy (as `disable({forget})` does locally), and removes again any key its own write
-was still carrying (that write lands after the deletion); `cmaTdeeSync.enabled` false (Disable) → the tab stops (and
-re-asserts it after its own in-flight write); any other key of this account → adopted (days keep the windows this tab
-merged but has not written yet), unless this tab's own newer write to that key is still on its way. As a second
-check, `execute()` reads `cmaTdeeSync` before a job's first request and sends nothing when the stored consent for this
-account is gone (the event may not have arrived, or the listener could not be added). Without `onChanged` the echo
-bookkeeping is off: every write is sent and only the second check applies.
+**Other tabs.** Every open Cronometer tab runs its own copy of the data layer over ONE `chrome.storage.local`, and
+tabs may be logged in to DIFFERENT Cronometer accounts. `chrome.storage.onChanged` reports every change to every tab,
+the writer's own included: each write is remembered per storage key name (canonical JSON with sorted keys, because
+Chrome reports stored dictionaries with sorted keys) until its echo comes back, and a key that already holds the same
+value is not written again. A tab acts only on the loaded account's OWN keyed entries (`<base>:<userId>`): another
+account enabling, syncing, disabling or deleting in another tab (or in this tab before an account switch) never
+affects it - those events only update the `otherAccountsStored` count, and a value under this account's key that
+carries another userId is never adopted. What another tab of the SAME account wrote is adopted at once:
+`cmaTdeeSync:<userId>` removed (Delete TDEE data) → this tab cancels its work and drops its memory copy (as
+`disable({forget})` does locally), and removes again any key of this account its own write was still carrying (that
+write lands after the deletion); `enabled` false (Disable) → the tab stops (and re-asserts it after its own in-flight
+write); any other key of this account → adopted (days keep the windows this tab merged but has not written yet),
+unless this tab's own newer write to that key is still on its way. A legacy (un-suffixed) key is acted on only while
+this tab runs on this account's legacy copy (its keyed slot holds nothing because the migration copy could not be
+written): its removal is then another tab's Delete TDEE data. As a second check, `execute()` reads
+`cmaTdeeSync:<userId>` (and this account's legacy `cmaTdeeSync` while it has not been copied) before a job's first
+request and sends nothing when the stored consent for this account is gone (the event may not have arrived, or the
+listener could not be added). Without `onChanged` the echo bookkeeping is off: every write is sent and only the
+second check applies. **Account switch in one tab** (capture `userId` changes): the running job is cancelled (it
+merges and writes nothing more), the new account's keyed records are loaded (migrating its legacy records), and the
+previous account's keys stay exactly as they are.
 Settings: `{goal: {ratePctPerWeek}, sex 'female'|'male'|'other' (the calorie floor only), checkInWeekday 0–6
 (0 = Sunday, default 1 = Monday), responsiveness 'stable'|'balanced'|'responsive' (engine drift 10 / 15 / 25),
 manualInitialKcal|null (500–10000 stored; the view accepts 800–8000), proteinGPerKg 1.6|1.8|2.2, fatShare
@@ -1451,19 +1468,35 @@ Record assembly (TDEE spec §2), one record per calendar day from the first stor
 * `ROW_LAYOUT_VERSION` (1): bump it when a live-verified correction changes what a stored row means; stored days are
   then read again by the next (forced) full sync.
 
-### 12.5 Storage (chrome.storage.local; every value `{userId, …}`, account-gated like cmaLastInput)
-* `cmaTdeeDays` = `{userId, days: {'YYYY-MM-DD': {i, w, b, bp: [bmr, activity, exercise, tef], c, lf, s, cs?, f}}}`
-  — i = row[0] kcal, w = first weigh-in kg, b = burned at fetch time, c = complete, lf = loggedFood, s = 'rpc'|'csv',
-  cs = the fields a CSV supplied ('i', 'w' or 'iw'), f = fetchedAt; about 80–120 bytes per day, so 5 years stay
-  near 200 KB (quota 10 MB; 5 MB on Chrome 111–113).
-* `cmaTdeeSync` = `{userId, enabled, enabledAt, firstDay, lastFullAt, lastDeltaAt, energyChunk, flagsSource, prefs,
-  rowLayoutVersion, lastError, notes, energyUnavailable}`; `cmaTdeeOverrides` = `{userId, days: {iso: true|false}}`
-  (kept apart from fetched data, so a refetch never clobbers a decision); `cmaTdeeSettings` = `{userId, …settings}`;
-  `cmaTdeeCheckins` = `{userId, checkins: [… ≤ 260]}`.
-* One account at a time: records of another userId are never adopted or shown, and a second account that enables
-  the tab replaces them; a tab of the first account that sees this happen (§12.3 *Other tabs*) drops its memory copy
-  and never writes over the second account's records. A failed read is reported and nothing is written over what could not be read; writes are
-  bounded (5 s). The nonce is never stored; `lastError` and log texts carry kinds, method names, dates and counts,
+### 12.5 Storage (chrome.storage.local; PER ACCOUNT: key `<base>:<userId>`, every value `{userId, …}`)
+* **Per-account keys** (since the live bug of 2026-09-28: in 0.3.0 the five keys held ONE account for the whole
+  browser, so a second account - a reviewer's test account - that pressed Enable in the same browser replaced the
+  first account's records, and the first account lost its settings, day decisions and accepted check-ins; its days
+  could be read again, those could not). Each account's records live under its own five keys, e.g.
+  `cmaTdeeSettings:1234567` (`CMA.tdeeData.keyFor(base, userId)`); the value keeps its `userId`, checked on every
+  read. Nothing of one account is ever written to, removed from or read into another account's keys.
+* `cmaTdeeDays:<userId>` = `{userId, days: {'YYYY-MM-DD': {i, w, b, bp: [bmr, activity, exercise, tef], c, lf, s, cs?,
+  f}}}` — i = row[0] kcal, w = first weigh-in kg, b = burned at fetch time, c = complete, lf = loggedFood, s =
+  'rpc'|'csv', cs = the fields a CSV supplied ('i', 'w' or 'iw'), f = fetchedAt; about 80–120 bytes per day, so about
+  30–45 KB per account-year and near 200 KB for 5 years of one account (quota 10 MB; 5 MB on Chrome 111–113); every
+  further account that enables the tab adds its own.
+* `cmaTdeeSync:<userId>` = `{userId, enabled, enabledAt, firstDay, lastFullAt, lastDeltaAt, energyChunk, flagsSource,
+  prefs, rowLayoutVersion, lastError, notes, energyUnavailable}`; `cmaTdeeOverrides:<userId>` = `{userId, days: {iso:
+  true|false}}` (kept apart from fetched data, so a refetch never clobbers a decision); `cmaTdeeSettings:<userId>` =
+  `{userId, …settings}`; `cmaTdeeCheckins:<userId>` = `{userId, checkins: [… ≤ 260]}`.
+* **Migration of the legacy keys** (the un-suffixed `cmaTdeeDays` … `cmaTdeeCheckins` of 0.3.0, only ever read and
+  removed, never written), per key, when an account loads: a legacy value whose `userId` is that account's is copied
+  (as stored) into its keyed slot when the slot is EMPTY - a keyed value is never overwritten - and the legacy key is
+  removed only after that write succeeded (or when the slot already held this account's record: an earlier copy whose
+  removal did not happen). The slots are read again right before the copy (another tab of the account may have
+  migrated or saved meanwhile; two tabs migrating at once write the same copy, which Chrome reports once). A failed
+  copy keeps the legacy value, the data is shown from it and the next load tries again; `disable({forget})` removes
+  this account's legacy records too. A legacy value of ANOTHER account is left untouched (and not shown) until that
+  account loads. Idempotent; writes bounded like every other.
+* `otherAccountsStored` (status, diagnostics): the number of OTHER accounts with at least one TDEE key here (keyed
+  keys from `chrome.storage.local.getKeys()` at load - a whole `get(null)` before Chrome 130 - plus the legacy
+  records' userIds, then kept current from `onChanged`); a count only, never an id. A failed read is reported and
+  nothing is written over what could not be read; writes are bounded (5 s). The nonce is never stored; `lastError` and log texts carry kinds, method names, dates and counts,
   never a reply value, a weight or an intake.
 * The TDEE spec's `tdee.fetchLog` (its /export quota) does not exist: the GWT reads are not /export calls, so the
   "10 exports per day" limit does not apply. The /export CSV route is NOT implemented; the manual CSV import
@@ -1506,8 +1539,10 @@ reviewer will see.
   textContent (never innerHTML); the charts are plain SVG with one `<path>` per series (a few hundred nodes at most).
 * Until `status().enabled`: a consent card (what is read - intake, burned with its parts, weight history, the
   logged / complete flags, the first day with data and the three settings; up to five years at first, then recent days
-  when the tab opens and after diary edits in this tab, also with the panel closed - that it stays in this browser for
-  one account at a time, a link to PRIVACY.md, the disclaimer, **Enable**; "Nothing is read until you press Enable").
+  when the tab opens and after diary edits in this tab, also with the panel closed - that it stays in this browser,
+  kept separately for each Cronometer account that enables it (one account never sees or changes another's copy;
+  Delete TDEE data removes this account's), a link to PRIVACY.md, the disclaimer, **Enable**; "Nothing is read until
+  you press Enable").
   While `status().ready` is false nothing stored is shown ("Waiting for the Cronometer account of this tab").
 * **Overview**: the expenditure card (TDEE spec §6.1: "N kcal/day ± sd", the four status chips, "Cronometer
   estimates X — your data says you burn about N% less/more" - during the warm-up "… — the comparison with your own
@@ -1852,3 +1887,21 @@ reviewer will see.
   entries, a second text-blur pass, refusal next to old pictures / of an in-repository profile or output / of a
   TDEE-enabled profile, UTC times, `--check-store`; `.gitignore` covers pictures anywhere below `store-assets/`
   (promo tiles excepted) and the usual profile folder names.
+
+## Appendix L. Per-account TDEE storage (2026-09-28, live bug)
+
+* **Bug**: the five `cmaTdee*` keys held one account for the whole browser (each value tagged `{userId}`). Another
+  account's records were never SHOWN (`ignoredOtherAccount`), but they were OVERWRITTEN: when a second Cronometer
+  account (a reviewer test account) pressed Enable in the same browser, its writes replaced the first account's
+  records, and the first account lost its settings, overrides and accepted check-ins (its days could be read again).
+* **Fix** (§12.3 *Other tabs*, §12.5): keys `<base>:<userId>`; per-key migration of the legacy keys when their own
+  account loads (copy into an empty slot, remove only after the write succeeded; another account's legacy value left
+  alone); a tab reacts only to its own account's keyed entries; Delete TDEE data removes only the current account's
+  keys; `otherAccountsStored` (a count) in status and diagnostics. The view's consent text and Delete controls say the
+  copy is kept per account. PRIVACY.md and README.md were updated to the per-account keys when this was merged into 0.3.1.
+* Tests: tests/tdee-data.html *per-account storage* (accounts A and B over one fake storage: A's settings, check-in,
+  override and days intact after B enabled and synced in the same tab; each account's Delete leaves the other's keys
+  untouched, also when the tab switches to B while A's Delete is still on its way; legacy migration, another account's legacy left alone, a keyed slot never overwritten, a failed copy
+  keeping the legacy value; otherAccountsStored as a count only) and *other tabs* (a third tab of another account
+  enabling, syncing, saving, disabling and deleting never affects the first; two tabs of one account migrating at
+  once); the existing same-account two-tab tests run on the keyed names.
