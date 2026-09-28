@@ -182,6 +182,7 @@ EMPTY_DAY_FIRST = 7            # the empty-day search starts this many days afte
 EMPTY_DAY_MORE = 30            # ... and steps forward at most this many days further
 MAX_DAY_STEPS = EMPTY_DAY_FIRST + EMPTY_DAY_MORE + 14   # bound for any single move of the diary (back to today included)
 DAY_STEP_TIMEOUT_S = 20        # one arrow click until the extension's capture saw the app's getDayInfo for the new day
+DAY_KNOWN_TIMEOUT_S = 30       # after the login, until the app's first getDayInfo has answered (the diary shows first)
 DAY_SETTLE_S = 1.2             # a day must look the same (3 polls in a row) for this long before its rows are counted
 DAY_SETTLE_TIMEOUT_S = 12
 # Dry run: synthetic entries on the mock's start day and on day +7 (the search must skip +7 and settle on +8).
@@ -1171,6 +1172,21 @@ class Shooter:
             return None
         return st.get('date')
 
+    def wait_known_day(self, timeout=DAY_KNOWN_TIMEOUT_S):
+        """The day the diary shows, waiting (bounded) for the app's first getDayInfo to answer: right after the login
+        the diary is on screen a moment before its own getDayInfo has come back (live 2026-09-28, a run stopped 1 s
+        after the diary appeared with 'the day the diary shows is not known'). None when it never arrives."""
+        if self.dry:
+            return self.current_day()
+        deadline = time.time() + timeout
+        while True:
+            st = self.day_state()
+            if st.get('date') and st.get('status') == 200:
+                return st.get('date')
+            if time.time() > deadline:
+                return self.current_day()
+            time.sleep(0.5)
+
     def _fresh(self, st, mark):
         if self.dry:
             return (st.get('changes') or 0) > (mark.get('changes') or 0)
@@ -1257,7 +1273,7 @@ class Shooter:
         """Move the diary forward to an empty day (today + EMPTY_DAY_FIRST, then day by day up to EMPTY_DAY_MORE more)
         BEFORE anything is added. StepError when none is empty: nothing has been added at that point."""
         today = local_today()
-        self.start_day = self.current_day()
+        self.start_day = self.wait_known_day()
         if not self.start_day:
             raise StepError('the day the diary shows is not known (the extension saw no getDayInfo): reload the diary and run again; nothing was added')
         self.cur_day = self.start_day

@@ -5,7 +5,7 @@
     "set": "store",
     "data": "sample list on an empty day of the diary (2026-10-05, +7 days)",
     "diaryDay": "2026-10-05",
-    "capturedAt": "2026-09-28T17:11:34Z",
+    "capturedAt": "2026-09-28T17:25:16Z",
     "blurred": [
       "#navbarDropdown",
       ".navbar-account",
@@ -34,7 +34,7 @@
     "set": "store",
     "data": "sample list on an empty day of the diary (2026-10-05, +7 days)",
     "diaryDay": "2026-10-05",
-    "capturedAt": "2026-09-28T17:11:37Z",
+    "capturedAt": "2026-09-28T17:25:19Z",
     "blurred": [
       "#navbarDropdown",
       ".navbar-account",
@@ -63,7 +63,7 @@
     "set": "store",
     "data": "sample list on an empty day of the diary (2026-10-05, +7 days)",
     "diaryDay": "2026-10-05",
-    "capturedAt": "2026-09-28T17:11:44Z",
+    "capturedAt": "2026-09-28T17:25:26Z",
     "blurred": [
       "#navbarDropdown",
       ".navbar-account",
@@ -92,7 +92,7 @@
     "set": "store",
     "data": "synthetic demo",
     "diaryDay": "2026-10-05",
-    "capturedAt": "2026-09-28T17:11:46Z",
+    "capturedAt": "2026-09-28T17:25:28Z",
     "blurred": [
       "#navbarDropdown",
       ".navbar-account",
@@ -121,7 +121,7 @@
     "set": "store",
     "data": "synthetic demo",
     "diaryDay": "2026-10-05",
-    "capturedAt": "2026-09-28T17:11:49Z",
+    "capturedAt": "2026-09-28T17:25:31Z",
     "blurred": [
       "#navbarDropdown",
       ".navbar-account",
