@@ -727,6 +727,7 @@ window.CMA = window.CMA || {};
   function renderOverview(root, s, u, st, today) {
     const m = currentModel(s, today);
     const days = daysNow();
+    renderTrustNotice(root, s, days, today);
     renderNudges(root, s, u, today, days, m);
     const grid = el('div', { class: 'cma-tdee-grid2' });
     grid.appendChild(expenditureCard(m, s, u, st));
@@ -872,6 +873,22 @@ window.CMA = window.CMA || {};
     const c = vs.ctx;
     const p = c && typeof c.copyText === 'function' ? c.copyText(text) : Promise.resolve(false);
     return Promise.resolve(p).then((ok) => { note('info', ok ? 'Target copied: paste it into Cronometer → Targets.' : 'Copy failed — the target is ' + fmtEU(targetKcal, u) + '.'); rerender(false); });
+  }
+  /** 'Only trust completed days' ignores the food of every day not marked complete. Most people never mark days, so
+   *  when it is on, say how many recent logged days it is ignoring (live 2026-09-28: switched on with 52 logged days
+   *  and nothing on the overview told the user what it cost). Shown whether or not the model has an estimate. */
+  function renderTrustNotice(root, s, days, today) {
+    if (!s || !s.trustCompleteOnly) return;
+    const from = addDays(today, -28);                                  // the engine's, or the view's own calendar maths
+    const recent = (days || []).filter(d => d && d.date < today && d.date >= from && (!s.modelStartDate || d.date >= s.modelStartDate));
+    const logged = recent.filter(d => d.intakeKcal != null);
+    const ignored = logged.filter(d => d.excludedReason === 'incomplete');
+    if (!ignored.length) return;
+    root.appendChild(el('div', { class: 'cma-tdee-nudges' }, el('div', { class: 'cma-tdee-nudge cma-tdee-trust' },
+      el('span', null, 'Only completed days are trusted: ' + ignored.length + ' of the ' + logged.length
+        + ' days you logged in the last 4 weeks are ignored because they are not marked complete in Cronometer.'),
+      btn('Change in settings', () => { vs.sub = 'settings'; vs.confirmDelete = false; vs.settingsNote = ''; vs.msg = null; vs.draft = null; rerender(true); },
+        { small: true, class: 'cma-tdee-trust-settings', title: 'Open the TDEE settings ("Only trust completed days")' }))));
   }
   function renderNudges(root, s, u, today, days, m) {
     if (!modelOk(m)) return;

@@ -290,7 +290,15 @@
     getFirstDayWithData(session) { return serve('getFirstDayWithData', session, [], () => server.firstDay); },
     getPreference(session, key) { return serve('getPreference', session, [key], () => (own(server.prefs, key) ? server.prefs[key] : null)); },
     getBiometrics(session, o) {
-      return serve('getBiometrics', session, [o], () => server.weighIns.filter((p) => (!o.from || p.date >= o.from) && (!o.to || p.date <= o.to)).map((p) => JSON.parse(JSON.stringify(p))));
+      return serve('getBiometrics', session, [o], () => {
+        const whole = !o.from && !o.to;
+        // server.wholeOmit / server.wholeExtra: the whole-history answer (null Days) differing from the ranged one, as
+        // seen live on 2026-09-28 (one weigh-in day fewer right after a weigh-in was added)
+        let pts = server.weighIns.filter((p) => (!o.from || p.date >= o.from) && (!o.to || p.date <= o.to));
+        if (whole && server.wholeOmit) pts = pts.filter((p) => server.wholeOmit.indexOf(p.date) < 0);
+        if (whole && server.wholeExtra) pts = pts.concat(server.wholeExtra);
+        return pts.map((p) => JSON.parse(JSON.stringify(p)));
+      });
     },
     getCaloriesConsumedAndBurned(session, first, lastEx) {
       return serve('getCaloriesConsumedAndBurned', session, [first, lastEx], () => {
@@ -474,9 +482,10 @@
     T.it('call order, windows (energy last EXCLUSIVE = today+1, calendar 42-day chunks with end+1, biometrics whole history)', async () => {
       await enabledWithStandard();
       deepEq(server.calls.map((c) => c.method), ['getFirstDayWithData', 'getPreference', 'getPreference', 'getPreference', 'getBiometrics',
-        'getCaloriesConsumedAndBurned', 'getCalendarInfo', 'getCalendarInfo']);
+        'getBiometrics', 'getCaloriesConsumedAndBurned', 'getCalendarInfo', 'getCalendarInfo']);
       deepEq(callsOf('getPreference').map((c) => c.args[0]), ['use.thermic.effect.food', 'units.calories', 'weightUnit']);
       deepEq(callsOf('getBiometrics')[0].args[0], { metricId: 1, unitId: 1 }, 'whole history: no Days');
+      deepEq(callsOf('getBiometrics')[1].args[0], { metricId: 1, unitId: 1, from: '2026-06-29', to: '2026-09-28' }, 'then the recent 92 days by range (end inclusive)');
       // energy start = max(firstDay 2026-06-01, first weigh-in 2026-08-15 - 14 days)
       deepEq(callsOf('getCaloriesConsumedAndBurned')[0].args, ['2026-08-01', '2026-09-29']);
       deepEq(callsOf('getCalendarInfo').map((c) => c.args), [['2026-08-01', '2026-09-12'], ['2026-09-12', '2026-09-29']]);
@@ -487,6 +496,48 @@
       deepEq(st.range, { from: '2026-08-01', to: '2026-09-28' });
       eq(st.counts.days, 59); eq(st.counts.intakeDays, 57, '59 days - nothing logged on 09-10 - today');
       ok(st.lastFullAt === clock && st.lastDeltaAt === clock);
+    });
+    T.it('full sync: the recent weigh-ins come from the ranged answer (live 2026-09-28: the whole-history answer missed a day)', async () => {
+      await freshStart();
+      seedStandard();
+      server.weighIns.push({ date: '2026-06-02', time: { h: 7, m: 0, s: 0 }, value: 83.11 });   // older than the 92-day window
+      server.wholeOmit = ['2026-09-28', '2026-06-02'];                                           // today's and an old one
+      server.wholeExtra = [{ date: '2026-09-19', time: { h: 7, m: 0, s: 0 }, value: 79.5 }];     // a weigh-in deleted since
+      await D.enable(); await waitIdle();
+      eq(entry('2026-09-28').weightKg, 80.37, "today's weigh-in is kept although the whole-history answer lacked it");
+      eq(entry('2026-09-19') ? entry('2026-09-19').weightKg : null, null, 'inside the window the ranged answer wins: a day only the whole-history answer has is not stored');
+      eq(entry('2026-06-02') ? entry('2026-06-02').weightKg : null, null, 'outside the window only the whole-history answer counts');
+      const notes = String(D.status().notes || '');
+      ok(/weigh-in check: whole-history answer missed 2026-09-28/.test(notes), notes);
+      ok(/ranged answer lacked 2026-09-19/.test(notes), notes);
+      ok(!/80\.37|79\.5/.test(notes), 'the note carries dates only, never weights');
+      // a second full refresh is stable: the day never flips back
+      server.calls.length = 0;
+      await D.sync({ full: true }); await waitIdle();
+      eq(entry('2026-09-28').weightKg, 80.37, 'still there after another full refresh');
+    });
+    T.it('full sync: a future-dated weigh-in only the whole-history answer has is no disagreement (no note)', async () => {
+      await freshStart();
+      seedStandard();
+      server.wholeExtra = [{ date: '2026-09-30', time: { h: 7, m: 0, s: 0 }, value: 79.9 }];   // after today: never stored
+      await D.enable(); await waitIdle();
+      eq(entry('2026-09-30') ? entry('2026-09-30').weightKg : null, null);
+      const notes = String(D.status().notes || '');
+      ok(!/weigh-in check/.test(notes), notes);
+    });
+    T.it('full sync: whole history refused -> only the recent window is replaced, older weigh-ins stay', async () => {
+      await freshStart();
+      seedStandard();
+      server.weighIns.push({ date: '2026-06-02', time: { h: 7, m: 0, s: 0 }, value: 83.11 });
+      await D.enable(); await waitIdle();
+      eq(entry('2026-06-02').weightKg, 83.11);
+      server.refuse.getBiometrics = (args) => (!args[0].from ? rpcEx('ServerException') : null);   // whole history only
+      server.weighIns = server.weighIns.filter((p) => p.date !== '2026-09-26');                   // deleted in Cronometer
+      await D.sync({ full: true }); await waitIdle();
+      eq(entry('2026-06-02').weightKg, 83.11, 'the old weigh-in is kept (not in the recent window)');
+      eq(entry('2026-09-26') ? entry('2026-09-26').weightKg : null, null, 'the recent window was replaced by the ranged answer');
+      ok(/whole weigh-in history unavailable/.test(String(D.status().notes || '')), String(D.status().notes));
+      eq(D.status().phase, 'done');
     });
     T.it('records: intake per loggedFood (a 0-row day with nothing logged is null, never 0), today null, kg as sent', async () => {
       await freshStart();
@@ -1100,7 +1151,7 @@
       server.refuse.getBiometrics = () => new CMA.errors.Throttled('HTTP 429', { status: 429, retryable: true });
       const st = await D.sync({ full: true });
       eq(st.phase, 'error'); ok(/throttled/.test(st.lastError), st.lastError);
-      eq(callsOf('getBiometrics').length, 3, 'first sync + two attempts');
+      eq(callsOf('getBiometrics').length, 4, 'first sync (whole history + recent range) + two attempts');
     });
     T.it('getPreference refused -> TEF assumed off; getCalendarInfo refused -> flagsSource none, intake = row[0] > 0', async () => {
       await freshStart();
@@ -1128,7 +1179,7 @@
       seedStandard();
       await D.enable(); await waitIdle();
       const at = server.calls.map((c) => c.at);
-      eq(at.length, 8);
+      eq(at.length, 9, 'first day, 3 prefs, 2 biometrics (whole + recent), energy, 2 calendar');
       for (let i = 1; i < at.length; i++) ok(at[i] - at[i - 1] >= 250, 'gap ' + i + ': ' + (at[i] - at[i - 1]));
     });
   });
@@ -1390,7 +1441,7 @@
       A = await tab('A', UID); B = await tab('B', UID);
       eq(A.D.diagnostics().crossTab, true, 'the storage watcher is on');
       await A.D.enable(); await settle();
-      deepEq(A.calls, ['first', 'pref', 'pref', 'pref', 'bio', 'energy', 'calendar'], 'A read its history');
+      deepEq(A.calls, ['first', 'pref', 'pref', 'pref', 'bio', 'bio', 'energy', 'calendar'], 'A read its history');
       eq(B.D.status().enabled, true, "B follows A's consent");
       eq(B.D.dayList().length, A.D.dayList().length, 'B adopted the days');
       ok(B.D.dayList().length > 20);

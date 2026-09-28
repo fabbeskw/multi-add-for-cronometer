@@ -1348,7 +1348,12 @@ Record assembly (TDEE spec §2), one record per calendar day from the first stor
 * **Full sync**, in order: getFirstDayWithData (null → today − 548 days; refused → the first day an earlier sync
   learned, the fallback only when none is known; clamped to 5 years) → the three preferences (one refusal stops the
   others: what was never read stays unknown, TEF assumed off, `prefs.assumed`) → getBiometrics for the whole history
-  (points older than 5 years dropped) → getCaloriesConsumedAndBurned from max(firstDay, first weigh-in − 14 days)
+  (points older than 5 years dropped), then getBiometrics for the recent 92 days by an explicit range (`BIO_RECHECK_DAYS`),
+  whose answer is authoritative inside that window: live on 2026-09-28 the whole-history answer held one weigh-in day
+  fewer than the ranged query the delta syncs use (13 → 12 stored days right after a weigh-in was added), so a full
+  refresh dropped it. Disagreements inside [today − 91, today] are noted with dates only (`weigh-in check: …`); when only
+  the ranged call works, only its window is replaced; when only the whole-history call works, it is used for the whole
+  history as before, with a `recent weigh-in check unavailable` note → getCaloriesConsumedAndBurned from max(firstDay, first weigh-in − 14 days)
   (today − 27 days while there is no weigh-in) to today, in windows starting at 92 days: a row count ≠ span, an //EX
   or an HTTP error halves the window actually sent (`min(size, span) / 2`, floor 28: a short last window is never
   resent unchanged, and a window of 28 days or less is marked unavailable at once; a decode error is not retried
@@ -1409,7 +1414,11 @@ Record assembly (TDEE spec §2), one record per calendar day from the first stor
 The signatures, layouts and request bodies come from the compiled bundle (build 0A1C16E1…) and from unofficial
 clients; none of it has run against a real account. The view's **Check the numbers** block (`probe()`: the most
 recent full day's consumed and burned with its parts and the 12 raw values, plus the latest weigh-in) exists so the
-user can compare with the diary's Energy Summary and report a mismatch. To confirm: the sign of row[1] and the
+user can compare with the diary's Energy Summary and report a mismatch. Confirmed live on 2026-09-28 (one account,
+kcal/kg, TEF on): consumed and burned matched the diary's Energy Summary in "Check the numbers"; 92-day windows of
+getCaloriesConsumedAndBurned returned exactly `span` rows; 42-day getCalendarInfo windows and getFirstDayWithData
+answered; the whole-history getBiometrics missed a recent weigh-in day (see the full sync). Still to confirm: that a
+ranged getBiometrics over 92 days is never clamped by the server (it is trusted inside that window); the sign of row[1] and the
 burned composition against the diary's Burned value; indices 2 and 5–8 and the formula of [11]; whether historical
 BMR rows use the weight as of each day; the largest span getCaloriesConsumedAndBurned accepts (92 is probed, then
 halved) and getCalendarInfo accepts (42 is used), and whether the latter's end is inclusive; whether non-Gold
@@ -1419,6 +1428,9 @@ Time null for untimed ones; loggedFood when row[0] > 0; whether the server throt
 change to rpc.js / tdee-data.js plus a ROW_LAYOUT_VERSION bump.
 
 ### 12.7 View (src/ui/tdee-view.js, CMA.tdeeView)
+* Completed-days notice (added after the live test of 2026-09-28): while `trustCompleteOnly` is on, the overview says
+  how many of the days logged in the 28 days before today (and on/after `modelStartDate`) are ignored because they are
+  not marked complete (`excludedReason === 'incomplete'` only), with a *Change in settings* button; neutral nudge style.
 * Registered with `CMA.panel.registerView({id:'tdee', label:'TDEE', order:35, render, onEvent, diagnostics, unmount,
   css})` (§8): the tab sits just before Diagnostics. Every node is built with createElement / createElementNS and
   textContent (never innerHTML); the charts are plain SVG with one `<path>` per series (a few hundred nodes at most).

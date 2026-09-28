@@ -49,6 +49,10 @@ window.CMA = window.CMA || {};
   const ENERGY_CHUNK_MIN = 28;         // halve on //EX or a row count != span, never below this
   const CALENDAR_CHUNK = 42;           // the diary calendar asks for its ~6-week grid
   const DELTA_DAYS = 14;               // backdated edits and device syncs (no client RPC) land in recent days
+  // A full sync also asks for the recent weigh-ins by an explicit date range and trusts that answer inside its window.
+  // Live 2026-09-28: the whole-history getBiometrics (null Days) answered one weigh-in day fewer than the ranged query
+  // the delta syncs use (13 -> 12 stored days right after a weigh-in was added), so a full refresh dropped it.
+  const BIO_RECHECK_DAYS = 92;
   const DELTA_MIN_INTERVAL_MS = 10 * 60 * 1000;
   const FULL_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
   const HISTORY_MAX_DAYS = 1826;       // 5 years: storage and latency bound for every window
@@ -825,10 +829,50 @@ window.CMA = window.CMA || {};
     const r = await rpcCall(ctx, function (session) {
       return CMA.rpc.getBiometrics(session, all ? { metricId: 1, unitId: 1 } : { metricId: 1, unitId: 1, from: from, to: ctx.today });
     });
-    if (!r.ok) { ctx.notes.push('weigh-ins unavailable (' + errorText(r.error) + ')'); return; }
-    const perDay = firstWeighIns(r.value);
-    mergeWeighIns(from, ctx.today, perDay, deps.now());
-    ctx.counts.weighIns = perDay.size;
+    if (!all) {
+      if (!r.ok) { ctx.notes.push('weigh-ins unavailable (' + errorText(r.error) + ')'); return; }
+      const perDay = firstWeighIns(r.value);
+      mergeWeighIns(from, ctx.today, perDay, deps.now());
+      ctx.counts.weighIns = perDay.size;
+      if (ctx.full) await persist([KEYS.DAYS], ctx.gen);
+      emit('data');
+      return;
+    }
+    // Whole history, then the recent window by an explicit range (BIO_RECHECK_DAYS): the ranged answer is what every
+    // delta sync stores, so it is authoritative inside its window and a full refresh can never drop a weigh-in that
+    // the next delta sync would bring back (or keep one the delta syncs removed).
+    const recentFrom = maxIso(addDays(ctx.today, -(BIO_RECHECK_DAYS - 1)), floor);
+    const ranged = await rpcCall(ctx, function (session) {
+      return CMA.rpc.getBiometrics(session, { metricId: 1, unitId: 1, from: recentFrom, to: ctx.today });
+    });
+    if (!r.ok && !ranged.ok) { ctx.notes.push('weigh-ins unavailable (' + errorText(r.error) + ')'); return; }
+    const whole = r.ok ? firstWeighIns(r.value) : null;
+    const recent = ranged.ok ? firstWeighIns(ranged.value) : null;
+    if (whole && recent) {
+      // Dates only (never weights) for the diagnostics: which recent days the two answers disagree on.
+      const onlyRanged = [], onlyWhole = [];
+      // bounded to the window actually merged: a future-dated weigh-in (never stored) is no disagreement
+      recent.forEach(function (_, d) { if (d >= recentFrom && d <= ctx.today && !whole.has(d)) onlyRanged.push(d); });
+      whole.forEach(function (_, d) { if (d >= recentFrom && d <= ctx.today && !recent.has(d)) onlyWhole.push(d); });
+      if (onlyRanged.length || onlyWhole.length) {
+        ctx.notes.push('weigh-in check: whole-history answer ' + (onlyRanged.length ? 'missed ' + onlyRanged.sort().slice(-5).join(', ') : 'matched')
+          + (onlyWhole.length ? '; ranged answer lacked ' + onlyWhole.sort().slice(-5).join(', ') : '') + ' (the ranged answer is used)');
+      }
+    }
+    let merged;
+    if (whole) {
+      merged = new Map();
+      whole.forEach(function (kg, d) { if (!recent || d < recentFrom) merged.set(d, kg); });
+      if (recent) recent.forEach(function (kg, d) { merged.set(d, kg); });
+      mergeWeighIns(floor, ctx.today, merged, deps.now());
+    } else {
+      // only the recent window could be read: replace that window, keep the older stored weigh-ins untouched
+      ctx.notes.push('whole weigh-in history unavailable, recent ' + BIO_RECHECK_DAYS + ' days refreshed (' + errorText(r.error) + ')');
+      merged = recent;
+      mergeWeighIns(recentFrom, ctx.today, merged, deps.now());
+    }
+    if (!ranged.ok && whole) ctx.notes.push('recent weigh-in check unavailable (' + errorText(ranged.error) + ')');
+    ctx.counts.weighIns = merged.size;
     if (ctx.full) await persist([KEYS.DAYS], ctx.gen);   // a long backfill keeps its progress; a short job writes once at its end
     emit('data');
   }
@@ -915,7 +959,7 @@ window.CMA = window.CMA || {};
     }
     if (gen !== run.gen || mem.userId !== uid) { emit('status'); return; }   // cancelled while reading
     const ctx = { gen: gen, uid: uid, full: job.kind === 'full', today: deps.today(), notes: [], counts: { weighIns: null, energyDays: 0 }, energyUnavailable: null };
-    run.progress = { done: 0, total: (job.firstDay ? 1 : 0) + (job.prefs ? 3 : 0) + (job.bio ? 1 : 0) };
+    run.progress = { done: 0, total: (job.firstDay ? 1 : 0) + (job.prefs ? 3 : 0) + (job.bio ? (job.bio.all ? 2 : 1) : 0) };
     const t0 = deps.now();
     try {
       if (job.firstDay) await phaseFirstDay(ctx);

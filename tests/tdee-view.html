@@ -840,6 +840,28 @@
       await rendered(() => S.calls.setOverride.length === 2, 'cleared');
       deepEq(S.calls.setOverride[1], ['2026-09-20', null]);
     });
+    it('"Only trust completed days" on: the overview says how many recent logged days it ignores and links to the setting', async () => {
+      // live 2026-09-28: the setting was on with 52 logged days and nothing on the overview said what it cost
+      const days = person({ n: 90 });
+      days.forEach((d, i) => { d.complete = i % 5 === 0; });                    // 1 in 5 days marked complete
+      S.settings.trustCompleteOnly = false;
+      scenario(days);
+      await sub('overview');
+      await rendered(() => q('.cma-tdee-exp'), 'overview');
+      eq(q('.cma-tdee-trust'), null, 'no notice while the setting is off');
+      S.settings.trustCompleteOnly = true;
+      S.emit('data');
+      await rendered(() => q('.cma-tdee-trust'), 'trust notice');
+      // the last 4 weeks before today (28 days, today excluded): days index 61..88, complete when index % 5 === 0
+      const recent = days.filter(d => d.date >= addDaysIso(S.today, -28) && d.date < S.today);
+      const ignored = recent.filter(d => d.complete === false).length;
+      ok(new RegExp('Only completed days are trusted: ' + ignored + ' of the ' + recent.length + ' days you logged in the last 4 weeks are ignored').test(text(q('.cma-tdee-trust'))), text(q('.cma-tdee-trust')));
+      button('Change in settings', q('.cma-tdee-trust')).click();
+      await rendered(() => qa('.cma-tdee-seg').find(x => x.dataset.sub === 'settings').getAttribute('aria-pressed') === 'true', 'settings opened');
+      ok(q('#cma-tdee-s-trust') && q('#cma-tdee-s-trust').checked, 'the setting is shown ticked');
+      S.settings.trustCompleteOnly = false;
+      await sub('overview');
+    });
     it('partial-day prompt: "Fully logged?" with Exclude / "Yes, I ate little", in the overview and in the history row', async () => {
       const days = person({ n: 90 });
       const d = days[days.length - 4];
