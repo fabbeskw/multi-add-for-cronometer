@@ -1,0 +1,1347 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>unit</title>
+</head>
+<body>
+<pre id="results"></pre>
+<script src="lib.js"></script>
+<script src="../src/lib/parse.js"></script>
+<script src="../src/lib/units.js"></script>
+<script src="../src/lib/plan.js"></script>
+<script src="../src/lib/engine-rpc.js"></script>
+<script>
+(function () {
+  const T = CMA.test;
+  const { describe, it, ok, eq, deepEq, approx, throws } = T;
+
+  // ===========================================================================
+  // Fake CMA.rpc (spec-shaped values, SPEC §3.3 / §4) — no gwt-stream needed.
+  // ===========================================================================
+  const SERVING = 'com.cronometer.shared.entries.models.Serving/2553599101';
+  const DAY = 'com.cronometer.shared.entries.models.Day/782579793';
+  const FOOD = 'com.cronometer.shared.foods.models.Food/2097636843';
+  const FOODMEASURES = 'com.cronometer.shared.foods.models.FoodMeasures/2106205728';
+  const MEASURE = 'com.cronometer.shared.foods.models.Measure/1979099908';
+  const MTYPE = 'com.cronometer.shared.foods.models.Measure$Type/1';
+  const DAYINFO = 'com.cronometer.shared.entries.models.DayInfo/416556043';
+  const TYPES = { Weight: 0, Volume: 1, Atomic: 2, Recipe: 3 };
+
+  function measure(foodId, id, name, grams, type) {
+    // Measure/1979099908: [d a, z b, i foodId, z d, i measureId, o f, s name, o i, o type, d gramsPerUnit]
+    return { $t: MEASURE, f: [0, false, foodId, false, id, null, name, null, { $t: MTYPE, ordinal: TYPES[type] }, grams] };
+  }
+  function food(id, name, defaultMeasureId, measures, type) {
+    const f = new Array(20).fill(null);
+    f[0] = 0; f[1] = false; f[3] = 0; f[4] = name; f[5] = 0; f[6] = 0; f[7] = id; f[10] = 0;
+    f[11] = { $t: FOODMEASURES, f: [defaultMeasureId, measures] };
+    f[14] = false; f[15] = 'usda'; f[17] = []; f[18] = type || null; f[19] = 0;
+    return { $t: FOOD, f };
+  }
+  const DB = [
+    { id: 100, name: 'Chicken Breast', hitMeasureId: 1003, translationId: 0, m: [
+      measure(100, 1001, 'g', 1, 'Weight'), measure(100, 1002, 'oz', 28.35, 'Weight'), measure(100, 1003, 'breast', 174, 'Atomic')] },
+    { id: 101, name: 'Chicken Breast, Grilled', hitMeasureId: 1101, translationId: 0, m: [measure(101, 1101, 'g', 1, 'Weight')] },
+    { id: 200, name: 'Egg, Whole, Raw', hitMeasureId: 2001, translationId: 777, hitName: 'Eggs', m: [
+      measure(200, 2001, 'large', 50, 'Atomic'), measure(200, 2002, 'medium', 44, 'Atomic'), measure(200, 2003, 'extra large', 56, 'Atomic'),
+      measure(200, 2004, 'g', 1, 'Weight'), measure(200, 2005, 'cup', 243, 'Volume')] },
+    { id: 300, name: 'Rice, White, Cooked', hitMeasureId: 3001, translationId: 0, m: [
+      measure(300, 3001, 'cup', 158, 'Volume'), measure(300, 3002, 'g', 1, 'Weight')] },
+    { id: 400, name: 'Olive Oil', hitMeasureId: 4001, translationId: 0, m: [
+      measure(400, 4001, 'tbsp', 13.5, 'Volume'), measure(400, 4002, 'tsp', 4.5, 'Volume'), measure(400, 4003, 'g', 1, 'Weight')] },
+    { id: 500, name: 'Banana', hitMeasureId: 5001, translationId: 0, m: [
+      measure(500, 5001, 'medium', 118, 'Atomic'), measure(500, 5002, 'g', 1, 'Weight'), measure(500, 5003, 'cup, sliced', 150, 'Volume')] },
+    { id: 600, name: 'Milk, Whole', hitMeasureId: 6001, translationId: 0, m: [
+      measure(600, 6001, 'cup', 244, 'Volume'), measure(600, 6002, 'g', 1, 'Weight')] },
+    { id: 700, name: 'My Smoothie', hitMeasureId: 7001, translationId: 0, m: [
+      measure(700, 7001, 'serving', 350, 'Recipe')] },
+    { id: 800, name: 'Protein Powder', hitMeasureId: 8001, translationId: 0, m: [
+      measure(800, 8001, 'scoop', 30, 'Atomic')] },
+    { id: 900, name: 'Salmon, Atlantic', hitMeasureId: 9001, translationId: 0, m: [
+      measure(900, 9001, 'oz', 28.35, 'Weight'), measure(900, 9002, 'fillet', 170, 'Atomic')] },
+    // hit.measureId 0 (a custom food: rpc.mapHit maps a missing /food-search/string measureId to 0) and no f[0]:
+    // the plain 'g' would be the default — SPEC §5.3 no-unit rule
+    { id: 1000, name: 'Quest Snack', hitMeasureId: 0, defaultId: 0, translationId: 0, m: [
+      measure(1000, 10001, 'g', 1, 'Weight'), measure(1000, 10002, 'bar', 60, 'Atomic')] },
+    { id: 1100, name: 'Whey Isolate', hitMeasureId: 0, defaultId: 0, translationId: 0, m: [measure(1100, 11001, 'g', 1, 'Weight')] },
+    // hit unusable but FoodMeasures.f[0] names the 'bar' measure (the dialog's TCe default)
+    { id: 1200, name: 'Granola Crunch', hitMeasureId: 0, defaultId: 12002, translationId: 0, m: [
+      measure(1200, 12001, 'g', 1, 'Weight'), measure(1200, 12002, 'bar', 45, 'Atomic')] }
+  ];
+  const FOODS = {};
+  for (const d of DB) FOODS[d.id] = food(d.id, d.name, d.defaultId != null ? d.defaultId : d.hitMeasureId, d.m);
+
+  function makeFake() {
+    const fake = {
+      calls: [],            // {method, t, args}
+      failScript: {},       // method → [fn(callIndex) → error|null]
+      dayServings: [],      // Serving values returned by getDayInfo
+      dayInfoError: null,
+      nextId: 1
+    };
+    function rec(method, args) { fake.calls.push({ method, t: Date.now(), args }); }
+    function maybeFail(method) {
+      const q = fake.failScript[method];
+      if (q && q.length) { const e = q.shift(); if (e) throw e; }
+    }
+    fake.rpc = {
+      async searchFoods(session, query, opts) {
+        rec('searchFoods', [query, opts]); maybeFail('searchFoods');
+        const q = String(query).toLowerCase();
+        return DB.filter(d => (d.hitName || d.name).toLowerCase().indexOf(q.split(',')[0].split(' ')[0]) >= 0)
+          .map(d => ({ id: d.id, name: d.hitName || d.name, measureId: d.hitMeasureId, measureDisplayName: '',
+            score: 1, source: 'usda', type: 'Food', translationId: d.translationId, retired: false }));
+      },
+      async getFood(session, id) {
+        rec('getFood', [id]); maybeFail('getFood');
+        if (!FOODS[id]) throw new Error('no such food ' + id);
+        return FOODS[id];
+      },
+      measuresOf(f) {
+        const list = f.f[11].f[1];
+        return list.map(m => ({ id: m.f[4], name: m.f[6], grams: m.f[9], foodId: m.f[2],
+          type: ['Weight', 'Volume', 'Atomic', 'Recipe'][m.f[8].ordinal] }));
+      },
+      async getDayInfo(session, day) {
+        rec('getDayInfo', [day]); maybeFail('getDayInfo');
+        if (fake.dayInfoError) throw fake.dayInfoError;
+        const note = { $t: 'com.cronometer.shared.entries.models.Note/1', f: [null, 99] };
+        return { $t: DAYINFO, f: [true, { $t: DAY, f: [day.day, day.month, day.year] }, fake.dayServings.slice(), [note], false, ''] };
+      },
+      servingsOf(di) {
+        return [].concat(di.f[2] || [], di.f[3] || []).filter(e => e && e.$t === SERVING);
+      },
+      async updateDiaryAdd(session, serving) {
+        rec('updateDiaryAdd', [serving]); maybeFail('updateDiaryAdd');
+        const id = 'SID' + (fake.nextId++);
+        const s = { $t: SERVING, f: serving.f.slice() }; s.f[9] = id;
+        return { servingId: id, serving: s };
+      },
+      async removeServing(session, id) {
+        rec('removeServing', [id]); maybeFail('removeServing');
+        return true;
+      }
+    };
+    return fake;
+  }
+  function servingWithOrder(order) {
+    return { $t: SERVING, f: [{ $t: DAY, f: [4, 3, 2026] }, true, true, null, order, null, 0, 50, 464674, 'D80lp$', 1072101, 0, 0] };
+  }
+  const SESSION = { moduleBase: 'https://cronometer.com/cronometer/', permutation: 'P', policyHash: 'H', nonce: 'NONCE', userId: 1234567 };
+  const GROUPS = [
+    { id: 0, name: 'Uncategorized', enabled: true }, { id: 1, name: 'Breakfast', enabled: true },
+    { id: 2, name: 'Lunch', enabled: true }, { id: 3, name: 'Dinner', enabled: true },
+    { id: 4, name: 'Snacks', enabled: true }, { id: 5, name: 'Group 6', enabled: false },
+    { id: 6, name: 'Group 7', enabled: false }, { id: 7, name: 'Group 8', enabled: false }
+  ];
+  const DATE = { day: 4, month: 3, year: 2026 };
+  const FAST = { groups: GROUPS, defaultGroupId: 3, date: DATE, searchDelayMs: 30, retryMs: 40 };
+
+  // ===========================================================================
+  // §5 parser
+  // ===========================================================================
+  describe('parse.lines — SPEC §5 examples', () => {
+    const cases = [
+      ['200g chicken breast', 200, 'g', 'chicken breast'],
+      ['chicken breast 200 g', 200, 'g', 'chicken breast'],
+      ['chicken breast, 200g', 200, 'g', 'chicken breast'],
+      ['Chicken breast - 200 g', 200, 'g', 'Chicken breast'],
+      ['2 large eggs', 2, 'large', 'eggs'],
+      ['2 eggs', 2, null, 'eggs'],
+      ['eggs x2', 2, null, 'eggs'],
+      ['2x eggs', 2, null, 'eggs'],
+      ['x2 eggs', 2, null, 'eggs'],
+      ['eggs ×2', 2, null, 'eggs'],
+      ['1 1/2 cups rice, cooked', 1.5, 'cup', 'rice, cooked'],
+      ['½ cup oats', 0.5, 'cup', 'oats'],
+      ['1½ cups oats', 1.5, 'cup', 'oats'],
+      ['¼ cup almonds', 0.25, 'cup', 'almonds'],
+      ['¾ cup milk', 0.75, 'cup', 'milk'],
+      ['⅓ cup rice', 1 / 3, 'cup', 'rice'],
+      ['⅔ cup rice', 2 / 3, 'cup', 'rice'],
+      ['banana', null, null, 'banana'],
+      ['3 tbsp olive oil', 3, 'tbsp', 'olive oil'],
+      ['100 ml milk', 100, 'ml', 'milk'],
+      ['100ml milk', 100, 'ml', 'milk'],
+      ['1 slice bread', 1, 'slice', 'bread'],
+      ['0.5 kg potatoes', 500, 'g', 'potatoes'],
+      ['500 mg vitamin c', 0.5, 'g', 'vitamin c'],
+      ['1 l water', 1000, 'ml', 'water'],
+      ['2oz cheese', 2, 'oz', 'cheese'],
+      ['1 lb ground beef', 1, 'lb', 'ground beef'],
+      ['1.5 cups milk', 1.5, 'cup', 'milk'],
+      ['.5 cup milk', 0.5, 'cup', 'milk'],
+      ['1,5 cups milk', 1.5, 'cup', 'milk'],
+      ['rice, 1,5 cups', 1.5, 'cup', 'rice'],          // other comma is a list separator
+      ['cereal, milk, 1,5 cups', 1.5, 'cup', 'cereal, milk'],
+      ['1/2 cup oats', 0.5, 'cup', 'oats'],
+      ['oats 1/2 cup', 0.5, 'cup', 'oats'],
+      ['rice 1 1/2 cups', 1.5, 'cup', 'rice'],
+      ['chicken breast: 200 g', 200, 'g', 'chicken breast'],
+      ['chicken breast x 2', 2, null, 'chicken breast'],
+      ['2 tablespoons peanut butter', 2, 'tbsp', 'peanut butter'],
+      ['2 teaspoons sugar', 2, 'tsp', 'sugar'],
+      ['3 pieces sushi', 3, 'piece', 'sushi'],
+      ['2 pcs sushi', 2, 'piece', 'sushi'],
+      ['1 serving lasagna', 1, 'serving', 'lasagna'],
+      ['1 scoop whey', 1, 'scoop', 'whey'],
+      ['1 can tuna', 1, 'can', 'tuna'],
+      ['1 medium apple', 1, 'medium', 'apple'],
+      ['1 small apple', 1, 'small', 'apple'],
+      ['1 xl egg', 1, 'xl', 'egg'],
+      ['2 extra large eggs', 2, 'xl', 'eggs'],
+      ['2 fl oz whisky', 2, 'fl oz', 'whisky'],
+      ['2 fluid ounces whisky', 2, 'fl oz', 'whisky'],
+      ['2 cloves garlic', 2, 'clove', 'garlic'],
+      ['1 bottle beer', 1, 'bottle', 'beer'],
+      ['1 packet oatmeal', 1, 'packet', 'oatmeal'],
+      ['1 bar chocolate', 1, 'bar', 'chocolate'],
+      ['3 ea tortillas', 3, 'each', 'tortillas'],
+      ['2 units bread', 2, 'unit', 'bread'],
+      ['2 grams salt', 2, 'g', 'salt'],
+      ['2 gr salt', 2, 'g', 'salt'],
+      ['2 ounces cheese', 2, 'oz', 'cheese'],
+      ['2 lbs beef', 2, 'lb', 'beef'],
+      ['100 mL milk', 100, 'ml', 'milk'],
+      ['250 millilitres milk', 250, 'ml', 'milk'],
+      ['2 cupcakes', 2, null, 'cupcakes'],          // unknown token stays in the name (not 'cup')
+      ['2 tablets ibuprofen', 2, 'tablet', 'ibuprofen'],
+      ['omega 3 fatty acids', null, null, 'omega 3 fatty acids'], // bare number mid-line is not a qty
+      ['omega 3 500mg', 0.5, 'g', 'omega 3'],
+      ['chicken 200g cooked', 200, 'g', 'chicken cooked'],
+      ['banana 1', 1, null, 'banana'],
+      ['vitamin d3', null, null, 'vitamin d3'],
+      ['salmon 150g', 150, 'g', 'salmon'],
+      ['  Apple  ', null, null, 'Apple'],
+      ['2 whole eggs', 2, null, 'whole eggs']
+    ];
+    for (const [text, qty, unit, name] of cases) {
+      it(JSON.stringify(text), () => {
+        const items = CMA.parse.lines(text);
+        eq(items.length, 1, 'one item');
+        const r = items[0];
+        eq(r.name, name, 'name');
+        if (qty == null) eq(r.qty, null, 'qty'); else approx(r.qty, qty, 1e-9, 'qty');
+        eq(r.unit, unit, 'unit');
+        eq(r.raw, text, 'raw');
+        ok(!r.error, 'no error: ' + r.error);
+      });
+    }
+  });
+
+  describe('parse.lines — groups, tags, comments, errors', () => {
+    it('## Dinner group line switches the group and emits no item', () => {
+      const items = CMA.parse.lines('banana\n## Dinner\nsalmon 150g\n# Snacks\napple');
+      eq(items.length, 3);
+      eq(items[0].group, null);
+      eq(items[1].group, 'Dinner');
+      eq(items[1].name, 'salmon');
+      eq(items[2].group, 'Snacks');
+      deepEq(items.map(i => i.line), [1, 3, 5]);
+    });
+    it('@lunch tag at the end sets the line group only', () => {
+      const items = CMA.parse.lines('## Dinner\nsalmon 150g @lunch\nrice 1 cup');
+      eq(items[0].group, 'lunch');
+      eq(items[0].name, 'salmon');
+      eq(items[0].qty, 150);
+      eq(items[0].unit, 'g');
+      eq(items[1].group, 'Dinner');
+    });
+    it('@Breakfast tag at the start', () => {
+      const items = CMA.parse.lines('@Breakfast 2 eggs');
+      eq(items[0].group, 'Breakfast');
+      eq(items[0].name, 'eggs');
+      eq(items[0].qty, 2);
+    });
+    it('blank lines, bare # and // lines are ignored', () => {
+      const items = CMA.parse.lines('\n   \n#\n// note\nbanana\n');
+      eq(items.length, 1);
+      eq(items[0].name, 'banana');
+    });
+    it('CRLF input', () => {
+      const items = CMA.parse.lines('banana\r\n2 eggs\r\n');
+      eq(items.length, 2);
+      eq(items[1].qty, 2);
+    });
+    it('line with only a quantity → error', () => {
+      const items = CMA.parse.lines('200g');
+      eq(items.length, 1);
+      eq(items[0].error, 'no food name');
+    });
+    it('zero / division-by-zero quantities → error', () => {
+      eq(CMA.parse.lines('0 eggs')[0].error, 'invalid quantity');
+      eq(CMA.parse.lines('1/0 cup rice')[0].error, 'invalid quantity');
+    });
+    it('null / empty input → []', () => {
+      deepEq(CMA.parse.lines(null), []);
+      deepEq(CMA.parse.lines(''), []);
+    });
+    it('a `# note` after `## Dinner` is a comment: the group stays Dinner', () => {
+      const items = CMA.parse.lines('## Dinner\n# leftovers from yesterday\nsalmon 150g\n# a comment\nrice 1 cup');
+      eq(items.length, 2);
+      eq(items[0].group, 'Dinner'); eq(items[0].name, 'salmon');
+      eq(items[1].group, 'Dinner');
+      eq(items[0].groupFallback, undefined);
+    });
+    it('group-name-like `# Lunch` / `# Group 6` / `# Second breakfast` lines switch the group (with a fallback chain)', () => {
+      const items = CMA.parse.lines('# Lunch\nrice 1 cup\n# Group 6\nbanana\n# Second breakfast\napple\n# snacks\npear');
+      deepEq(items.map(i => i.group), ['Lunch', 'Group 6', 'Second breakfast', 'snacks']);
+      deepEq(items[3].groupFallback, ['Second breakfast', 'Group 6', 'Lunch']);
+      ok(CMA.parse.looksLikeGroupName('Lunch') && CMA.parse.looksLikeGroupName('Group 6') && CMA.parse.looksLikeGroupName('Second breakfast'));
+      ok(!CMA.parse.looksLikeGroupName('a comment') && !CMA.parse.looksLikeGroupName('leftovers from yesterday') && !CMA.parse.looksLikeGroupName('note: skip.'));
+      const tagged = CMA.parse.lines('## Dinner\nsalmon 150g @brunchx');
+      eq(tagged[0].group, 'brunchx'); deepEq(tagged[0].groupFallback, ['Dinner']);
+    });
+    it('`Breakfast:` / `Lunch:` header lines switch the group and emit no item', () => {
+      const items = CMA.parse.lines('Breakfast:\n2 eggs\nLunch:\nrice 200g');
+      eq(items.length, 2);
+      eq(items[0].name, 'eggs'); eq(items[0].group, 'Breakfast');
+      eq(items[1].name, 'rice'); eq(items[1].group, 'Lunch');
+      // a header-looking bare word without the colon is still an item (plan.build flags it)
+      const bare = CMA.parse.lines('Breakfast\n2 eggs');
+      eq(bare.length, 2); eq(bare[0].name, 'Breakfast'); eq(bare[0].qty, null);
+      eq(CMA.parse.lines('chicken breast: 200 g')[0].qty, 200, 'a quantity line ending in a unit is not a header');
+    });
+    it('multipliers: N x <qty><unit> and <qty><unit> x N', () => {
+      const one = (t) => CMA.parse.lines(t)[0];
+      let r = one('2 x 100g yoghurt'); eq(r.qty, 200); eq(r.unit, 'g'); eq(r.name, 'yoghurt');
+      r = one('3 x 30g protein bar'); eq(r.qty, 90); eq(r.unit, 'g'); eq(r.name, 'protein bar');
+      r = one('2 × 100 g yoghurt'); eq(r.qty, 200); eq(r.unit, 'g'); eq(r.name, 'yoghurt');
+      r = one('yoghurt 2 x 100g'); eq(r.qty, 200); eq(r.unit, 'g'); eq(r.name, 'yoghurt');
+      r = one('Vitamin C 500mg x2'); approx(r.qty, 1, 1e-9); eq(r.unit, 'g'); eq(r.name, 'Vitamin C');
+      r = one('protein bar 60g 2x'); eq(r.qty, 120); eq(r.unit, 'g'); eq(r.name, 'protein bar');
+      r = one('2 x eggs'); eq(r.qty, 2); eq(r.unit, null); eq(r.name, 'eggs');
+    });
+    it('two foods on one line are split into two items with the same line number', () => {
+      const items = CMA.parse.lines('oats 40 g, milk 200 ml\nchicken breast 200g; rice 150g');
+      eq(items.length, 4);
+      deepEq(items.map(i => [i.name, i.qty, i.unit, i.line, i.part]), [['oats', 40, 'g', 1, 0], ['milk', 200, 'ml', 1, 1], ['chicken breast', 200, 'g', 2, 0], ['rice', 150, 'g', 2, 1]]);
+      eq(items[0].raw, 'oats 40 g, milk 200 ml');
+      // single-food lines with commas stay whole
+      let r = CMA.parse.lines('rice, 1,5 cups'); eq(r.length, 1); eq(r[0].qty, 1.5); eq(r[0].name, 'rice');
+      r = CMA.parse.lines('1 1/2 cups rice, cooked'); eq(r.length, 1); eq(r[0].name, 'rice, cooked');
+      r = CMA.parse.lines('cereal, milk, 1,5 cups'); eq(r.length, 1);
+      deepEq(CMA.parse.splitSegments('oats 40,5 g, milk 200 ml'), ['oats 40.5 g', 'milk 200 ml']);
+    });
+    it('percentages and digit-led product names are not quantities', () => {
+      const one = (t) => CMA.parse.lines(t)[0];
+      let r = one('2% milk 1 cup'); eq(r.qty, 1); eq(r.unit, 'cup'); eq(r.name, '2% milk');
+      r = one('1% milk, 250 ml'); eq(r.qty, 250); eq(r.unit, 'ml'); eq(r.name, '1% milk');
+      r = one('0% greek yogurt 150g'); eq(r.qty, 150); eq(r.unit, 'g'); eq(r.name, '0% greek yogurt'); ok(!r.error, r.error);
+      r = one('7up 330 ml'); eq(r.qty, 330); eq(r.unit, 'ml'); eq(r.name, '7up');
+      r = one('12% cream'); eq(r.qty, null); eq(r.name, '12% cream');
+    });
+    it('normalizeUnit synonyms and unknowns', () => {
+      eq(CMA.parse.normalizeUnit('Grams'), 'g');
+      eq(CMA.parse.normalizeUnit('tbsp.'), 'tbsp');
+      eq(CMA.parse.normalizeUnit('fl. oz'), 'fl oz');
+      eq(CMA.parse.normalizeUnit('Tablespoons'), 'tbsp');
+      eq(CMA.parse.normalizeUnit('eggs'), null);
+      eq(CMA.parse.normalizeUnit(''), null);
+      eq(CMA.parse.normalizeUnit(null), null);
+    });
+  });
+
+  // ===========================================================================
+  // §5.3 units.pickMeasure
+  // ===========================================================================
+  const M = {
+    chicken: [{ id: 1001, name: 'g', grams: 1, type: 'Weight', foodId: 100 }, { id: 1002, name: 'oz', grams: 28.35, type: 'Weight', foodId: 100 },
+      { id: 1003, name: 'breast', grams: 174, type: 'Atomic', foodId: 100 }],
+    noGram: [{ id: 1, name: 'breast', grams: 174, type: 'Atomic', foodId: 1 }, { id: 2, name: 'oz', grams: 28.35, type: 0, foodId: 1 }],
+    onlyAtomic: [{ id: 8001, name: 'scoop', grams: 30, type: 'Atomic', foodId: 800 }],
+    rice: [{ id: 3001, name: 'cup', grams: 158, type: 'Volume', foodId: 300 }, { id: 3002, name: 'g', grams: 1, type: 'Weight', foodId: 300 }],
+    banana: [{ id: 5001, name: 'medium', grams: 118, type: 2, foodId: 500 }, { id: 5002, name: 'g', grams: 1, type: 0, foodId: 500 },
+      { id: 5003, name: 'cup, sliced', grams: 150, type: 1, foodId: 500 }],
+    oil: [{ id: 4001, name: 'tbsp', grams: 13.5, type: 'Volume', foodId: 400 }, { id: 4002, name: 'tsp', grams: 4.5, type: 'Volume', foodId: 400 },
+      { id: 4003, name: 'g', grams: 1, type: 'Weight', foodId: 400 }],
+    eggs: [{ id: 2001, name: 'large', grams: 50, type: 'Atomic', foodId: 200 }, { id: 2002, name: 'medium', grams: 44, type: 'Atomic', foodId: 200 },
+      { id: 2003, name: 'extra large', grams: 56, type: 'Atomic', foodId: 200 }, { id: 2004, name: 'g', grams: 1, type: 'Weight', foodId: 200 }],
+    recipe: [{ id: 7001, name: 'serving', grams: 350, type: 'Recipe', foodId: 700 }, { id: 7002, name: 'g', grams: 1, type: 'Weight', foodId: 700 }],
+    fullRecipe: [{ id: 7101, name: 'full recipe', grams: 0, type: 'Weight', foodId: 710 }],
+    volOnlyOdd: [{ id: 1, name: 'ladle', grams: 120, type: 'Volume', foodId: 1 }, { id: 2, name: 'g', grams: 1, type: 'Weight', foodId: 1 }]
+  };
+  describe('units.pickMeasure — no unit typed: the default-measure rule (SPEC §5.3)', () => {
+    const bar = [{ id: 1, name: 'g', grams: 1, type: 'Weight', foodId: 9 }, { id: 2, name: 'bar', grams: 60, type: 'Atomic', foodId: 9 }];
+    const gOnly = [{ id: 1, name: 'g', grams: 1, type: 'Weight', foodId: 9 }];
+    const gramsNamed = [{ id: 1, name: 'grams', grams: 1, type: 'Weight', foodId: 9 }, { id: 2, name: 'serving (2 tbsp)', grams: 30, type: 'Volume', foodId: 9 }];
+    const gAndOz = [{ id: 1, name: 'g', grams: 1, type: 'Weight', foodId: 9 }, { id: 2, name: 'oz', grams: 28.35, type: 'Weight', foodId: 9 }];
+    const mlOnly = [{ id: 1, name: 'ml', grams: 1.03, type: 'Volume', foodId: 9 }];
+    const gAndMl = [{ id: 1, name: 'g', grams: 1, type: 'Weight', foodId: 9 }, { id: 2, name: 'milliliter', grams: 1.03, type: 'Volume', foodId: 9 }];
+    const NEEDS = "no unit given and this food's default unit is grams \u2014 pick a unit";
+    it('a) the hit measure, when in the list, is used as before: quantity or 1', () => {
+      const p = CMA.units.pickMeasure(bar, null, null, { hitMeasureId: 2 });
+      eq(p.measure.id, 2); eq(p.quantity, 1); eq(p.grams, 60); eq(p.note, null);
+      const q = CMA.units.pickMeasure(bar, null, 3, { hitMeasureId: 2 });
+      eq(q.measure.id, 2); eq(q.quantity, 3); eq(q.grams, 180);
+    });
+    it('a) a hit measure that is itself the plain g is no exception: the rule looks at the resolved default', () => {
+      const p = CMA.units.pickMeasure(bar, null, 1, { hitMeasureId: 1 });
+      eq(p.error, NEEDS); eq(p.measure.id, 2);
+    });
+    it('b) a food with exactly one (non-gram) measure uses it', () => {
+      const p = CMA.units.pickMeasure(M.onlyAtomic, null, null, { hitMeasureId: 0 });
+      eq(p.measure.id, 8001); eq(p.quantity, 1); eq(p.grams, 30);
+      const r = CMA.units.pickMeasure([M.recipe[0]], null, 2, {});
+      eq(r.measure.id, 7001); eq(r.quantity, 2); eq(r.grams, 2, 'Recipe: the wire amount is the count');
+    });
+    it("c) a g default with other measures → needs-choice with error text and the 'bar' suggestion in pick.measure / pick.suggested", () => {
+      for (const q of [null, 1, 2]) {
+        const p = CMA.units.pickMeasure(bar, null, q, { hitMeasureId: 0 });
+        eq(p.error, NEEDS, 'qty ' + q); eq(p.measure.id, 2); eq(p.suggested.name, 'bar'); eq(p.quantity, undefined, 'an error pick carries no quantity');
+      }
+      // the panel's Use button path: withMeasure keeps the typed quantity as a count of the suggestion
+      const w = CMA.units.withMeasure(bar, 2, 2);
+      eq(w.measure.id, 2); eq(w.quantity, 2); eq(w.grams, 120);
+    });
+    it('c) the suggestion prefers the f[0] default, then a count word, then Atomic/Recipe, then the first non-g/ml measure', () => {
+      eq(CMA.units.suggestMeasure(bar).id, 2, 'bar: count word + Atomic');
+      eq(CMA.units.suggestMeasure(gramsNamed).id, 2, "'serving (2 tbsp)' by its count word although it is a Volume measure");
+      eq(CMA.units.suggestMeasure(gAndOz).id, 2, 'oz: the only alternative');
+      const eggsFlagged = M.eggs.map(m => Object.assign({}, m, { isDefault: m.id === 2002 }));
+      eq(CMA.units.suggestMeasure(eggsFlagged).id, 2002, 'the flagged default beats the first count word');
+      const atomicNoWord = [{ id: 1, name: 'g', grams: 1, type: 'Weight' }, { id: 2, name: 'cup', grams: 240, type: 'Volume' }, { id: 3, name: 'breast', grams: 174, type: 'Atomic' }];
+      eq(CMA.units.suggestMeasure(atomicNoWord).id, 3, 'an Atomic measure beats a volume unit');
+      eq(CMA.units.suggestMeasure(gOnly), null); eq(CMA.units.suggestMeasure(gAndMl), null);
+      const p = CMA.units.pickMeasure(gAndOz, null, null, {});
+      eq(p.error, NEEDS); eq(p.measure.id, 2);
+    });
+    it('d) only gram/ml measures: 100 g like the app without a quantity, N g with one, both noted', () => {
+      const a = CMA.units.pickMeasure(gOnly, null, null, { hitMeasureId: 0 });
+      eq(a.measure.id, 1); eq(a.quantity, 100); eq(a.grams, 100); eq(a.note, 'no unit given; using 100 g like the app');
+      const b = CMA.units.pickMeasure(gOnly, null, 1, { hitMeasureId: 0 });
+      eq(b.measure.id, 1); eq(b.quantity, 1); eq(b.grams, 1); eq(b.note, 'no unit given; 1 taken as grams');
+      const c = CMA.units.pickMeasure(gOnly, null, 45.5, {});
+      eq(c.quantity, 45.5); eq(c.note, 'no unit given; 45.5 taken as grams');
+      const d = CMA.units.pickMeasure(mlOnly, null, null, {});
+      eq(d.measure.id, 1); eq(d.quantity, 100); approx(d.grams, 103, 1e-9); eq(d.note, 'no unit given; using 100 ml like the app');
+      const e = CMA.units.pickMeasure(mlOnly, null, 250, {});
+      eq(e.quantity, 250); eq(e.note, 'no unit given; 250 taken as millilitres');
+      const f = CMA.units.pickMeasure(gAndMl, null, null, {});
+      eq(f.measure.id, 1); eq(f.quantity, 100, "'g' + 'milliliter' are both bare units: 100 g");
+    });
+    it("d) the grams are taken through the measure's own grams per unit: a 'g'-named measure of 100 g still sends 100 g / N g", () => {
+      const g100 = [{ id: 1, name: 'g', grams: 100, type: 'Weight', foodId: 9 }];
+      const a = CMA.units.pickMeasure(g100, null, null, {});
+      eq(a.measure.id, 1); eq(a.quantity, 1); eq(a.grams, 100, 'the note says 100 g, so 100 g is sent (not 100 x 100 g)');
+      eq(a.note, 'no unit given; using 100 g like the app');
+      const b = CMA.units.pickMeasure(g100, null, 35, {});
+      eq(b.quantity, 0.35); approx(b.grams, 35, 1e-9); eq(b.note, 'no unit given; 35 taken as grams');
+      // the getFood fallback: the search hit's own '100 g - 100g' measure (name 'g', grams 100, amount 100)
+      const hit = CMA.plan.measuresFromHit({ id: 7, measureId: 9, measureDisplayName: '100 g - 100g' });
+      eq(hit.length, 1); eq(hit[0].name, 'g'); eq(hit[0].grams, 100);
+      const c = CMA.units.pickMeasure(hit, null, null, { hitMeasureId: 9 });
+      eq(c.measure.id, 9); eq(c.quantity, 1); eq(c.grams, 100); eq(c.note, 'no unit given; using 100 g like the app');
+      const d = CMA.units.pickMeasure(hit, null, 50, { hitMeasureId: 9 });
+      eq(d.quantity, 0.5); eq(d.grams, 50); eq(d.note, 'no unit given; 50 taken as grams');
+      // an ml default converts through its ml value when it has one
+      const ml5 = [{ id: 1, name: 'ml', grams: 5.15, type: 'Volume', foodId: 9, ml: 5 }];
+      const e = CMA.units.pickMeasure(ml5, null, 250, {});
+      eq(e.quantity, 50); approx(e.grams, 257.5, 1e-9); eq(e.note, 'no unit given; 250 taken as millilitres');
+      // without an ml value the measure's shown amount is its ml per unit, never its grams (the density)
+      const ml100 = [{ id: 1, name: 'ml', grams: 103, type: 'Volume', foodId: 9, amount: 100 }];
+      const f = CMA.units.pickMeasure(ml100, null, null, {});
+      eq(f.quantity, 1); approx(f.grams, 103, 1e-9); eq(f.note, 'no unit given; using 100 ml like the app');
+    });
+    it("c) an 'ml' default with a 'cup' alternative → needs-choice naming millilitres, suggesting the cup", () => {
+      const mlPlus = [{ id: 1, name: 'ml', grams: 1.03, type: 'Volume', foodId: 9 }, { id: 2, name: 'cup', grams: 247, type: 'Volume', foodId: 9 }];
+      for (const q of [null, 2]) {
+        const p = CMA.units.pickMeasure(mlPlus, null, q, {});
+        eq(p.error, "no unit given and this food's default unit is millilitres \u2014 pick a unit", 'qty ' + q);
+        eq(p.measure.id, 2); eq(p.suggested.name, 'cup'); eq(p.quantity, undefined, 'an error pick carries no quantity');
+      }
+    });
+    it('hidden measures (Measure.f[3], dropped by the dialog) are never a default fallback nor a suggestion', () => {
+      const hiddenFirst = [{ id: 1, name: 'scoop', grams: 30, type: 'Atomic', foodId: 9, hidden: true },
+        { id: 2, name: 'serving', grams: 45, type: 'Atomic', foodId: 9, hidden: false }, { id: 3, name: 'g', grams: 1, type: 'Weight', foodId: 9 }];
+      eq(CMA.units.defaultMeasure(hiddenFirst, {}).id, 3, 'the plain g, not the hidden first measure');
+      eq(CMA.units.suggestMeasure(hiddenFirst).id, 2, "'serving', not the hidden 'scoop'");
+      const p = CMA.units.pickMeasure(hiddenFirst, null, 2, {});
+      eq(p.error, NEEDS); eq(p.measure.id, 2);
+      // an explicit hit / default id naming a hidden measure does not resolve (TCe walks the visible list only)
+      eq(CMA.units.defaultMeasure(hiddenFirst, { hitMeasureId: 1 }).id, 3);
+      eq(CMA.units.defaultMeasure(hiddenFirst, { defaultMeasureId: 1 }).id, 3);
+      const flaggedHidden = hiddenFirst.map(m => Object.assign({}, m, { isDefault: m.id === 1 }));
+      eq(CMA.units.defaultMeasure(flaggedHidden, {}).id, 3, 'an isDefault flag on a hidden measure is ignored');
+      eq(CMA.units.suggestMeasure(flaggedHidden).id, 2);
+      // no plain g: the first VISIBLE measure
+      const noG = hiddenFirst.slice(0, 2);
+      eq(CMA.units.defaultMeasure(noG, {}).id, 2);
+      const q = CMA.units.pickMeasure(noG, null, null, {});
+      eq(q.measure.id, 2); eq(q.quantity, 1);
+      deepEq(CMA.units.visibleMeasures(hiddenFirst).map(m => m.id), [2, 3]);
+      // an explicit typed unit may still name a hidden measure (only the no-unit fallbacks skip them)
+      eq(CMA.units.pickMeasure(hiddenFirst, 'scoop', 1, {}).measure.id, 1);
+      // every measure hidden: fall back to the whole list instead of 'food has no measures'
+      const allHidden = [{ id: 1, name: 'scoop', grams: 30, type: 'Atomic', foodId: 9, hidden: true }];
+      eq(CMA.units.defaultMeasure(allHidden, {}).id, 1);
+      const h = CMA.units.pickMeasure(allHidden, null, 2, {});
+      eq(h.measure.id, 1); eq(h.quantity, 2);
+    });
+    it('isGramOrMlUnit recognises the bare unit names only', () => {
+      const u = CMA.units.isGramOrMlUnit;
+      for (const n of ['g', 'gram', 'grams', 'g (1 g)', 'ml', 'milliliter', 'millilitre', 'mL']) ok(u({ name: n, grams: 1 }), n);
+      for (const n of ['oz', 'cup', 'bar', 'large', 'serving', 'full recipe', 'gummy', 'glass', '']) ok(!u({ name: n, grams: 1 }), n);
+      ok(!u(null));
+    });
+    it('a typed unit is unaffected by the rule', () => {
+      eq(CMA.units.pickMeasure(bar, 'g', 50, {}).measure.id, 1); eq(CMA.units.pickMeasure(bar, 'g', 50, {}).grams, 50);
+      eq(CMA.units.pickMeasure(bar, 'bar', 2, {}).measure.id, 2);
+      eq(CMA.units.pickMeasure(gOnly, 'oz', 1, {}).grams, 28.3495);
+    });
+  });
+  describe('units.pickMeasure — SPEC §5.3', () => {
+    it('no unit, no qty → default measure (hit.measureId), quantity 1', () => {
+      const p = CMA.units.pickMeasure(M.chicken, null, null, { hitMeasureId: 1003 });
+      eq(p.measure.id, 1003); eq(p.quantity, 1); eq(p.grams, 174); eq(p.note, null);
+    });
+    it('no unit, no qty, hit absent → the food default (f[0], TCe), else the plain "g" → needs-choice with a suggestion, else first', () => {
+      // CHANGED with the no-unit rule (was: 'g' 1001 wins over defaultMeasureId; the dialog's TCe reads FoodMeasures.f[0]:
+      // `d=b.p.a==f.e`). chicken: hit absent, f[0] = 1002 'oz' → the dialog starts on oz, amount 1
+      const p = CMA.units.pickMeasure(M.chicken, null, null, { hitMeasureId: 9999, defaultMeasureId: 1002 });
+      eq(p.measure.id, 1002); eq(p.quantity, 1); eq(p.note, null);
+      // the same default through rpc.measuresOf's isDefault flag
+      const flagged = M.chicken.map(m => Object.assign({}, m, { isDefault: m.id === 1003 }));
+      eq(CMA.units.pickMeasure(flagged, null, 2, {}).measure.id, 1003);
+      eq(CMA.units.defaultMeasure(flagged, { hitMeasureId: 1002 }).id, 1002, 'a resolvable hit still comes first');
+      // no hit, no f[0]: the plain 'g' is the default → NOT logged as 1 g: needs-choice suggesting 'breast'
+      const c = CMA.units.pickMeasure(M.chicken, null, null, {});
+      eq(c.error, "no unit given and this food's default unit is grams \u2014 pick a unit");
+      eq(c.measure.id, 1003); eq(c.suggested.id, 1003);
+      eq(CMA.units.defaultMeasure(M.chicken, {}).id, 1001, 'defaultMeasure itself still resolves to the g measure');
+      // no 'g' measure: the explicit default id is honoured, else the first measure
+      eq(CMA.units.pickMeasure(M.noGram, null, null, { defaultMeasureId: 2 }).measure.id, 2);
+      eq(CMA.units.pickMeasure(M.noGram, null, null, {}).measure.id, 1);
+      // 'g' must be the plain one: amount 1, 1 g per unit, named exactly 'g'
+      const odd = [{ id: 1, name: 'breast', grams: 174, type: 'Atomic', foodId: 1 }, { id: 2, name: 'g', grams: 100, type: 'Weight', foodId: 1 }, { id: 3, name: 'g', grams: 1, type: 'Weight', foodId: 1, amount: 100 }];
+      eq(CMA.units.defaultMeasure(odd, {}).id, 1);
+      eq(CMA.units.gramMeasure(M.eggs).id, 2004);
+    });
+    it('convertQuantity: a typed quantity follows the user into a hand-picked measure only when the conversion is safe', () => {
+      const cq = CMA.units.convertQuantity;
+      deepEq(cq(150, 'g', M.fullRecipe[0]), null, 'grams never become a count of the weightless full recipe');
+      deepEq(cq(150, 'g', M.recipe[0]), null, 'nor of a Recipe measure');
+      const oz = cq(150, 'g', { id: 1, name: 'oz', grams: 28.35, type: 'Weight' });
+      approx(oz.quantity, 150 / 28.35, 1e-6); ok(/150 g = 5.291 × oz/.test(oz.note), oz.note);
+      eq(cq(150, 'g', { id: 1, name: 'g', grams: 1, type: 'Weight' }).quantity, 150, 'same unit: unchanged');
+      const cup = cq(1, 'cup', { id: 1, name: 'ladle', grams: 120, type: 'Volume', ml: 120 });
+      eq(cup.quantity, 2); ok(/1 cup = 2 × ladle/.test(cup.note), cup.note);
+      eq(cq(3, 'tbsp', { id: 1, name: 'cup', grams: 240, type: 'Volume' }).quantity, 0.1875, 'volume name without an ml value converts through the known unit');
+      deepEq(cq(1, 'cup', { id: 1, name: 'bowl', grams: 245, type: 'Volume' }), null, 'an unknown volume measure without ml cannot be converted');
+      deepEq(cq(2, 'cup', { id: 1, name: 'large', grams: 50, type: 'Atomic' }), null);
+      eq(cq(2, 'slice', { id: 1, name: 'slice (1 oz)', grams: 28, type: 'Atomic' }).quantity, 2, 'a word unit the measure name contains keeps the count');
+      deepEq(cq(2, 'slice', { id: 1, name: 'cup', grams: 240, type: 'Volume' }), null);
+      deepEq(cq(0, 'g', { id: 1, name: 'g', grams: 1 }), null); deepEq(cq(1, null, { id: 1, name: 'g', grams: 1 }), null);
+    });
+    it('no unit, qty → default measure with that qty', () => {
+      const p = CMA.units.pickMeasure(M.chicken, null, 2, { hitMeasureId: 1003 });
+      eq(p.measure.id, 1003); eq(p.quantity, 2); eq(p.grams, 348);
+    });
+    it('g with a g measure present', () => {
+      const p = CMA.units.pickMeasure(M.chicken, 'g', 200, { hitMeasureId: 1003 });
+      eq(p.measure.id, 1001); eq(p.quantity, 200); eq(p.grams, 200); eq(p.note, null);
+    });
+    it('g via synonym and attached-case ("grams")', () => {
+      eq(CMA.units.pickMeasure(M.chicken, 'grams', 50, {}).measure.id, 1001);
+    });
+    it('g with no g measure → Weight measure, quantity = grams/measure.grams, note', () => {
+      const p = CMA.units.pickMeasure(M.noGram, 'g', 56.7, { hitMeasureId: 1 });
+      eq(p.measure.id, 2); approx(p.quantity, 2, 1e-6); approx(p.grams, 56.7, 1e-6); ok(/shown as oz/.test(p.note), p.note);
+    });
+    it('g with only an Atomic measure → never fails: default measure with grams/measure.grams', () => {
+      const p = CMA.units.pickMeasure(M.onlyAtomic, 'g', 60, { hitMeasureId: 8001 });
+      eq(p.measure.id, 8001); approx(p.quantity, 2, 1e-6); approx(p.grams, 60, 1e-6); ok(/shown as scoop/.test(p.note));
+    });
+    it('oz → same-named measure when present (identical grams), else g', () => {
+      const a = CMA.units.pickMeasure(M.chicken, 'oz', 2, {});
+      eq(a.measure.id, 1002); eq(a.quantity, 2); approx(a.grams, 56.7, 1e-6);
+      const b = CMA.units.pickMeasure(M.rice, 'oz', 2, {});
+      eq(b.measure.id, 3002); approx(b.quantity, 56.699, 1e-6); approx(b.grams, 56.699, 1e-6); eq(b.note, 'shown as g');
+    });
+    it('lb → g measure with 453.592 factor', () => {
+      const p = CMA.units.pickMeasure(M.rice, 'lb', 1, {});
+      eq(p.measure.id, 3002); approx(p.quantity, 453.592, 1e-6); approx(p.grams, 453.592, 1e-6);
+    });
+    it('kg/mg accepted directly too', () => {
+      approx(CMA.units.pickMeasure(M.rice, 'kg', 0.5, {}).grams, 500, 1e-6);
+      approx(CMA.units.pickMeasure(M.rice, 'mg', 500, {}).grams, 0.5, 1e-6);
+    });
+    it('cups with a cup measure', () => {
+      const p = CMA.units.pickMeasure(M.rice, 'cup', 1.5, {});
+      eq(p.measure.id, 3001); eq(p.quantity, 1.5); eq(p.grams, 237); eq(p.note, null);
+    });
+    it('cup matches "cup, sliced" (prefix)', () => {
+      const p = CMA.units.pickMeasure(M.banana, 'cup', 2, {});
+      eq(p.measure.id, 5003); eq(p.quantity, 2); eq(p.grams, 300);
+    });
+    it('tbsp with a tbsp measure; tsp → tbsp conversion when only tbsp exists', () => {
+      const a = CMA.units.pickMeasure(M.oil, 'tbsp', 3, {});
+      eq(a.measure.id, 4001); eq(a.quantity, 3); eq(a.grams, 40.5);
+      const b = CMA.units.pickMeasure(M.rice, 'tbsp', 4, {}); // rice has cup only → 4×15/240 = 0.25 cup
+      eq(b.measure.id, 3001); approx(b.quantity, 0.25, 1e-6); approx(b.grams, 39.5, 1e-6); eq(b.note, 'converted to cup');
+    });
+    it('ml → cup conversion (240 ml per cup); fl oz → cup (29.57)', () => {
+      const a = CMA.units.pickMeasure(M.rice, 'ml', 120, {});
+      eq(a.measure.id, 3001); approx(a.quantity, 0.5, 1e-6); approx(a.grams, 79, 1e-6);
+      const b = CMA.units.pickMeasure(M.oil, 'fl oz', 1, {}); // → tbsp: 29.57/15
+      eq(b.measure.id, 4001); approx(b.quantity, 29.57 / 15, 1e-6);
+    });
+    it('l → ml → cup conversion', () => {
+      const p = CMA.units.pickMeasure(M.rice, 'l', 0.24, {});
+      eq(p.measure.id, 3001); approx(p.quantity, 1, 1e-6);
+    });
+    it('volume unit with no convertible measure → {error: unit not available}', () => {
+      const p = CMA.units.pickMeasure(M.chicken, 'cup', 1, {});
+      eq(p.error, 'unit not available');
+      const q = CMA.units.pickMeasure(M.volOnlyOdd, 'cup', 1, {});
+      eq(q.error, 'unit not available'); eq(q.measure.id, 1);
+    });
+    it('large / medium / xl word units: equals, then startsWith, then contains', () => {
+      eq(CMA.units.pickMeasure(M.eggs, 'large', 2, {}).measure.id, 2001);
+      eq(CMA.units.pickMeasure(M.eggs, 'medium', 1, {}).measure.id, 2002);
+      eq(CMA.units.pickMeasure(M.eggs, 'xl', 1, {}).measure.id, 2003);
+      const p = CMA.units.pickMeasure(M.eggs, 'large', 2, {});
+      eq(p.quantity, 2); eq(p.grams, 100);
+    });
+    it('word unit contained in a longer measure name', () => {
+      const ms = [{ id: 1, name: 'slice (1 oz)', grams: 28, type: 'Atomic', foodId: 1 }, { id: 2, name: 'thin slice', grams: 10, type: 'Atomic', foodId: 1 }];
+      eq(CMA.units.pickMeasure(ms, 'slice', 1, {}).measure.id, 1);
+      const ms2 = [{ id: 3, name: 'g', grams: 1, type: 'Weight', foodId: 1 }, { id: 4, name: 'thin slice', grams: 10, type: 'Atomic', foodId: 1 }];
+      eq(CMA.units.pickMeasure(ms2, 'slice', 1, {}).measure.id, 4);
+    });
+    it('unknown word unit → error', () => {
+      const p = CMA.units.pickMeasure(M.chicken, 'slice', 1, {});
+      ok(p.error && /slice/.test(p.error), JSON.stringify(p));
+      const q = CMA.units.pickMeasure(M.chicken, 'wibble', 1, {});
+      ok(q.error, 'unknown token errors');
+    });
+    it('Recipe type: grams = quantity', () => {
+      const p = CMA.units.pickMeasure(M.recipe, 'serving', 2, {});
+      eq(p.measure.id, 7001); eq(p.quantity, 2); eq(p.grams, 2);
+      const q = CMA.units.pickMeasure(M.recipe, null, 3, { hitMeasureId: 7001 });
+      eq(q.grams, 3);
+    });
+    it("'full recipe' Weight measure with grams 0: grams = quantity", () => {
+      const p = CMA.units.pickMeasure(M.fullRecipe, null, 0.5, {});
+      eq(p.measure.id, 7101); eq(p.grams, 0.5);
+    });
+    it('mass unit on a recipe-only food: error, or a count when the Recipe measure knows its grams', () => {
+      const p = CMA.units.pickMeasure(M.fullRecipe, 'g', 150, {});
+      eq(p.error, 'no weight measure for this recipe'); eq(p.unit, 'g');
+      const only = [{ id: 7001, name: 'serving', grams: 350, type: 'Recipe', foodId: 700 }];
+      const q = CMA.units.pickMeasure(only, 'g', 175, {});
+      eq(q.measure.id, 7001); approx(q.quantity, 0.5, 1e-9); eq(q.grams, 0.5, 'Recipe: the wire amount is the count'); ok(/converted to 0.5/.test(q.note), q.note);
+    });
+    it('grams are the raw quantity × Measure.k product (no rounding, as Nqj)', () => {
+      const ms = [{ id: 1, name: 'oz', grams: 28.349523125, type: 'Weight', foodId: 1 }];
+      eq(CMA.units.pickMeasure(ms, 'oz', 1, {}).grams, 28.349523125);
+      eq(CMA.units.gramsFor({ grams: 0.1, type: 'Weight' }, 3), 3 * 0.1);
+    });
+    it('type given as ordinal / enum value is understood', () => {
+      eq(CMA.units.typeName({ type: 3 }), 'Recipe');
+      eq(CMA.units.typeName({ type: { $t: 'x', ordinal: 1 } }), 'Volume');
+      eq(CMA.units.typeName({ type: 'weight' }), 'Weight');
+    });
+    it('empty measures / invalid qty → error', () => {
+      eq(CMA.units.pickMeasure([], 'g', 1, {}).error, 'food has no measures');
+      eq(CMA.units.pickMeasure(M.rice, 'g', -1, {}).error, 'invalid quantity');
+    });
+    it('withMeasure (panel override) and formatQuantity', () => {
+      const p = CMA.units.withMeasure(M.rice, 3001, 0.5);
+      eq(p.measure.id, 3001); eq(p.grams, 79);
+      eq(CMA.units.withMeasure(M.rice, 42, 1).error, 'measure not found');
+      eq(CMA.units.formatQuantity(1.5), '1.5');
+      eq(CMA.units.formatQuantity(2), '2');
+      eq(CMA.units.formatQuantity(1 / 3), '0.333');
+    });
+    it('toGrams / toMl', () => {
+      approx(CMA.units.toGrams(2, 'oz'), 56.699, 1e-6);
+      approx(CMA.units.toGrams(1, 'lb'), 453.592, 1e-6);
+      eq(CMA.units.toGrams(1, 'cup'), null);
+      eq(CMA.units.toMl(1, 'cup'), 240);
+      eq(CMA.units.toMl(1, 'tbsp'), 15);
+      eq(CMA.units.toMl(1, 'tsp'), 5);
+      approx(CMA.units.toMl(1, 'fl oz'), 29.57, 1e-9);
+      eq(CMA.units.toMl(1, 'g'), null);
+    });
+  });
+
+  // ===========================================================================
+  // CMA.errors
+  // ===========================================================================
+  describe('CMA.errors', () => {
+    it('classes extend Error and carry .kind', () => {
+      const s = new CMA.errors.Session('x');
+      ok(s instanceof Error); eq(s.kind, 'session'); eq(s.message, 'x');
+      eq(new CMA.errors.Throttled().kind, 'throttled');
+      eq(new CMA.errors.Network().kind, 'network');
+      ok(CMA.errors.isNetwork(new CMA.errors.Network()));
+      ok(CMA.errors.isNetwork(new TypeError('Failed to fetch')));
+      ok(!CMA.errors.isNetwork(new Error('ErrorEntryChangeResult: bad')));
+      ok(!CMA.errors.isNetwork(new CMA.errors.Session()));
+    });
+  });
+
+  // ===========================================================================
+  // §6 plan
+  // ===========================================================================
+  describe('plan helpers', () => {
+    it('defaultGroupId by hour', () => {
+      const d = h => { const x = new Date(2026, 2, 4, h, 0, 0); return x; };
+      eq(CMA.plan.defaultGroupId(GROUPS, d(4)), 1);
+      eq(CMA.plan.defaultGroupId(GROUPS, d(9)), 1);
+      eq(CMA.plan.defaultGroupId(GROUPS, d(10)), 2);
+      eq(CMA.plan.defaultGroupId(GROUPS, d(13)), 2);
+      eq(CMA.plan.defaultGroupId(GROUPS, d(14)), 3);
+      eq(CMA.plan.defaultGroupId(GROUPS, d(20)), 3);
+      eq(CMA.plan.defaultGroupId(GROUPS, d(21)), 4);
+      eq(CMA.plan.defaultGroupId(GROUPS, d(2)), 4);
+    });
+    it('defaultGroupId falls back to the first enabled group', () => {
+      const g = [{ id: 0, name: 'Uncategorized', enabled: false }, { id: 2, name: 'Lunch', enabled: true }, { id: 3, name: 'Dinner', enabled: false }];
+      eq(CMA.plan.defaultGroupId(g, new Date(2026, 2, 4, 19)), 2);
+      eq(CMA.plan.defaultGroupId(null, new Date(2026, 2, 4, 19)), 3);
+    });
+    it('resolveGroup: case-insensitive prefix over enabled groups', () => {
+      eq(CMA.plan.resolveGroup('lunch', GROUPS).id, 2);
+      eq(CMA.plan.resolveGroup('Din', GROUPS).id, 3);
+      eq(CMA.plan.resolveGroup('SNACK', GROUPS).id, 4);
+      eq(CMA.plan.resolveGroup('Group 6', GROUPS), null); // disabled
+      eq(CMA.plan.resolveGroup('zzz', GROUPS), null);
+      eq(CMA.plan.resolveGroup(null, GROUPS), null);
+    });
+    it('chooseHitIndex: exact case-insensitive name, else first', () => {
+      const hits = [{ name: 'Chicken Breast, Grilled' }, { name: 'chicken breast' }];
+      eq(CMA.plan.chooseHitIndex(hits, 'Chicken Breast'), 1);
+      eq(CMA.plan.chooseHitIndex(hits, 'chicken'), 0);
+      eq(CMA.plan.chooseHitIndex([], 'x'), -1);
+    });
+    it('translationIdFor mirrors zte: zero only when the hit\'s Translation is the food\'s own en name', () => {
+      const LANG = 'com.cronometer.shared.user.models.Language/1257207975';
+      const TR = 'com.cronometer.shared.foods.models.Translation/4034452093';
+      const lang = code => ({ $t: LANG, f: [code, '', '', ''] });
+      const tr = (code, name, id) => ({ $t: TR, f: [lang(code), name, id] });
+      const withTr = (list) => { const f = food(200, 'Egg, Whole, Raw', 2001, DB[2].m); f.f[17] = list; return f; };
+      // the primary (en) Translation: the UI resets translationId to 0 regardless of what the hit was called
+      eq(CMA.plan.translationIdFor({ translationId: 777, name: 'Eggs' }, withTr([tr('en', 'Egg, Whole, Raw', 777), tr('fr', 'Oeuf', 778)])), 0);
+      // another Translation of the same food: kept
+      eq(CMA.plan.translationIdFor({ translationId: 778, name: 'Oeuf' }, withTr([tr('en', 'Egg, Whole, Raw', 777), tr('fr', 'Oeuf', 778)])), 778);
+      // no en Translation: the first one is the food's own name (Kjj fallback)
+      eq(CMA.plan.translationIdFor({ translationId: 778, name: 'Oeuf' }, withTr([tr('fr', 'Oeuf', 778), tr('de', 'Ei', 779)])), 0);
+      eq(CMA.plan.translationIdFor({ translationId: 779, name: 'Ei' }, withTr([tr('fr', 'Oeuf', 778), tr('de', 'Ei', 779)])), 779);
+      // id not in the list (or no list at all): kept, as zte keeps a.U when $jj finds nothing
+      eq(CMA.plan.translationIdFor({ translationId: 777, name: 'Egg, Whole, Raw' }, FOODS[200]), 777);
+      eq(CMA.plan.translationIdFor({ translationId: 0, name: 'Eggs' }, FOODS[200]), 0);
+      eq(CMA.plan.translationIdFor({ translationId: 5, name: 'x' }, null), 5);
+      // Food.f is not a display name; the locale Translation is
+      eq(CMA.plan.foodDisplayName(withTr([tr('fr', 'Oeuf', 778), tr('en', 'Egg, Whole, Raw', 777)])), 'Egg, Whole, Raw');
+      eq(CMA.plan.foodDisplayName(FOODS[200]), null);
+    });
+    it('maxPositions: order>>16 === groupId, max of order & 0xFFFF', () => {
+      const max = CMA.plan.maxPositions([servingWithOrder((1 << 16) | 2), servingWithOrder((1 << 16) | 7), servingWithOrder((3 << 16) | 4), servingWithOrder(5)]);
+      deepEq(max, { 1: 7, 3: 4, 0: 5 });
+    });
+  });
+
+  describe('plan.build against the fake rpc', () => {
+    it('search → hit → getFood → measures → grams → group → positions', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      fake.dayServings = [servingWithOrder((3 << 16) | 5), servingWithOrder((3 << 16) | 2), servingWithOrder((1 << 16) | 9)];
+      const items = CMA.parse.lines('200g chicken breast\n2 large eggs @breakfast\n1 1/2 cups rice, cooked\n3 tbsp olive oil\nbanana\n## Lunch\n1 cup chicken breast\nnothing here\n2 scoops protein powder');
+      const events = [];
+      const plan = await CMA.plan.build(SESSION, items, FAST, e => events.push(e.phase));
+      eq(plan.rows.length, 8);
+      eq(plan.positionsSource, 'getDayInfo');
+      const r = plan.rows;
+
+      // row 0: chicken breast 200 g → exact hit 'Chicken Breast', g measure
+      eq(r[0].hit.id, 100); eq(r[0].status, 'ready');
+      eq(r[0].pick.measure.id, 1001); eq(r[0].pick.quantity, 200); eq(r[0].pick.grams, 200);
+      eq(r[0].groupId, 3); eq(r[0].position, 6); eq(r[0].order, (3 << 16) | 6);
+      eq(r[0].translationId, 0);
+      eq(r[0].measures.length, 3);
+
+      // row 1: eggs @breakfast → large, translationId 777 (hit name 'Eggs' !== food name)
+      eq(r[1].hit.id, 200); eq(r[1].pick.measure.id, 2001); eq(r[1].pick.quantity, 2); eq(r[1].pick.grams, 100);
+      eq(r[1].groupId, 1); eq(r[1].position, 10); eq(r[1].translationId, 777);
+
+      // row 2: rice 1.5 cup
+      eq(r[2].hit.id, 300); eq(r[2].pick.measure.id, 3001); eq(r[2].pick.quantity, 1.5); eq(r[2].pick.grams, 237);
+      eq(r[2].groupId, 3); eq(r[2].position, 7);
+
+      // row 3: olive oil 3 tbsp
+      eq(r[3].pick.measure.id, 4001); eq(r[3].pick.grams, 40.5); eq(r[3].position, 8);
+
+      // row 4: banana (no qty/unit) → hit measure 'medium' ×1
+      eq(r[4].pick.measure.id, 5001); eq(r[4].pick.quantity, 1); eq(r[4].pick.grams, 118); eq(r[4].position, 9);
+
+      // row 5: 1 cup chicken breast → needs-choice (no volume measure), group Lunch (empty → pos 1)
+      eq(r[5].status, 'needs-choice'); eq(r[5].pick.error, 'unit not available');
+      eq(r[5].groupId, 2); eq(r[5].position, 1); eq(r[5].order, (2 << 16) | 1);
+
+      // row 6: no results
+      eq(r[6].status, 'error'); eq(r[6].message, 'no results'); eq(r[6].groupId, 2);
+
+      // row 7: 2 scoops protein powder
+      eq(r[7].status, 'ready'); eq(r[7].pick.measure.id, 8001); eq(r[7].pick.grams, 60); eq(r[7].position, 2);
+
+      // rpc call pattern: one search per item, one getFood per chosen hit, one getDayInfo at the end
+      const methods = fake.calls.map(c => c.method);
+      eq(methods.filter(m => m === 'searchFoods').length, 8);
+      eq(methods.filter(m => m === 'getFood').length, 7);
+      eq(methods.filter(m => m === 'getDayInfo').length, 1);
+      eq(methods[methods.length - 1], 'getDayInfo');
+      deepEq(fake.calls.find(c => c.method === 'getDayInfo').args[0], DATE);
+      ok(events.indexOf('search') >= 0 && events.indexOf('positions') >= 0 && events[events.length - 1] === 'done', events.join(','));
+    });
+
+    it('searches are sequential with the configured spacing', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      const items = CMA.parse.lines('banana\nbanana\nbanana');
+      await CMA.plan.build(SESSION, items, Object.assign({}, FAST, { searchDelayMs: 60 }));
+      const s = fake.calls.filter(c => c.method === 'searchFoods');
+      eq(s.length, 3);
+      ok(s[1].t - s[0].t >= 55, 'gap1 ' + (s[1].t - s[0].t));
+      ok(s[2].t - s[1].t >= 55, 'gap2 ' + (s[2].t - s[1].t));
+    });
+
+    it('one retry on a network error during search; //EX-style errors are not retried', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      fake.failScript.searchFoods = [new CMA.errors.Network('offline')];
+      let plan = await CMA.plan.build(SESSION, CMA.parse.lines('banana'), FAST);
+      eq(plan.rows[0].status, 'ready');
+      eq(fake.calls.filter(c => c.method === 'searchFoods').length, 2);
+
+      const fake2 = makeFake();
+      CMA.rpc = fake2.rpc;
+      fake2.failScript.searchFoods = [new Error('HTTP 500')];
+      plan = await CMA.plan.build(SESSION, CMA.parse.lines('banana'), FAST);
+      eq(plan.rows[0].status, 'error');
+      ok(/search failed: HTTP 500/.test(plan.rows[0].message), plan.rows[0].message);
+      eq(fake2.calls.filter(c => c.method === 'searchFoods').length, 1);
+    });
+
+    it('two network errors in a row → row error, only one retry', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      fake.failScript.searchFoods = [new CMA.errors.Network('a'), new CMA.errors.Network('b')];
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('banana'), FAST);
+      eq(plan.rows[0].status, 'error');
+      eq(fake.calls.filter(c => c.method === 'searchFoods').length, 2);
+    });
+
+    it('session error stops the build; remaining rows are not searched', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      fake.failScript.searchFoods = [null, new CMA.errors.Session('authentication failed')];
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('banana\nbanana\nbanana'), FAST);
+      eq(plan.stopped, 'session');
+      eq(plan.rows[0].status, 'ready');
+      eq(plan.rows[1].status, 'error'); eq(plan.rows[1].message, 'session expired');
+      eq(plan.rows[2].status, 'error');
+      eq(fake.calls.filter(c => c.method === 'searchFoods').length, 2);
+      eq(fake.calls.filter(c => c.method === 'getDayInfo').length, 0);
+      eq(plan.positionsSource, 'fallback');
+      eq(plan.rows[0].position, 1000);
+    });
+
+    it('getDayInfo failure → fallback positions 1000+rowIndex and a warning', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      fake.dayInfoError = new Error('boom');
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('banana\n2 large eggs'), FAST);
+      eq(plan.positionsSource, 'fallback');
+      eq(plan.rows[0].position, 1000); eq(plan.rows[1].position, 1001);
+      eq(plan.rows[1].order, (3 << 16) | 1001);
+      ok(plan.warnings.length === 1 && /boom/.test(plan.warnings[0]), plan.warnings.join());
+    });
+
+    it('unknown @group falls back to the default group with a note; parser errors become row errors', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('banana @brunchx\n200g'), FAST);
+      eq(plan.rows[0].groupId, 3);
+      ok(/brunchx/.test(plan.rows[0].message), plan.rows[0].message);
+      eq(plan.rows[0].status, 'ready');
+      eq(plan.rows[1].status, 'error'); eq(plan.rows[1].message, 'no food name');
+      eq(fake.calls.filter(c => c.method === 'searchFoods').length, 1);
+    });
+
+    it('default group from the time-of-day rule when opts.defaultGroupId is absent', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('banana'), { groups: GROUPS, date: DATE, searchDelayMs: 1, now: new Date(2026, 2, 4, 8) });
+      eq(plan.defaultGroupId, 1);
+      eq(plan.rows[0].groupId, 1);
+    });
+
+    it('rechoose: user picks another hit → new food, measures, pick', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('50g chicken'), FAST);
+      const row = plan.rows[0];
+      eq(row.hits.length, 2);
+      eq(row.hit.id, 100);
+      await CMA.plan.rechoose(SESSION, row, 1, { retryMs: 10 });
+      eq(row.hit.id, 101); eq(row.food.f[7], 101);
+      eq(row.pick.measure.id, 1101); eq(row.pick.grams, 50); eq(row.status, 'ready');
+      eq(row.position, 6 - 5, 'position kept'); // group Dinner empty in this fake → 1
+      await throws(() => CMA.plan.rechoose(SESSION, row, 9), /invalid hit index/);
+    });
+
+    it('repick: user picks a measure / qty in the panel', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('1 cup chicken breast'), FAST);
+      const row = plan.rows[0];
+      eq(row.status, 'needs-choice');
+      CMA.plan.repick(row, 1003, 2);
+      eq(row.status, 'ready'); eq(row.pick.measure.id, 1003); eq(row.pick.grams, 348);
+      CMA.plan.repick(row, 424242);
+      eq(row.status, 'needs-choice');
+    });
+
+    it('reposition: moving a row to another group gives it the next free position there', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      fake.dayServings = [servingWithOrder((2 << 16) | 3)];
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('banana\nbanana @lunch'), FAST);
+      eq(plan.rows[1].position, 4);
+      CMA.plan.reposition(plan, plan.rows[0], 2);
+      eq(plan.rows[0].groupId, 2); eq(plan.rows[0].position, 5); eq(plan.rows[0].order, (2 << 16) | 5);
+    });
+
+    it('servingFor builds the §4 Serving value exactly', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('2 large eggs @breakfast'), FAST);
+      const row = plan.rows[0];
+      const s = CMA.plan.servingFor(row, DATE);
+      deepEq(s, { $t: SERVING, f: [{ $t: DAY, f: [4, 3, 2026] }, true, true, null, (1 << 16) | 1, null, 0, 100, 200, 0, 2001, 0, 777] });
+      const bad = { status: 'needs-choice', pick: { error: 'x' } };
+      let threw = false; try { CMA.plan.servingFor(bad, DATE); } catch (e) { threw = true; }
+      ok(threw, 'not-ready row throws');
+    });
+
+    it('a bare group name is flagged as a header instead of being searched', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('Breakfast\n2 large eggs\nlunch\nbanana'), FAST);
+      eq(plan.rows[0].status, 'error'); ok(/looks like a group header — write '## Breakfast'/.test(plan.rows[0].message), plan.rows[0].message);
+      eq(plan.rows[2].status, 'error'); ok(/## Lunch/.test(plan.rows[2].message));
+      eq(fake.calls.filter(c => c.method === 'searchFoods').length, 2, 'headers are not searched');
+      eq(plan.rows[1].status, 'ready');
+    });
+    it('a `# note` header falls back to the previous real header group', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('## Lunch\n# Second helping\nbanana'), FAST);
+      eq(plan.rows[0].groupId, 2); ok(/Second helping.*previous header/.test(plan.rows[0].message), plan.rows[0].message);
+    });
+    it('getFood decode/rpc failure falls back to the measure the search hit describes', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      const orig = fake.rpc.searchFoods;
+      fake.rpc.searchFoods = async (s, q, o) => (await orig(s, q, o)).map(h => Object.assign({}, h, { measureDisplayName: h.id === 200 ? '1 large - 50g' : '1 g - 1g' }));
+      const decode = new Error('cannot decode the getFood response: GWT: unknown type signature x/1'); decode.kind = 'decode';
+      fake.failScript.getFood = [decode, decode];
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('2 eggs\n100g chicken breast'), FAST);
+      const r = plan.rows[0];
+      eq(r.status, 'ready'); eq(r.food, null);
+      eq(r.measures.length, 1); eq(r.measures[0].id, 2001); eq(r.measures[0].name, 'large'); eq(r.measures[0].grams, 50); eq(r.measures[0].fromHit, true);
+      eq(r.pick.quantity, 2); eq(r.pick.grams, 100); eq(r.translationId, 777);
+      ok(/measures from the search hit only/.test(r.message), r.message);
+      const c = plan.rows[1];
+      eq(c.status, 'ready'); eq(c.pick.quantity, 100); eq(c.pick.grams, 100);
+      // a session error is never masked
+      const fake2 = makeFake(); CMA.rpc = fake2.rpc;
+      fake2.failScript.getFood = [new CMA.errors.Session('x')];
+      const plan2 = await CMA.plan.build(SESSION, CMA.parse.lines('2 eggs'), FAST);
+      eq(plan2.rows[0].status, 'error'); eq(plan2.stopped, 'session');
+      // no parsable measureDisplayName → the error stands
+      const fake3 = makeFake(); CMA.rpc = fake3.rpc;
+      fake3.failScript.getFood = [decode];
+      const plan3 = await CMA.plan.build(SESSION, CMA.parse.lines('2 eggs'), FAST);
+      eq(plan3.rows[0].status, 'error'); ok(/getFood failed/.test(plan3.rows[0].message));
+      deepEq(CMA.plan.measuresFromHit({ id: 7, measureId: 9, measureDisplayName: '1/2 cup - 120g' }).map(m => [m.name, m.amount, m.grams]), [['cup', 0.5, 120]]);
+      deepEq(CMA.plan.measuresFromHit({ id: 7, measureId: 9, measureDisplayName: 'x' }), []);
+    });
+    it('no unit + unusable hit measure: a gram default asks for a unit (suggesting the count measure) instead of logging grams; f[0] resolves it; g-only foods take 100 g / N g', async () => {
+      // the live case of 2026-09-28: '1 <food>' with hit.measureId not in the list was planned as 1 g
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('1 quest snack\nquest snack\nwhey isolate\n30 whey isolate\n1 granola crunch\n2 granola crunch'), FAST);
+      const r = plan.rows;
+      eq(r[0].hit.measureId, 0); ok(r[0].item.unit == null, 'no unit parsed'); eq(r[0].item.qty, 1);
+      eq(r[0].status, 'needs-choice'); ok(/no unit given and this food's default unit is grams/.test(r[0].message), r[0].message);
+      eq(r[0].pick.measure.id, 10002); eq(r[0].pick.suggested.name, 'bar');
+      // the panel's Use button: repick with the typed quantity → 1 bar, 60 g
+      CMA.plan.repick(r[0], r[0].pick.suggested.id, 1);
+      eq(r[0].status, 'ready'); eq(r[0].pick.measure.id, 10002); eq(r[0].pick.quantity, 1); eq(r[0].pick.grams, 60);
+      eq(r[1].status, 'needs-choice'); eq(r[1].pick.measure.id, 10002);
+      eq(r[2].status, 'ready'); eq(r[2].pick.measure.id, 11001); eq(r[2].pick.quantity, 100); eq(r[2].pick.grams, 100);
+      ok(/no unit given; using 100 g like the app/.test(r[2].message), r[2].message);
+      eq(r[3].status, 'ready'); eq(r[3].pick.quantity, 30); eq(r[3].pick.grams, 30); ok(/no unit given; 30 taken as grams/.test(r[3].message), r[3].message);
+      // FoodMeasures.f[0] = the 'bar' measure: the dialog's own default, used directly
+      eq(r[4].status, 'ready'); eq(r[4].pick.measure.id, 12002); eq(r[4].pick.quantity, 1); eq(r[4].pick.grams, 45); eq(r[4].message, '');
+      eq(r[5].pick.quantity, 2); eq(r[5].pick.grams, 90);
+      eq(CMA.plan.foodDefaultMeasureId(r[4].food), 12002); eq(CMA.plan.foodDefaultMeasureId(r[0].food), null, 'f[0] = 0 is no default');
+      // servingFor sends the suggestion's id and grams once accepted
+      const sv = CMA.plan.servingFor(r[0], DATE);
+      eq(sv.f[10], 10002); eq(sv.f[7], 60); eq(sv.f[8], 1000);
+    });
+    it('unverified mode (UI engine): rows stay ready without a session or when search/getFood fail', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      const noSession = { moduleBase: null, permutation: null, policyHash: null, nonce: null, userId: null };
+      const plan = await CMA.plan.build(noSession, CMA.parse.lines('200g chicken breast\n2 large eggs @lunch\nbanana'), Object.assign({}, FAST, { unverified: true, positions: false }));
+      eq(fake.calls.length, 0, 'nothing is searched without a userId');
+      const r = plan.rows;
+      deepEq(r.map(x => x.status), ['ready', 'ready', 'ready']);
+      ok(r.every(x => x.unverified), 'all unverified');
+      eq(r[0].hit, null); eq(r[0].pick.measure.name, 'g'); eq(r[0].pick.quantity, 200); eq(r[0].pick.grams, null);
+      eq(r[1].pick.measure.name, 'large'); eq(r[1].pick.quantity, 2); eq(r[1].groupId, 2);
+      eq(r[2].pick.measure, null); eq(r[2].pick.quantity, 1);
+      ok(/unverified \(UI engine\): no session captured/.test(r[0].message), r[0].message);
+      let threw = false; try { CMA.plan.servingFor(r[0], DATE); } catch (e) { threw = true; } ok(threw, 'unverified rows can never become a Serving');
+      // with a session, getFood failures degrade instead of erroring; the real hit is kept for the name
+      const fake2 = makeFake(); CMA.rpc = fake2.rpc;
+      fake2.failScript.getFood = [new Error('boom'), new Error('boom')];
+      const plan2 = await CMA.plan.build(SESSION, CMA.parse.lines('2 large eggs'), Object.assign({}, FAST, { unverified: true }));
+      eq(plan2.rows[0].status, 'ready'); eq(plan2.rows[0].unverified, true); eq(plan2.rows[0].hit.id, 200); ok(/getFood failed/.test(plan2.rows[0].message), plan2.rows[0].message);
+      // and the RPC engine never sends them
+      const res = await CMA.engineRpc.run(SESSION, plan2, ENGINE_OPTS);
+      eq(res.added.length, 0); eq(res.skipped.length, 1); ok(/unverified/.test(res.skipped[0].reason));
+    });
+    it('build without positions (opts.positions=false) leaves order null', async () => {
+      const fake = makeFake();
+      CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('banana'), Object.assign({}, FAST, { positions: false }));
+      eq(plan.rows[0].order, null);
+      eq(fake.calls.filter(c => c.method === 'getDayInfo').length, 0);
+      await CMA.plan.assignPositions(SESSION, plan);
+      eq(plan.rows[0].order, (3 << 16) | 1);
+    });
+  });
+
+  // ===========================================================================
+  // §6.4 engineRpc.run / undo, §6.5 refreshDiary
+  // ===========================================================================
+  const ENGINE_OPTS = { delayMs: 40, retryMs: 50, throttleMs: 60, refresh: false };
+  async function buildPlan(fake, text) {
+    CMA.rpc = fake.rpc;
+    return CMA.plan.build(SESSION, CMA.parse.lines(text), FAST);
+  }
+
+  describe('engineRpc.run against the fake rpc', () => {
+    it('adds ready rows sequentially, in order, with the delay between rows; skips non-ready rows', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, '200g chicken breast\n2 large eggs\nnothing here\n1 cup chicken breast\nbanana');
+      fake.calls.length = 0;
+      const events = [];
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS, e => events.push(e));
+      eq(res.added.length, 3);
+      eq(res.failed.length, 0);
+      eq(res.skipped.length, 2);
+      eq(res.stopped, null);
+      deepEq(res.added.map(a => a.row.index), [0, 1, 4]);
+      deepEq(res.added.map(a => a.servingId), ['SID1', 'SID2', 'SID3']);
+      const calls = fake.calls.filter(c => c.method === 'updateDiaryAdd');
+      eq(calls.length, 3);
+      deepEq(calls.map(c => c.args[0].f[8]), [100, 200, 500], 'foodIds in row order');
+      ok(calls[1].t - calls[0].t >= 35, 'delay 1: ' + (calls[1].t - calls[0].t));
+      ok(calls[2].t - calls[1].t >= 35, 'delay 2: ' + (calls[2].t - calls[1].t));
+      // the serving sent is exactly the §4 shape
+      const s = calls[0].args[0];
+      eq(s.$t, SERVING); eq(s.f.length, 13); eq(s.f[0].$t, DAY); deepEq(s.f[0].f, [4, 3, 2026]);
+      eq(s.f[1], true); eq(s.f[2], true); eq(s.f[3], null); eq(s.f[4], (3 << 16) | 1); eq(s.f[5], null); eq(s.f[6], 0);
+      eq(s.f[7], 200); eq(s.f[8], 100); eq(s.f[9], 0); eq(s.f[10], 1001); eq(s.f[11], 0); eq(s.f[12], 0);
+      // lastBatch
+      ok(res.lastBatch && res.lastBatch.servingIds.length === 3);
+      deepEq(CMA.engineRpc.lastBatch.servingIds, ['SID1', 'SID2', 'SID3']);
+      deepEq(CMA.engineRpc.lastBatch.date, DATE);
+      ok(typeof CMA.engineRpc.lastBatch.at === 'number');
+      ok(events.some(e => e.phase === 'row' && e.ok === true) && events[events.length - 1].phase === 'done');
+      ok(plan.rows[0].result && plan.rows[0].result.ok && plan.rows[0].result.servingId === 'SID1');
+    });
+
+    it('retries once after a network error, then succeeds', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana');
+      fake.calls.length = 0;
+      fake.failScript.updateDiaryAdd = [new CMA.errors.Network('Failed to fetch')];
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      eq(res.added.length, 2); eq(res.failed.length, 0);
+      const calls = fake.calls.filter(c => c.method === 'updateDiaryAdd');
+      eq(calls.length, 3);
+      ok(calls[1].t - calls[0].t >= 45, 'retry wait ' + (calls[1].t - calls[0].t));
+      eq(calls[0].args[0].f[4], calls[1].args[0].f[4], 'same serving retried');
+    });
+
+    it('a plain TypeError("Failed to fetch") also counts as a network error', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana');
+      fake.failScript.updateDiaryAdd = [new TypeError('Failed to fetch')];
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      eq(res.added.length, 1);
+      eq(fake.calls.filter(c => c.method === 'updateDiaryAdd').length, 2);
+    });
+
+    it('two consecutive network errors → row failed after exactly one retry; batch continues', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana');
+      fake.calls.length = 0;
+      fake.failScript.updateDiaryAdd = [new CMA.errors.Network('a'), new CMA.errors.Network('b')];
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      eq(res.failed.length, 1); eq(res.failed[0].row.index, 0); eq(res.failed[0].kind, 'network');
+      eq(res.added.length, 1); eq(res.added[0].row.index, 1);
+      eq(fake.calls.filter(c => c.method === 'updateDiaryAdd').length, 3);
+    });
+
+    it('a timed-out updateDiary is NOT retried (it may have reached the server): the row fails with kind timeout', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana');
+      fake.calls.length = 0;
+      fake.failScript.updateDiaryAdd = [new CMA.errors.Network('request timed out after 30000 ms', { timeout: true })];
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      eq(res.failed.length, 1); eq(res.failed[0].kind, 'timeout'); ok(/check the diary before re-adding/.test(res.failed[0].error), res.failed[0].error);
+      eq(res.added.length, 1);
+      eq(fake.calls.filter(c => c.method === 'updateDiaryAdd').length, 2, 'no retry of the timed-out add');
+      eq(res.lastBatch.userId, 1234567, 'the batch carries the userId it belongs to');
+    });
+    it('an undecodable //OK (rpc error with .applied) counts as added without an id and stops the batch', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana\nbanana');
+      fake.calls.length = 0;
+      const dec = new Error('cannot decode the updateDiary response: GWT: unknown type signature x/1'); dec.kind = 'decode'; dec.applied = true;
+      fake.failScript.updateDiaryAdd = [null, dec];
+      const events = [];
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS, e => events.push(e));
+      eq(res.stopped, 'decode');
+      eq(res.added.length, 2, 'the row whose reply was unreadable is ADDED, not failed');
+      eq(res.added[1].servingId, null); ok(/added; the reply could not be read/.test(res.added[1].message), res.added[1].message);
+      ok(plan.rows[1].result && plan.rows[1].result.ok === true && plan.rows[1].result.servingId === null);
+      eq(res.failed.length, 0);
+      eq(res.skipped.length, 1); ok(/not attempted \(decode\)/.test(res.skipped[0].reason), res.skipped[0].reason);
+      eq(fake.calls.filter(c => c.method === 'updateDiaryAdd').length, 2, 'never re-sent, and the third row was not sent');
+      deepEq(res.lastBatch.servingIds, ['SID1'], 'only the readable id can be undone');
+      ok(events.some(e => e.phase === 'row' && e.ok === true && e.servingId === null && /could not be read/.test(e.message)), 'progress carries the note');
+      // an undecodable //OK with no readable row at all leaves no batch behind
+      const fake2 = makeFake();
+      const plan2 = await buildPlan(fake2, 'banana');
+      fake2.failScript.updateDiaryAdd = [dec];
+      const res2 = await CMA.engineRpc.run(SESSION, plan2, ENGINE_OPTS);
+      eq(res2.added.length, 1); eq(res2.lastBatch, null);
+    });
+    it('sessionProvider: a nonce rotated mid-batch is used from the next row on (run, undo and plan.build)', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana');
+      const seen = [];
+      const orig = fake.rpc.updateDiaryAdd;
+      fake.rpc.updateDiaryAdd = async (session, serving) => { seen.push(session.nonce); return orig(session, serving); };
+      let nonce = 'FIRST';
+      const res = await CMA.engineRpc.run({ moduleBase: 'x', nonce: 'SNAPSHOT', userId: 1 }, plan, Object.assign({}, ENGINE_OPTS, { sessionProvider: () => { const s = Object.assign({}, SESSION, { nonce }); nonce = 'ROTATED'; return s; } }));
+      eq(res.added.length, 2);
+      deepEq(seen, ['FIRST', 'ROTATED']);
+      eq(res.lastBatch.userId, 1, 'the batch owner comes from the snapshot the panel passed');
+      const removed = [];
+      const origRm = fake.rpc.removeServing;
+      fake.rpc.removeServing = async (session, id) => { removed.push(session.nonce); return origRm(session, id); };
+      await CMA.engineRpc.undo(SESSION, res.lastBatch, { delayMs: 1, refresh: false, sessionProvider: () => Object.assign({}, SESSION, { nonce: 'UNDO' }) });
+      deepEq(removed, ['UNDO', 'UNDO']);
+      // a provider that throws or returns nothing falls back to the snapshot
+      const res2 = await CMA.engineRpc.run(SESSION, await buildPlan(fake, 'banana'), Object.assign({}, ENGINE_OPTS, { sessionProvider: () => { throw new Error('x'); } }));
+      eq(res2.added.length, 1); eq(seen[seen.length - 1], 'NONCE');
+      const searched = [];
+      const origSearch = fake.rpc.searchFoods;
+      fake.rpc.searchFoods = async (session, q, o) => { searched.push(session.nonce); return origSearch(session, q, o); };
+      await CMA.plan.build(SESSION, CMA.parse.lines('banana'), Object.assign({}, FAST, { sessionProvider: () => Object.assign({}, SESSION, { nonce: 'BUILD' }) }));
+      deepEq(searched, ['BUILD']);
+    });
+    it('//EX-style errors (plain Error) are NOT retried; batch continues', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana');
+      fake.calls.length = 0;
+      fake.failScript.updateDiaryAdd = [new Error('ErrorEntryChangeResult: Food not found')];
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      eq(res.failed.length, 1); ok(/Food not found/.test(res.failed[0].error));
+      eq(res.added.length, 1);
+      eq(fake.calls.filter(c => c.method === 'updateDiaryAdd').length, 2);
+    });
+
+    it('stops on CMA.errors.Session; later rows are not attempted', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana\nbanana');
+      fake.calls.length = 0;
+      fake.failScript.updateDiaryAdd = [null, new CMA.errors.Session('authentication failed')];
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      eq(res.stopped, 'session');
+      eq(res.added.length, 1);
+      eq(res.failed.length, 1); eq(res.failed[0].kind, 'session');
+      eq(res.skipped.length, 1); ok(/session/.test(res.skipped[0].reason));
+      eq(fake.calls.filter(c => c.method === 'updateDiaryAdd').length, 2);
+      deepEq(res.lastBatch.servingIds, ['SID1']);
+    });
+
+    it('throttled: backs off, retries only when status 429', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana');
+      fake.calls.length = 0;
+      fake.failScript.updateDiaryAdd = [new CMA.errors.Throttled('429', { status: 429 }), null, new CMA.errors.Throttled('version changed')];
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      eq(res.added.length, 1); eq(res.added[0].row.index, 0);
+      eq(res.failed.length, 1); eq(res.failed[0].kind, 'throttled');
+      const calls = fake.calls.filter(c => c.method === 'updateDiaryAdd');
+      eq(calls.length, 3);
+      ok(calls[1].t - calls[0].t >= 55, 'throttle backoff ' + (calls[1].t - calls[0].t));
+    });
+
+    it('cancellation via opts.isCancelled', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana\nbanana');
+      let n = 0;
+      const res = await CMA.engineRpc.run(SESSION, plan, Object.assign({}, ENGINE_OPTS, { isCancelled: () => ++n > 2 }));
+      eq(res.stopped, 'cancelled');
+      eq(res.added.length, 2);
+      eq(res.skipped.length, 1);
+    });
+
+    it('accepts a bare rows array as the plan', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana');
+      const res = await CMA.engineRpc.run(SESSION, plan.rows, Object.assign({}, ENGINE_OPTS, { date: DATE }));
+      eq(res.added.length, 1);
+    });
+
+    it('undo calls removeServing for each id, sequentially, and clears lastBatch', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana\nbanana');
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      fake.calls.length = 0;
+      const u = await CMA.engineRpc.undo(SESSION, res.lastBatch, { delayMs: 30, refresh: false });
+      deepEq(u.removed, ['SID1', 'SID2', 'SID3']);
+      eq(u.failed.length, 0);
+      const calls = fake.calls.filter(c => c.method === 'removeServing');
+      deepEq(calls.map(c => c.args[0]), ['SID1', 'SID2', 'SID3']);
+      ok(calls[1].t - calls[0].t >= 25 && calls[2].t - calls[1].t >= 25, 'sequential with delay');
+      eq(CMA.engineRpc.lastBatch, null);
+    });
+
+    it('undo keeps the ids that failed to remove and stops on session errors', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana\nbanana');
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      fake.failScript.removeServing = [new Error('nope')];
+      let u = await CMA.engineRpc.undo(SESSION, res.lastBatch, { delayMs: 1, refresh: false });
+      deepEq(u.removed, ['SID2', 'SID3']);
+      deepEq(u.failed.map(f => f.id), ['SID1']);
+      deepEq(CMA.engineRpc.lastBatch.servingIds, ['SID1']);
+      fake.failScript.removeServing = [new CMA.errors.Session()];
+      const res2 = await CMA.engineRpc.run(SESSION, await buildPlan(fake, 'banana\nbanana'), ENGINE_OPTS);
+      u = await CMA.engineRpc.undo(SESSION, res2.lastBatch, { delayMs: 1, refresh: false });
+      eq(u.stopped, 'session'); eq(u.removed.length, 0); eq(u.failed.length, 2);
+      await CMA.engineRpc.clearLastBatch();
+    });
+
+    it('undo forgets ids the server rejected (kind rpc/rejected/http) but keeps network failures', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, 'banana\nbanana\nbanana');
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      const gone = new Error('IllegalArgumentException: no such serving (from removeServing)'); gone.kind = 'rpc';
+      fake.failScript.removeServing = [gone, new CMA.errors.Network('offline')];
+      const u = await CMA.engineRpc.undo(SESSION, res.lastBatch, { delayMs: 1, refresh: false });
+      deepEq(u.removed, ['SID3']);
+      deepEq(u.failed.map(f => f.id + ':' + f.kind), ['SID1:rpc', 'SID2:network']);
+      deepEq(u.dropped, ['SID1']);
+      deepEq(CMA.engineRpc.lastBatch.servingIds, ['SID2'], 'only the network failure is kept for a retry');
+      eq(CMA.engineRpc.lastBatch.userId, 1234567);
+      fake.failScript.removeServing = [gone];
+      const u2 = await CMA.engineRpc.undo(SESSION, CMA.engineRpc.lastBatch, { delayMs: 1, refresh: false });
+      deepEq(u2.dropped, ['SID2']);
+      eq(CMA.engineRpc.lastBatch, null, 'nothing left: batch cleared');
+    });
+    it('lastBatch persists through chrome.storage.local when available (stubbed)', async () => {
+      const store = {};
+      let installed = false;
+      try {
+        window.chrome = { storage: { local: {
+          set(obj, cb) { Object.assign(store, obj); if (cb) cb(); },
+          get(key, cb) { cb({ [key]: store[key] }); }
+        } } };
+        installed = typeof chrome !== 'undefined' && !!chrome.storage;
+      } catch (e) { installed = false; }
+      if (!installed) { ok(true, 'chrome not stubbable here'); return; }
+      try {
+        const fake = makeFake();
+        const plan = await buildPlan(fake, 'banana\nbanana');
+        await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+        const saved = store[CMA.engineRpc.STORAGE_KEY];
+        ok(saved, 'saved');
+        deepEq(saved.servingIds, ['SID1', 'SID2']);
+        deepEq(saved.date, DATE);
+        ok(JSON.stringify(saved).indexOf('NONCE') < 0, 'no session data persisted');
+        CMA.engineRpc.lastBatch = null;
+        const loaded = await CMA.engineRpc.loadLastBatch();
+        deepEq(loaded.servingIds, ['SID1', 'SID2']);
+        await CMA.engineRpc.clearLastBatch();
+        eq(store[CMA.engineRpc.STORAGE_KEY], null);
+      } finally {
+        try { delete window.chrome; } catch (e) { window.chrome = undefined; }
+      }
+    });
+  });
+
+  describe('engineRpc.refreshDiary', () => {
+    it('falls back to a hash flip when the nav elements are absent', async () => {
+      const r = await CMA.engineRpc.refreshDiary({ waitMs: 10, hashWaitMs: 5 });
+      eq(r.method, 'hash');
+      eq(r.verified, false);
+      eq(location.hash, '#diary');
+    });
+    it('clicks previous then next when the nav elements exist', async () => {
+      const nav = document.createElement('div');
+      nav.innerHTML = '<span class="diary-date-nav"><i class="diary-date-previous" style="display:inline-block;width:10px;height:10px"></i><i class="diary-date-next" style="display:inline-block;width:10px;height:10px"></i></span>';
+      document.body.appendChild(nav);
+      const clicks = [];
+      nav.querySelector('.diary-date-previous').addEventListener('click', () => clicks.push('prev'));
+      nav.querySelector('.diary-date-next').addEventListener('click', () => clicks.push('next'));
+      try {
+        location.hash = '#foods';
+        const r = await CMA.engineRpc.refreshDiary({ waitMs: 10, hashWaitMs: 5 });
+        eq(r.method, 'nav'); eq(r.clicks, 2);
+        deepEq(clicks, ['prev', 'next']);
+        // no capture here, so the clicks could not be verified: the hash flip runs as well and lands on #diary
+        eq(r.hashFlip, true); eq(r.verified, false);
+        eq(location.hash, '#diary', 'always back to #diary (the entries went to the diary), never to the previous non-diary hash');
+      } finally { nav.remove(); }
+    });
+    it('reports verified=true when the capture state shows a new getDayInfo for the date (then no hash flip); prefers the visible nav inside .diary-panel', async () => {
+      const nav = document.createElement('div');
+      // icon-font <i>s render a glyph on the real page; give them a box here so isVisible() sees one
+      const ico = 'style="display:inline-block;width:10px;height:10px"';
+      nav.innerHTML = '<span class="other"><i class="diary-date-previous" ' + ico + '></i><i class="diary-date-next" ' + ico + '></i></span>'
+        + '<div class="diary-panel"><i class="diary-date-previous" ' + ico + '></i><i class="diary-date-next" ' + ico + '></i></div>';
+      document.body.appendChild(nav);
+      CMA.capture = { state: { lastRpcAt: 1, rpcCount: 1, diaryDate: DATE } };
+      const clicks = [];
+      nav.querySelectorAll('.other i').forEach(i => i.addEventListener('click', () => clicks.push('other')));
+      nav.querySelector('.diary-panel .diary-date-next').addEventListener('click', () => { clicks.push('panel-next'); CMA.capture.state.rpcCount++; CMA.capture.state.lastRpcAt = Date.now(); });
+      nav.querySelector('.diary-panel .diary-date-previous').addEventListener('click', () => clicks.push('panel-prev'));
+      try {
+        const r = await CMA.engineRpc.refreshDiary({ waitMs: 10, date: DATE });
+        eq(r.verified, true); eq(r.hashFlip, undefined, 'verified clicks: no hash flip');
+        deepEq(clicks, ['panel-prev', 'panel-next'], 'the .diary-panel nav was clicked, not the other one');
+        const r2 = await CMA.engineRpc.refreshDiary({ waitMs: 10, hashWaitMs: 5, date: { day: 1, month: 1, year: 2020 } });
+        eq(r2.verified, false); eq(r2.hashFlip, true, 'unverified clicks fall through to the hash flip');
+      } finally { nav.remove(); delete CMA.capture; }
+    });
+  });
+
+  CMA.test.run();
+})();
+</script>
+</body>
+</html>

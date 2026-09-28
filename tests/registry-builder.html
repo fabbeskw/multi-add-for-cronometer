@@ -1,0 +1,593 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>registry-builder tests</title></head>
+<body>
+<pre id="results"></pre>
+<script src="lib.js"></script>
+<script src="../src/lib/gwt-registry.js"></script>
+<script src="../src/lib/registry-builder.js"></script>
+<script>
+(function () {
+  'use strict';
+  const T = CMA.test, RB = CMA.registryBuilder, REG = CMA.registry;
+  const eq = T.eq, ok = T.ok, deepEq = T.deepEq;
+  const PERM = '0A1C16E148676A90CBB128E4829A562F';
+  const MB = 'https://cronometer.com/cronometer/';
+  const timing = { buildMs: null, calibrationMs: null, phases: [], clock: 'performance.now()' };
+
+  // ---- ?realtime=1 : wall-clock measurement mode ------------------------------------------------------
+  // Under tests/run.sh's --virtual-time-budget the page clock is frozen while a task runs (the calibration
+  // loop below reads 0 ms), so the build time the suite prints is not wall time. This mode reads the bundle
+  // with a SYNCHRONOUS XHR and builds with yieldEvery:0, so everything happens inside the parser's script
+  // task and a plain `chrome --headless=new --allow-file-access-from-files --dump-dom
+  // file:///.../tests/registry-builder.html?realtime=1` (no virtual time) dumps real numbers.
+  if (/[?&]realtime=1/.test(location.search)) {
+    const pre = document.getElementById('results');
+    const lines = [];
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', '../tools/bundle/all.js', false);
+      xhr.overrideMimeType('text/plain; charset=utf-8');
+      xhr.send();
+      const text = xhr.responseText;
+      if (!text) throw new Error('tools/bundle/all.js is absent');
+      const c0 = performance.now();
+      let x = 0; for (let i = 0; i < 300000000; i++) { x += i & 7; }
+      lines.push('clock calibration: 3e8-iteration busy loop = ' + (performance.now() - c0).toFixed(0) + ' ms (x=' + x + ')');
+      const runs = [];
+      let last = null;
+      for (let n = 0; n < 3; n++) {
+        const phases = [];
+        let phaseStart = performance.now(), lastPhase = 'start';
+        const t0 = performance.now();
+        const p = RB.build(text, {
+          permutation: PERM, generatedAt: REG.generatedAt, yieldEvery: 0, quiet: true,
+          onProgress: (pr) => { const now = performance.now(); if (pr.phase !== lastPhase) { phases.push(lastPhase + ' ' + (now - phaseStart).toFixed(0)); lastPhase = pr.phase; phaseStart = now; } },
+        });
+        const ms = performance.now() - t0;   // yieldEvery:0 -> the body ran synchronously inside build()
+        phases.push(lastPhase + ' ' + (performance.now() - phaseStart).toFixed(0));
+        runs.push(ms);
+        lines.push('build ' + (n + 1) + ': ' + ms.toFixed(0) + ' ms (' + phases.join(', ') + ')');
+        p.then((r) => { last = r; });
+      }
+      lines.push('REALTIME build ms: ' + runs.map((m) => m.toFixed(0)).join(' '));
+      // the constants pass over a 100 000-char identifier run no constant consumes (an inlined base64 asset):
+      // 4.4 s with an unanchored `NAME='...'`, well under a millisecond anchored at the run start
+      const run = 'A'.repeat(100000);
+      const js2 = text + "\nfunction zz9(){return x('data:image/png;base64," + run + "')}\n";
+      const t2 = performance.now();
+      const b2 = new RB._internals.Bundle(js2, () => {});
+      lines.push('REALTIME constants pass with a 100 000-char base64 run: ' + (performance.now() - t2).toFixed(1) + ' ms (' + b2.constants.size + ' constants)');
+      if (pre) pre.textContent = lines.join('\n');
+      Promise.resolve().then(() => {   // microtask: still before DOMContentLoaded / load
+        const same = last && JSON.stringify(last) === JSON.stringify(REG);
+        if (pre) pre.textContent += '\nresult equals the generated registry: ' + same + '\n' + (same ? 'ALL TESTS PASSED' : 'FAILED: 1');
+      });
+    } catch (e) {
+      if (pre) pre.textContent = lines.concat(['realtime mode failed: ' + (e && e.message || e), 'FAILED: 1']).join('\n');
+    }
+    return;
+  }
+
+  /** tools/bundle/all.js via XHR (fetch() cannot read file: URLs; the runner passes --allow-file-access-from-files).
+   *  Resolves null when the bundle is absent so the build tests can be skipped with a clear message. */
+  function loadBundle() {
+    return new Promise((resolve) => {
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '../tools/bundle/all.js');
+        xhr.overrideMimeType('text/plain; charset=utf-8');
+        xhr.onload = () => resolve((xhr.status === 200 || xhr.status === 0) && xhr.responseText ? xhr.responseText : null);
+        xhr.onerror = () => resolve(null);
+        xhr.send();
+      } catch (e) { resolve(null); }
+    });
+  }
+
+  function clone(o) { return JSON.parse(JSON.stringify(o)); }
+
+  /** A fetch stub: `answers` is a list of {status, text} consumed in call order (the last one repeats). */
+  function fetchStub(answers) {
+    const calls = [];
+    const impl = function (url, init) {
+      calls.push({ url, init });
+      const a = answers[Math.min(calls.length - 1, answers.length - 1)];
+      return Promise.resolve({ status: a.status, ok: a.status === 200, text: () => Promise.resolve(a.text) });
+    };
+    impl.calls = calls;
+    return impl;
+  }
+
+  // ------------------------------------------------------------------------------------------------
+  T.describe('fetchBundle (stubbed fetch)', () => {
+    T.it('200, 200, 200, 404 -> main + 2 fragments, wire order, fetch_bundle.py separator', async () => {
+      const stub = fetchStub([{ status: 200, text: 'MAIN' }, { status: 200, text: 'F1\n' }, { status: 200, text: 'F2' }, { status: 404, text: '' }]);
+      const r = await RB.fetchBundle(MB, PERM.toLowerCase(), { fetchImpl: stub });
+      eq(r.fragments, 2);
+      eq(r.permutation, PERM, 'permutation is upper-cased');
+      eq(r.text, 'MAIN\nF1\nF2\n', 'newline only after a part that lacks one, parts in order');
+      eq(r.bytes, 'MAIN\nF1\nF2\n'.length);
+      eq(r.truncated, false);
+      deepEq(stub.calls.map((c) => c.url), [
+        MB + PERM + '.cache.js',
+        MB + 'deferredjs/' + PERM + '/1.cache.js',
+        MB + 'deferredjs/' + PERM + '/2.cache.js',
+        MB + 'deferredjs/' + PERM + '/3.cache.js',
+      ]);
+      stub.calls.forEach((c) => {
+        ok(c.url.startsWith(MB), 'never another host: ' + c.url);
+        eq(c.init.credentials, 'same-origin');
+        eq(c.init.mode, 'same-origin', 'a redirect of a bundle URL to another host must fail before it is followed (SPEC 0)');
+        eq(c.init.redirect, 'follow', 'a same-origin redirect is still followed');
+        eq(c.init.method, 'GET');
+      });
+    });
+    T.it('a 403 / 404 / 410 fragment ends the list even when later ones would exist (fetch_bundle.py rule)', async () => {
+      for (const end of [403, 404, 410]) {
+        const stub = fetchStub([{ status: 200, text: 'M' }, { status: 200, text: 'A' }, { status: end, text: 'gone' }, { status: 200, text: 'B' }]);
+        const r = await RB.fetchBundle(MB, PERM, { fetchImpl: stub });
+        eq(r.fragments, 1, 'status ' + end);
+        eq(r.text, 'M\nA\n');
+        eq(stub.calls.length, 3, 'no retry, no further fragment after a ' + end);
+      }
+      deepEq(Object.keys(RB.END_OF_LIST_STATUS).sort(), ['403', '404', '410']);
+    });
+    T.it('a 5xx fragment is retried (3 attempts) and then THROWN with the URL and status - never taken for the end of the list', async () => {
+      const stub = fetchStub([{ status: 200, text: 'M' }, { status: 200, text: 'A' }, { status: 502, text: 'bad gateway' }, { status: 502, text: '' }, { status: 502, text: '' }, { status: 200, text: 'B' }]);
+      const e = await T.throws(() => RB.fetchBundle(MB, PERM, { fetchImpl: stub, retryDelayMs: 0 }), /deferredjs\/.*\/2\.cache\.js answered HTTP 502/);
+      eq(e.attempts, 3);
+      eq(stub.calls.length, 5, 'main + fragment 1 + three attempts at fragment 2, nothing after the failure');
+      eq(RB.DEFAULT_RETRIES, 3); eq(RB.DEFAULT_RETRY_DELAY_MS, 1500); eq(RB.DEFAULT_TIMEOUT_MS, 60000);
+      // the same for another odd status (429): retried, then an error
+      const stub2 = fetchStub([{ status: 200, text: 'M' }, { status: 429, text: '' }, { status: 429, text: '' }, { status: 429, text: '' }, { status: 404, text: '' }]);
+      await T.throws(() => RB.fetchBundle(MB, PERM, { fetchImpl: stub2, retryDelayMs: 0 }), /answered HTTP 429/);
+      eq(stub2.calls.length, 4);
+    });
+    T.it('a transient 500 on one fragment is retried and the fragment is kept (the retry pause grows: 0, 1x, 2x retryDelayMs)', async () => {
+      const stub = fetchStub([{ status: 200, text: 'M' }, { status: 500, text: 'oops' }, { status: 503, text: '' }, { status: 200, text: 'A' }, { status: 404, text: '' }]);
+      const t0 = Date.now();
+      const r = await RB.fetchBundle(MB, PERM, { fetchImpl: stub, retryDelayMs: 40 });
+      eq(r.fragments, 1); eq(r.text, 'M\nA\n'); eq(r.truncated, false);
+      eq(stub.calls.length, 5, 'main, three attempts at fragment 1, then the 404 that ends the list');
+      ok(Date.now() - t0 >= 100, 'paused 40 ms then 80 ms before the retries (took ' + (Date.now() - t0) + ' ms)');
+      deepEq(stub.calls.slice(1, 4).map((c) => c.url), [1, 1, 1].map(() => MB + 'deferredjs/' + PERM + '/1.cache.js'));
+    });
+    T.it('no fragments at all', async () => {
+      const stub = fetchStub([{ status: 200, text: 'M\n' }, { status: 404, text: '' }]);
+      const r = await RB.fetchBundle(MB, PERM, { fetchImpl: stub });
+      eq(r.fragments, 0); eq(r.text, 'M\n'); eq(stub.calls.length, 2);
+    });
+    T.it('non-200 main -> throws, nothing else fetched', async () => {
+      const stub = fetchStub([{ status: 404, text: '' }, { status: 200, text: 'x' }]);
+      await T.throws(() => RB.fetchBundle(MB, PERM, { fetchImpl: stub }), /HTTP 404/);
+      eq(stub.calls.length, 1);
+    });
+    T.it('empty main -> throws', async () => {
+      const stub = fetchStub([{ status: 200, text: '' }]);
+      await T.throws(() => RB.fetchBundle(MB, PERM, { fetchImpl: stub }), /empty body/);
+      eq(stub.calls.length, 1);
+    });
+    T.it('a persistent transport failure on a fragment is retried and then an error, not the end of the list; a transient one recovers', async () => {
+      let attempts = 0;
+      const impl = (url) => {
+        if (/\/1\.cache\.js$/.test(url)) { attempts++; return Promise.reject(new TypeError('Failed to fetch')); }
+        return Promise.resolve({ status: 200, ok: true, text: () => Promise.resolve('x') });
+      };
+      const e = await T.throws(() => RB.fetchBundle(MB, PERM, { fetchImpl: impl, retryDelayMs: 0 }), /fetch failed for .*\/1\.cache\.js: Failed to fetch/);
+      eq(attempts, 3); eq(e.attempts, 3);
+      let once = false;
+      const impl2 = (url) => {
+        if (/\/1\.cache\.js$/.test(url) && !once) { once = true; return Promise.reject(new TypeError('Failed to fetch')); }
+        return Promise.resolve({ status: /\/2\.cache\.js$/.test(url) ? 404 : 200, ok: true, text: () => Promise.resolve('x') });
+      };
+      const r = await RB.fetchBundle(MB, PERM, { fetchImpl: impl2, retryDelayMs: 0 });
+      eq(r.fragments, 1); eq(r.text, 'x\nx\n');
+    });
+    T.it('per-file timeout aborts a hanging fetch (each attempt) and the error says so', async () => {
+      let aborted = 0;
+      const impl = (url, init) => new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => { aborted++; const e = new Error('aborted'); e.name = 'AbortError'; reject(e); });
+      });
+      await T.throws(() => RB.fetchBundle(MB, PERM, { fetchImpl: impl, timeoutMs: 200, retryDelayMs: 0 }), /timed out after 200 ms/);
+      eq(aborted, 3, 'three attempts, each aborted by its own timer');
+    });
+    T.it('maxFragments caps the list (default 200 like fetch_bundle.py) and flags truncation, which validate() refuses', async () => {
+      eq(RB.DEFAULT_MAX_FRAGMENTS, 200);
+      const stub = fetchStub([{ status: 200, text: 'x' }]);   // every answer is 200
+      const r = await RB.fetchBundle(MB, PERM, { fetchImpl: stub, maxFragments: 3 });
+      eq(r.fragments, 3); eq(r.truncated, true); eq(stub.calls.length, 4);
+      const v = RB.validate(REG, { truncated: r.truncated, fragments: r.fragments });
+      ok(!v.ok);
+      ok(v.problems.some((p) => /bundle download was truncated at 3 fragments/.test(p)), v.problems.join(' | '));
+      ok(RB.validate(REG, { truncated: false, fragments: 14 }).ok);
+    });
+    T.it('invalid permutation / module base are refused before any fetch', async () => {
+      const stub = fetchStub([{ status: 200, text: 'x' }]);
+      await T.throws(() => RB.fetchBundle(MB, 'nope', { fetchImpl: stub }), /invalid permutation/);
+      await T.throws(() => RB.fetchBundle('cronometer/', PERM, { fetchImpl: stub }), /absolute URL/);
+      await T.throws(() => RB.fetchBundle('ftp://cronometer.com/cronometer/', PERM, { fetchImpl: stub }), /http\(s\)/);
+      eq(stub.calls.length, 0);
+    });
+    T.it('sameOriginCheck: another host is refused on an https page (SPEC 0)', async () => {
+      const page = { protocol: 'https:', origin: 'https://cronometer.com' };
+      eq(RB.sameOriginCheck('https://cronometer.com/cronometer/', page), 'https://cronometer.com');
+      await T.throws(() => RB.sameOriginCheck('https://evil.example/cronometer/', page), /differs from the page origin/);
+      await T.throws(() => RB.sameOriginCheck('https://cdn.cronometer.com/cronometer/', page), /differs from the page origin/);
+      // test pages (file:) cannot be same-origin with anything: only the URL shape is checked there
+      eq(RB.sameOriginCheck('https://cronometer.com/cronometer/', { protocol: 'file:', origin: 'null' }), 'https://cronometer.com');
+    });
+    T.it('concatParts mirrors fetch_bundle.concat', () => {
+      eq(RB.concatParts(['a', 'b\n', 'c']), 'a\nb\nc\n');
+      eq(RB.concatParts(['a\n']), 'a\n');
+      eq(RB.concatParts([]), '');
+    });
+  });
+
+  // ------------------------------------------------------------------------------------------------
+  T.describe('validate', () => {
+    T.it('the bundled registry passes', () => {
+      const v = RB.validate(REG);
+      ok(v.ok, 'problems: ' + v.problems.join(' | '));
+      ok(v.checked > 40, 'checked ' + v.checked);
+    });
+    T.it('Serving with 12 fields fails', () => {
+      const r = clone(REG);
+      r.types['com.cronometer.shared.entries.models.Serving/2553599101'].f.pop();
+      const v = RB.validate(r);
+      ok(!v.ok);
+      ok(v.problems.some((p) => /Serving.*ozzoioidilii \(expected ozzoioidiliii\)/.test(p)), v.problems.join(' | '));
+    });
+    T.it('a large stats.unknown fails; the count must agree with the entries', () => {
+      const r = clone(REG);
+      r.stats.unknown = 50;
+      ok(!RB.validate(r).ok, 'stats.unknown 50 with 0 unknown entries');
+      const r2 = clone(REG);
+      Object.keys(r2.types).filter((k) => /Exception\//.test(k)).slice(0, 50).forEach((k) => { r2.types[k] = { k: 'unknown', why: 'test' }; });
+      r2.stats.unknown = 50;
+      const v2 = RB.validate(r2);
+      ok(!v2.ok);
+      ok(v2.problems.some((p) => /50 unknown types \(max 5\)/.test(p)), v2.problems.join(' | '));
+    });
+    T.it('a few unknown exotic types are tolerated (MAX_UNKNOWN), one more is not', () => {
+      eq(RB.MAX_UNKNOWN, 5);
+      const exotic = Object.keys(REG.types).filter((k) => /^javax\.validation\./.test(k)).slice(0, 6);
+      eq(exotic.length, 6);
+      const r = clone(REG);
+      exotic.slice(0, 5).forEach((k) => { r.types[k] = { k: 'unknown', why: 'test' }; });
+      r.stats.unknown = 5;
+      ok(RB.validate(r).ok, RB.validate(r).problems.join(' | '));
+      r.types[exotic[5]] = { k: 'unknown', why: 'test' };
+      r.stats.unknown = 6;
+      ok(!RB.validate(r).ok);
+    });
+    T.it('a required type that is missing, unknown or ambiguous fails; a CRC change alone passes', () => {
+      const r = clone(REG);
+      delete r.types['com.cronometer.shared.entries.models.Day/782579793'];
+      r.stats.types--;
+      ok(RB.validate(r).problems.some((p) => /Day is missing/.test(p)));
+      const r2 = clone(REG);
+      r2.types['com.cronometer.shared.foods.models.Food/2097636843'] = { k: 'unknown', why: 'x' };
+      r2.stats.unknown = 1;
+      ok(RB.validate(r2).problems.some((p) => /Food.*layout unknown \(expected izoisiiioolooozsoooi\)/.test(p)), RB.validate(r2).problems.join(' | '));
+      const r3 = clone(REG);
+      r3.types['com.cronometer.shared.entries.models.Day/1'] = { f: ['b', 'b', 'h'], k: 'class' };
+      r3.stats.types++;
+      ok(RB.validate(r3).problems.some((p) => /Day is ambiguous/.test(p)));
+      const r4 = clone(REG);   // same layout under a new CRC: still valid (CMA.gwt.sig resolves by base name)
+      r4.types['com.cronometer.shared.entries.models.Serving/99'] = r4.types['com.cronometer.shared.entries.models.Serving/2553599101'];
+      delete r4.types['com.cronometer.shared.entries.models.Serving/2553599101'];
+      ok(RB.validate(r4).ok, RB.validate(r4).problems.join(' | '));
+    });
+    T.it('User must keep 42 fields with idx 19 int and idx 33 string', () => {
+      const r = clone(REG);
+      r.types['com.cronometer.shared.user.models.User/91151502'].f[33] = 'o';
+      ok(RB.validate(r).problems.some((p) => /User.*42 fields with idx 19 int and idx 33 string/.test(p)));
+    });
+    T.it('reader/writer maps, service methods, hashes', () => {
+      const r = clone(REG); delete r.readerMethods._s;
+      ok(RB.validate(r).problems.some((p) => /no reader method for kind l/.test(p)));
+      const r2 = clone(REG); r2.serviceMethods = r2.serviceMethods.filter((m) => m !== 'updateDiary');
+      ok(RB.validate(r2).problems.some((p) => /updateDiary not found/.test(p)));
+      const r3 = clone(REG); r3.policyHash = null;
+      ok(RB.validate(r3).problems.some((p) => /policyHash/.test(p)));
+      const r4 = clone(REG); r4.proPolicyHash = null;   // the pro service is not ours: optional
+      ok(RB.validate(r4).ok);
+      ok(!RB.validate(null).ok);
+      ok(!RB.validate({ types: [] }).ok);
+    });
+    T.it('problems name the changed layout FIRST: an unknown Day comes before the writer kind h that only its serializer pair supplies', () => {
+      // the store shows problems[0] to the user; 'no writer method for kind h' is true but not the cause
+      const r = clone(REG);
+      r.types['com.cronometer.shared.entries.models.Day/782579793'] = { k: 'unknown', why: 'conditional reads in D_i: ...' };
+      r.stats.unknown = 1;
+      Object.keys(r.writerMethods).forEach((m) => { if (r.writerMethods[m] === 'h') delete r.writerMethods[m]; });
+      const v = RB.validate(r);
+      ok(!v.ok);
+      ok(/Day\/782579793 layout unknown \(expected bbh\)/.test(v.problems[0]), 'first problem: ' + v.problems[0]);
+      ok(v.problems.some((p) => /no writer method for kind h/.test(p)), v.problems.join(' | '));
+      ok(v.problems.indexOf(v.problems.find((p) => /no writer method for kind h/.test(p))) > 0, 'the symptom comes after the cause');
+    });
+  });
+
+  // ------------------------------------------------------------------------------------------------
+  function defineBuildTests(text) {
+    T.describe('build (tools/bundle/all.js)', () => {
+      if (text == null) {
+        T.it('SKIPPED: tools/bundle/all.js is absent (run python tools/fetch_bundle.py to enable the parity tests)', () => { ok(true); });
+        return;
+      }
+      let built = null, warnings = [], progress = [];
+      T.it('build() finishes and reports progress', async () => {
+        eq(text.length, 5722089, 'bundle size of build ' + PERM);
+        // clock calibration: a fixed busy loop (~300 ms of real CPU on this machine) proves the clock the
+        // build time is measured with counts real time even under the runner's --virtual-time-budget
+        const c0 = performance.now();
+        let x = 0; for (let i = 0; i < 300000000; i++) { x += i & 7; }
+        timing.calibrationMs = performance.now() - c0;
+        ok(x > 0);
+        const t0 = performance.now();
+        let phaseStart = t0, lastPhase = 'start';
+        built = await RB.build(text, {
+          permutation: PERM, generatedAt: REG.generatedAt,
+          onProgress: (p) => {
+            progress.push(p);
+            const now = performance.now();
+            if (p.phase !== lastPhase) { timing.phases.push(lastPhase + ' ' + (now - phaseStart).toFixed(0) + ' ms'); lastPhase = p.phase; phaseStart = now; }
+          },
+          onWarning: (w) => warnings.push(w),
+        });
+        timing.phases.push(lastPhase + ' ' + (performance.now() - phaseStart).toFixed(0) + ' ms');
+        timing.buildMs = performance.now() - t0;
+        ok(built && built.types, 'a registry came back');
+        const phases = progress.map((p) => p.phase);
+        ['constants', 'reader', 'table', 'correlate', 'classify', 'done'].forEach((ph) => ok(phases.includes(ph), 'phase ' + ph));
+        const last = progress.filter((p) => p.phase === 'classify').pop();
+        eq(last.done, last.total, 'classify ends with done === total');
+        eq(RB.DEFAULT_YIELD_EVERY, 300);
+        ok(progress.filter((p) => p.phase === 'classify').length >= 2, 'yields every ~300 types (601 types: 300, 600, done)');
+      });
+      T.it('a yield is an ordinary task (scheduler.yield / MessageChannel), never a setTimeout (clamped to 4 ms after five hops, 1 s in hidden tabs)', async () => {
+        const realSetTimeout = window.setTimeout;
+        const timerCalls = [];
+        window.setTimeout = function (fn, ms) { timerCalls.push(ms); return realSetTimeout.apply(window, arguments); };
+        let r;
+        try { r = await RB.build(text, { permutation: PERM, generatedAt: REG.generatedAt, quiet: true, yieldEvery: 50 }); }
+        finally { window.setTimeout = realSetTimeout; }
+        eq(JSON.stringify(r.stats), JSON.stringify(REG.stats));
+        deepEq(timerCalls, [], 'no timer was armed by the ' + Math.ceil(601 / 50) * 2 + '+ yields of this build');
+      });
+      T.it('build time < 8000 ms', () => {
+        ok(built, 'build ran');
+        ok(timing.buildMs < 8000, 'build took ' + timing.buildMs.toFixed(0) + ' ms');
+      });
+      T.it('top-level keys: same set, same order, same JSON as the generated registry', () => {
+        ok(built, 'build ran');
+        deepEq(Object.keys(built), Object.keys(REG));
+        const diffs = [];
+        Object.keys(REG).forEach((k) => {
+          if (k === 'types') return;
+          const a = JSON.stringify(built[k]), b = JSON.stringify(REG[k]);
+          if (a !== b) diffs.push(k + ': built ' + (a || 'undefined').slice(0, 200) + ' != generated ' + (b || 'undefined').slice(0, 200));
+        });
+        ok(diffs.length === 0, diffs.length + ' top-level differences:\n' + diffs.slice(0, 10).join('\n'));
+      });
+      T.it('types: every entry equal, key by key (first 10 differences printed)', () => {
+        ok(built, 'build ran');
+        const diffs = [];
+        const bk = Object.keys(built.types), rk = Object.keys(REG.types);
+        rk.forEach((k) => {
+          if (!(k in built.types)) { diffs.push('missing in built: ' + k); return; }
+          const a = JSON.stringify(built.types[k]), b = JSON.stringify(REG.types[k]);
+          if (a !== b) diffs.push(k + ': built ' + a + ' != generated ' + b);
+        });
+        bk.forEach((k) => { if (!(k in REG.types)) diffs.push('extra in built: ' + k); });
+        deepEq(bk, rk, 'same type signatures in the same (sorted) order');
+        ok(diffs.length === 0, diffs.length + ' type differences:\n' + diffs.slice(0, 10).join('\n'));
+        eq(JSON.stringify(built), JSON.stringify(REG), 'whole registry JSON');
+      });
+      T.it('warnings match what gen_registry.py prints for this bundle', () => {
+        ok(built, 'build ran');
+        deepEq(warnings, ["com.google.gwt.i18n.shared.impl.DateRecord/3173882066: serializer layout 'ziiiiiziiiiiil' differs from deserializer layout 'ziiiiiziiiiii'"]);
+      });
+      T.it('the runtime registry passes validate()', () => {
+        ok(built, 'build ran');
+        const v = RB.validate(built);
+        ok(v.ok, v.problems.join(' | '));
+        eq(built.stats.unknown, 0);
+      });
+      T.it('permutation: $strongName in the bundle wins, a differing caller value is warned about', async () => {
+        const head = text.slice(0, 200000);   // enough for $strongName, not for a table: expect a clear error
+        let warned = [];
+        await T.throws(() => RB.build(head, { permutation: 'F'.repeat(32), onWarning: (w) => warned.push(w) }), /cannot locate|no serializer table/);
+        ok(warned.some((w) => /declares \$strongName 0A1C16E148676A90CBB128E4829A562F but the caller expected FFFFFFFF/.test(w)), warned.join(' | '));
+        await T.throws(() => RB.build('', {}), /needs the bundle text/);
+        await T.throws(() => RB.build('function a(){}', {}), /cannot locate the serialization stream reader/);
+      });
+      T.it('deterministic: a second build is byte-identical', async () => {
+        const again = await RB.build(text, { permutation: PERM, generatedAt: REG.generatedAt, quiet: true });
+        eq(JSON.stringify(again), JSON.stringify(built));
+      });
+      T.it('generatedAt: caller string verbatim, Date formatted like the Python, default = now; bundle option', async () => {
+        const d = new Date(Date.UTC(2026, 8, 28, 13, 5, 9, 123));
+        const r = await RB.build(text, { permutation: PERM, generatedAt: d, bundle: 'live:' + PERM, quiet: true });
+        eq(r.generatedAt, '2026-09-28T13:05:09Z');
+        eq(r.bundle, 'live:' + PERM);
+        const before = Date.now();
+        const r2 = await RB.build(text, { permutation: PERM, quiet: true });
+        ok(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(r2.generatedAt), r2.generatedAt);
+        ok(Math.abs(Date.parse(r2.generatedAt) - before) < 60000, 'defaults to now');
+        eq(r2.bundle, 'all.js');
+      });
+      T.it('permutation: the caller value is the fallback when the bundle lacks $strongName', async () => {
+        const stripped = text.replace(/\$strongName\s*=\s*'[0-9A-F]{32}'/, "$strongName = 'REDACTED'");
+        ok(stripped !== text, 'the bundle declares $strongName');
+        const r = await RB.build(stripped, { permutation: PERM.toLowerCase(), generatedAt: REG.generatedAt, quiet: true });
+        eq(r.permutation, PERM);
+        delete r.types; delete built.types;   // compare the rest cheaply, then restore
+        try { eq(JSON.stringify(r), JSON.stringify(built)); } finally { r.types = REG.types; built.types = REG.types; }
+        const none = await RB.build(stripped, { generatedAt: REG.generatedAt, quiet: true });
+        eq(none.permutation, null);
+        ok(!RB.validate(none).ok, 'a registry without a permutation must not validate');
+      });
+      T.it('internals: jsUnescape, splitStatements, splitFor, gwtCompare, hasConditionalRead', () => {
+        eq(RB._internals.jsUnescape("a\\'b\\u0041\\x42\\n"), "a'bAB\n");
+        deepEq(RB._internals.splitStatements('a=1;for(i=0;i<3;i++){x(i)}return b'), ['a=1', 'for(i=0;i<3;i++){x(i)}', 'return b']);
+        deepEq(RB._internals.splitFor('for(i=0;i<3;i++){x(i);y()}'), ['i=0;i<3;i++', 'x(i);y()']);
+        deepEq(['ct', '$s', 'Xs', 'bt', 'Ys', '_s', 'Zs'].sort(RB._internals.gwtCompare), ['Xs', 'Ys', 'Zs', '$s', '_s', 'bt', 'ct']);
+        const cond = RB._internals.hasConditionalRead;
+        eq(cond('b.a= _READ_ ? _READ_ :0'), true, 'a read in a ternary branch');
+        eq(cond('b.a=x&& _READ_ '), true); eq(cond('b.a=x|| _READ_ '), true);
+        eq(cond('b.c=function(){return  _READ_ }'), true, 'a read inside a nested function');
+        eq(cond('return Vho(), _READ_ ?true:false'), false, 'java.lang.Boolean: the read is the condition itself');
+        eq(cond('b.b= _READ_ ||null'), false); eq(cond('b.b= _READ_ '), false); eq(cond('b.b=x?1:0'), false);
+      });
+      // ---- robustness of the parser against shapes the next deploy may emit (each is a mutation of the real
+      //      bundle; gen_registry.py has the same rules, so the Python would give the same answer) ----
+      function rowsOf(js) {
+        const bundle = new RB._internals.Bundle(js, () => {});
+        return { bundle, rows: RB._internals.loadTable(bundle).rows };
+      }
+      function renameIdent(js, from, to) {
+        ok(!new RegExp('(?<![\\w$])' + to.replace(/\$/g, '\\$') + '(?![\\w$])').test(js), to + ' is unused in the bundle');
+        const re = new RegExp('(?<![\\w$])' + from.replace(/\$/g, '\\$') + '(?![\\w$])', 'g');
+        const out = js.replace(re, () => to);   // a replacer function: '$' in a replacement STRING is special
+        ok(out !== js, from + ' occurs in the bundle');
+        return out;
+      }
+      T.it('reader helpers whose obfuscated name starts with $ are recognised (lookbehind, not \\b): every helper renamed, still 0 unknown types', async () => {
+        const h = REG.readerHelpers;   // {readObject:'U0n', bool:'i1n', double:'j1n', long:'k1n', string:'g1n'} in this build
+        let js = text;
+        const renamed = { readObject: '$Zr', bool: '$Zq', string: '$Zs', double: '$Zt', long: '$Zu' };
+        Object.keys(renamed).forEach((k) => { js = renameIdent(js, h[k], renamed[k]); });
+        const r = await RB.build(js, { permutation: PERM, generatedAt: REG.generatedAt, quiet: true });
+        eq(r.stats.unknown, 0, 'unknown types: ' + Object.keys(r.types).filter((k) => r.types[k].k === 'unknown').slice(0, 5).map((k) => k + ' (' + r.types[k].why + ')').join(', '));
+        Object.keys(renamed).forEach((k) => eq(r.readerHelpers[k], renamed[k], 'helper ' + k + ' derived under its new name'));
+        eq(JSON.stringify(r.types), JSON.stringify(REG.types), 'every layout unchanged');
+        ok(RB.validate(r).ok, RB.validate(r).problems.join(' | '));
+      });
+      T.it('a read inside a ternary makes the type unknown ("conditional reads") instead of a class with a guessed layout', async () => {
+        const DAY = 'com.cronometer.shared.entries.models.Day/782579793';
+        const { bundle, rows } = rowsOf(text);
+        const deser = rows.get(DAY).deser;
+        const fn = bundle.fn(deser);
+        ok(fn, 'Day deserializer ' + deser);
+        // the first field read (`G_i(b,a.Ys())` - a setter call - in this build, `b.a=a.Ys()` in another compile)
+        // becomes `a.Xs()?a.Ys():0`: the byte is read only when the boolean says so
+        const body = fn.slice(fn.indexOf('{'));
+        const reader = fn.slice(fn.indexOf('(') + 1, fn.indexOf(')')).split(',')[0].trim();
+        const m = new RegExp('(?<![\\w$.])' + reader + '\\.([A-Za-z_$][\\w$]*)\\(\\)').exec(body);
+        ok(m, 'a plain field read in ' + fn.slice(0, 80));
+        const boolMethod = Object.keys(REG.readerMethods).find((k) => REG.readerMethods[k] === 'z');
+        const mutated = fn.replace(m[0], () => reader + '.' + boolMethod + '()?' + m[0] + ':0');
+        ok(mutated !== fn);
+        const js = text.replace(fn, () => mutated);
+        const r = await RB.build(js, { permutation: PERM, generatedAt: REG.generatedAt, quiet: true });
+        eq(r.types[DAY].k, 'unknown');
+        ok(new RegExp('^conditional reads in ' + deser + ': ').test(r.types[DAY].why), r.types[DAY].why);
+        eq(r.stats.unknown, 1);
+        ok(!RB.validate(r).ok, 'Day is a required layout');
+        ok(RB.validate(r).problems.some((p) => /Day.*layout unknown \(expected bbh\)/.test(p)), RB.validate(r).problems.join(' | '));
+      });
+      T.it('an enum instantiate that returns a hoisted / parenthesised / |0 index expression is still an enum', async () => {
+        const MT = 'com.cronometer.shared.foods.models.Measure$Type/2365167904';
+        const { bundle, rows } = rowsOf(text);
+        const inst = rows.get(MT).inst;
+        const fn = bundle.fn(inst);
+        const m = /return ([a-z])\[([a-z])\]\}$/.exec(fn);
+        ok(m, 'instantiate ends with return c[b]: ' + fn.slice(-40));
+        for (const tail of ['return (null,' + m[1] + ')[' + m[2] + ']}', 'return ' + m[1] + '[' + m[2] + ']|0}', 'return Xyz9[' + m[2] + ']}']) {
+          const js = text.replace(fn, () => fn.slice(0, m.index) + tail);
+          const r = await RB.build(js, { permutation: PERM, generatedAt: REG.generatedAt, quiet: true });
+          deepEq(r.types[MT], { k: 'enum' }, tail);
+        }
+      });
+      // ---- review round 5: the constants pass must stay linear, and three more shared-parser rules ----
+      /** Day's deserializer (SPEC 3.3 layout bbh) with its reader / object parameter names, for mutations. */
+      function dayDeser() {
+        const DAY = 'com.cronometer.shared.entries.models.Day/782579793';
+        const { bundle, rows } = rowsOf(text);
+        const deser = rows.get(DAY).deser;
+        const fn = bundle.fn(deser);
+        ok(fn && fn.endsWith('}'), 'Day deserializer ' + deser);
+        const params = fn.slice(fn.indexOf('(') + 1, fn.indexOf(')')).split(',').map((s) => s.trim());
+        return { DAY, bundle, deser, fn, reader: params[0], obj: params[1], ri: new RB._internals.ReaderInfo(bundle) };
+      }
+      /** The bundle with `stmt` appended as the last statement of Day's deserializer. */
+      function withDayStatement(d, stmt) { return text.replace(d.fn, () => d.fn.slice(0, -1) + ';' + stmt + '}'); }
+      T.it('constants: a long identifier run no constant consumes (an inlined base64 asset) is scanned once, not once per character: registry unchanged, linear time', async () => {
+        // a 100 000-char base64 run inside x('data:image/png;base64,...') and the same run in a double-quoted
+        // string: unanchored, `NAME='...'` tried every start position of such a run (4.4 s each in V8)
+        const run = 'A'.repeat(100000);
+        const js = text + "\nfunction zz9(){return x('data:image/png;base64," + run + "')}\nvar zz8=\"" + run + "\";\n";
+        const plain = new RB._internals.Bundle(text, () => {});
+        ok(plain.constants.size > 4000, plain.constants.size + ' constants in the real bundle');
+        const c0 = performance.now();
+        const bundle = new RB._internals.Bundle(js, () => {});
+        timing.constRunMs = performance.now() - c0;
+        eq(bundle.constants.size, plain.constants.size, 'same constants');
+        eq(bundle.constants.get('zz8'), undefined, 'a double-quoted string is not a constant');
+        const t0 = performance.now();
+        const r = await RB.build(js, { permutation: PERM, generatedAt: REG.generatedAt, quiet: true, yieldEvery: 0 });
+        const buildMs = performance.now() - t0;
+        eq(JSON.stringify(r.types), JSON.stringify(REG.types), 'every layout unchanged');
+        ok(RB.validate(r).ok, RB.validate(r).problems.join(' | '));
+        // the page clock is frozen inside a task under --virtual-time-budget (the calibration loop reads ~0 ms):
+        // the bound is asserted only when the clock measures real time (?realtime=1 or a normal browser window)
+        if (timing.calibrationMs != null && timing.calibrationMs >= 50) ok(buildMs < 500, 'build with the 100 K-char run took ' + buildMs.toFixed(0) + ' ms (constants pass ' + timing.constRunMs.toFixed(0) + ' ms)');
+      });
+      T.it('a read inside an else / catch / finally block is conditional too: the type becomes unknown instead of a class with an extra field', async () => {
+        const d = dayDeser();
+        const byteMethod = Object.keys(REG.readerMethods).find((k) => REG.readerMethods[k] === 'b');
+        const boolMethod = Object.keys(REG.readerMethods).find((k) => REG.readerMethods[k] === 'z');
+        const cases = [
+          ['else', 'if(' + d.obj + '.zz9){' + d.obj + '.zz8=1}else{' + d.obj + '.zz8=' + d.reader + '.' + byteMethod + '()}'],
+          ['catch', 'try{' + d.obj + '.zz8=1}catch(e){' + d.obj + '.zz8=' + d.reader + '.' + byteMethod + '()}'],
+          ['finally', 'try{' + d.obj + '.zz8=1}finally{' + d.obj + '.zz8=' + d.reader + '.' + boolMethod + '()}'],
+        ];
+        for (const [kw, stmt] of cases) {
+          const r = await RB.build(withDayStatement(d, stmt), { permutation: PERM, generatedAt: REG.generatedAt, quiet: true, onWarning: () => {} });
+          eq(r.types[d.DAY].k, 'unknown', stmt);
+          ok(new RegExp('^conditional reads in ' + d.deser + ': ' + kw + '\\b').test(r.types[d.DAY].why), r.types[d.DAY].why);
+          eq(r.stats.unknown, 1);
+          ok(RB.validate(r).problems.some((p) => /Day.*layout unknown \(expected bbh\)/.test(p)), RB.validate(r).problems.join(' | '));
+        }
+      });
+      T.it('the inlined double / bool helper bodies (Number(a.b[--a.a]), !!a.b[--a.a]) are typed d / z; the bare token read stays int-like', async () => {
+        const d = dayDeser();
+        const raw = d.reader + '.' + d.ri.arr + '[--' + d.reader + '.' + d.ri.idx + ']';
+        for (const [expr, kind] of [['Number(' + raw + ')', 'd'], ['!!' + raw, 'z'], [raw, 'i']]) {
+          const warned = [];
+          const r = await RB.build(withDayStatement(d, d.obj + '.zz8=' + expr), { permutation: PERM, generatedAt: REG.generatedAt, quiet: true, onWarning: (w) => warned.push(w) });
+          deepEq(r.types[d.DAY], { f: ['b', 'b', 'h', kind], k: 'class' }, expr);
+          // the short writer kind 'h' had Day's pair as its only vote; with 4 reads against 3 writes the pair no
+          // longer correlates, so the serializer side prints '?' for it - exactly what gen_registry.py prints
+          ok(warned.some((w) => new RegExp("Day/782579793: serializer layout 'bb\\?' differs from deserializer layout 'bbh" + kind + "'").test(w)), 'the serializer/deserializer disagreement is warned about: ' + warned.join(' | '));
+        }
+      });
+      T.it('a non-ASCII letter glued to the reader variable is a bare use (ASCII word classes in both generators): the type is unknown', async () => {
+        // JavaScript's \w is ASCII; gen_registry.py compiles its patterns with re.ASCII so it agrees
+        const d = dayDeser();
+        const r = await RB.build(withDayStatement(d, d.obj + ".zz8='\u00f1" + d.reader + "'"), { permutation: PERM, generatedAt: REG.generatedAt, quiet: true, onWarning: () => {} });
+        eq(r.types[d.DAY].k, 'unknown');
+        ok(new RegExp('^unrecognised use of reader in ' + d.deser + ': ').test(r.types[d.DAY].why), r.types[d.DAY].why);
+      });
+    });
+  }
+
+  loadBundle().then((text) => {
+    defineBuildTests(text);
+    return T.run({ timeoutMs: 60000 });
+  }).then(() => {
+    const pre = document.getElementById('results');
+    if (pre) {
+      const frozen = timing.calibrationMs != null && timing.calibrationMs < 50;
+      pre.textContent += '\nregistry-builder build time: ' + (timing.buildMs == null ? 'n/a (bundle absent)' : timing.buildMs.toFixed(0) + ' ms (' + timing.clock +
+        '; phases: ' + timing.phases.join(', ') + (timing.constRunMs != null ? '; constants pass with a 100 K-char run: ' + timing.constRunMs.toFixed(1) + ' ms' : '') +
+        '; clock calibration: 3e8-iteration busy loop = ' + timing.calibrationMs.toFixed(0) + ' ms' +
+        (frozen ? ' -> the clock is frozen during tasks (--virtual-time-budget): these are NOT wall-clock numbers, open this page with ?realtime=1 and no virtual time for real ones' : ' -> real clock') + ')');
+    }
+  });
+})();
+</script>
+</body>
+</html>

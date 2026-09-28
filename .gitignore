@@ -1,0 +1,34 @@
+# generated / local
+tools/__pycache__/
+__pycache__/
+*.pyc
+
+# The compiled Cronometer client used by tools/gen_registry.py and tests/registry-builder.html (5.7 MB, fetched
+# with `python tools/fetch_bundle.py`; the parity tests print one SKIPPED line without it).
+tools/bundle/
+
+# Release packages (`python tools/build_zip.py`) are attached to GitHub Releases, not committed.
+dist/
+
+# Scratch pages / scripts used while debugging (tests/run.sh would otherwise pick a tests/_*.html page up).
+tests/_*.html
+tools/_*.py
+
+# store-assets/: the README and manifest.json describing the Chrome Web Store screenshots are committed, but the
+# PNGs themselves are NOT: a live `python tools/screenshots.py` run captures a real account's diary. They are
+# uploaded to the store after the account owner has reviewed them (force-add a reviewed set if you want it in git).
+# The dry-run/ subfolder is the tool's self-check output against the mock diary, rewritten on every green-bar run.
+store-assets/*.png
+store-assets/dry-run/
+
+# Upstream Adaptive TDEE engine files, kept pristine until the TDEE feature that wraps them is committed with it.
+vendor/
+
+# editor / OS droppings
+*.bak
+*.orig
+*.rej
+*.swp
+*~
+.DS_Store
+Thumbs.db

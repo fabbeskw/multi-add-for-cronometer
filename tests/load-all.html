@@ -1,0 +1,247 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>load-all</title>
+<script>
+  // Installed before any extension script so that a load-time exception in any of them is counted.
+  window.__cmaLoadErrors = [];
+  window.addEventListener('error', function (e) { window.__cmaLoadErrors.push(String((e && e.message) || e)); });
+  window.addEventListener('unhandledrejection', function (e) {
+    window.__cmaLoadErrors.push('unhandledrejection: ' + String(e && e.reason && (e.reason.message || e.reason)));
+  });
+</script>
+</head>
+<body>
+<pre id="results"></pre>
+<!-- stands in for the GWT app's hidden <iframe id="cronometer">: content.js mounts the panel only where the app is -->
+<div id="cronometer" hidden></div>
+<script src="lib.js"></script>
+<!-- manifest.json content_scripts[0]: MAIN world, document_start -->
+<script src="../src/hook-main.js"></script>
+<!-- manifest.json content_scripts[1]: ISOLATED world, document_idle, in the exact manifest order
+     (tools/check_manifest.py fails when this list and the manifest drift apart). -->
+<script src="../src/lib/gwt-registry.js"></script>
+<script src="../src/lib/gwt-stream.js"></script>
+<script src="../src/lib/registry-builder.js"></script>
+<script src="../src/lib/registry-store.js"></script>
+<script src="../src/lib/rpc.js"></script>
+<script src="../src/lib/capture.js"></script>
+<script src="../src/lib/parse.js"></script>
+<script src="../src/lib/units.js"></script>
+<script src="../src/lib/plan.js"></script>
+<script src="../src/lib/dom.js"></script>
+<script src="../src/lib/engine-rpc.js"></script>
+<script src="../src/lib/engine-ui.js"></script>
+<script src="../src/ui/panel.css.js"></script>
+<script src="../src/ui/panel.js"></script>
+<script src="../src/content.js"></script>
+<!-- test-only: captured strings + value-graph builders -->
+<script src="fixtures.js"></script>
+<script>
+(function () {
+  'use strict';
+  const T = CMA.test;
+  const { eq, ok, deepEq } = T;
+  const ISOLATED = [
+    'src/lib/gwt-registry.js', 'src/lib/gwt-stream.js', 'src/lib/registry-builder.js', 'src/lib/registry-store.js',
+    'src/lib/rpc.js', 'src/lib/capture.js', 'src/lib/parse.js',
+    'src/lib/units.js', 'src/lib/plan.js', 'src/lib/dom.js', 'src/lib/engine-rpc.js', 'src/lib/engine-ui.js',
+    'src/ui/panel.css.js', 'src/ui/panel.js', 'src/content.js',
+  ];
+  const NAMESPACES = ['registry', 'gwt', 'registryBuilder', 'registryStore', 'rpc', 'capture', 'parse', 'units', 'plan', 'dom', 'engineRpc', 'engineUi', 'panelCss', 'panel'];
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function poll(fn, label, timeout) {
+    return new Promise((resolve, reject) => {
+      const t0 = Date.now();
+      (function tick() {
+        let v = null;
+        try { v = fn(); } catch (e) { return reject(e); }
+        if (v) return resolve(v);
+        if (Date.now() - t0 > (timeout || 4000)) return reject(new Error('timed out waiting for ' + label));
+        setTimeout(tick, 10);
+      })();
+    });
+  }
+  function kinds(sig) { const e = CMA.registry.types[sig]; return e && e.k === 'class' ? e.f.join('') : null; }
+
+  T.describe('load-all: every manifest script in order', () => {
+    T.it('no script threw while loading (window error / unhandledrejection counters)', () => {
+      deepEq(window.__cmaLoadErrors, []);
+    });
+    T.it('every CMA namespace exists', () => {
+      for (const n of NAMESPACES) ok(CMA[n] != null, 'CMA.' + n + ' missing');
+      eq(typeof CMA.panelCss, 'string'); ok(CMA.panelCss.length > 1000, 'panel css is a real stylesheet');
+      ok(CMA.events && typeof CMA.events.on === 'function' && typeof CMA.events.emit === 'function', 'CMA.events');
+      ok(CMA.errors && CMA.errors.Session && CMA.errors.Throttled && CMA.errors.Network && typeof CMA.errors.isNetwork === 'function', 'CMA.errors');
+      const page = Array.from(document.querySelectorAll('script[src^="../src/"]')).map((s) => s.getAttribute('src').slice(3));
+      deepEq(page, ['src/hook-main.js'].concat(ISOLATED), 'the page loads exactly the manifest list');
+    });
+    T.it('the loaded list equals manifest.json (checked when file access is allowed, as tests/run.sh does)', async () => {
+      const text = await new Promise((resolve) => {
+        try {
+          const x = new XMLHttpRequest();
+          x.open('GET', '../manifest.json');
+          x.addEventListener('loadend', () => resolve(x.responseText || ''));
+          x.send();
+        } catch (e) { resolve(''); }
+      });
+      if (!text) { ok(true, 'manifest not readable from file: without --allow-file-access-from-files'); return; }
+      const m = JSON.parse(text);
+      eq(m.manifest_version, 3);
+      deepEq(m.content_scripts[0].js, ['src/hook-main.js']);
+      eq(m.content_scripts[0].world, 'MAIN'); eq(m.content_scripts[0].run_at, 'document_start');
+      deepEq(m.content_scripts[1].js, ISOLATED);
+      eq(m.content_scripts[1].run_at, 'document_idle'); eq(m.content_scripts[1].world, undefined);
+      deepEq(m.host_permissions, ['https://cronometer.com/*']);
+      deepEq(m.permissions, ['storage']);
+    });
+  });
+
+  T.describe('load-all: hook + content bootstrap', () => {
+    T.it('hook-main.js can be evaluated in a page and answers a ping with a pong', async () => {
+      eq(window.__cmaHookInstalled, true);
+      const got = new Promise((resolve) => {
+        window.addEventListener('message', function h(ev) {
+          if (ev.source === window && ev.data && ev.data.source === 'cma-hook' && ev.data.type === 'pong') { window.removeEventListener('message', h); resolve(ev.data); }
+        });
+      });
+      window.postMessage({ source: 'cma-content', type: 'ping' }, '/');
+      const pong = await got;
+      eq(pong.hooked, true);
+      eq(typeof pong.replayed, 'number');
+      eq(typeof pong.seq, 'number');
+    });
+    T.it('content.js pinged the hook and recorded hooked=true', async () => {
+      await poll(() => CMA.capture.state.hooked === true, 'capture.state.hooked');
+      ok(CMA.capture.state.log.some((e) => e.kind === 'hook'), 'hook log entry');
+      const r = CMA.capture.ready();
+      eq(r.ok, false);
+      deepEq(r.missing, ['nonce', 'userId', 'permutation', 'policyHash', 'moduleBase'], 'nothing but hooked is known in a bare page');
+    });
+    T.it('content.js awaited CMA.registryStore.init() before its first ping (SPEC 3.5 ordering: the replayed authenticate is decoded with the stored decoder)', async () => {
+      await poll(() => CMA.capture.state.hooked === true, 'capture.state.hooked');
+      const log = CMA.capture.state.log;
+      const i = log.findIndex((e) => e.kind === 'registry' && /initialised before the first ping/.test(e.note));
+      const j = log.findIndex((e) => e.kind === 'hook' && /answered ping/.test(e.note));
+      ok(i >= 0, 'store init logged'); ok(j >= 0, 'pong logged');
+      ok(i < j, 'init logged before the pong (' + i + ' < ' + j + ')');
+      const st = CMA.registryStore.status();
+      eq(st.initDone, true); eq(st.active, 'bundled'); eq(st.bundledPermutation, CMA.registry.permutation);
+      eq(CMA.registryStore.bundled, CMA.registry, 'no chrome.storage here: the bundled registry is the active one');
+      eq(CMA.gwt.registryInfo().source, 'bundled');
+      eq(typeof CMA.gwt.reloadRegistry, 'function');
+      eq(typeof CMA.registryBuilder.build, 'function'); eq(typeof CMA.registryBuilder.fetchBundle, 'function'); eq(typeof CMA.registryBuilder.validate, 'function');
+    });
+    T.it('content.js mounted the panel (shadow host + launcher) and Alt+Shift+M is wired', async () => {
+      await poll(() => document.getElementById(CMA.panel.HOST_ID), 'panel host');
+      const host = document.getElementById(CMA.panel.HOST_ID);
+      eq(host.shadowRoot, null, 'closed shadow root: page scripts cannot read the panel through host.shadowRoot');
+      ok(CMA.panel.root && CMA.panel.root.mode === 'closed', 'the isolated world holds the only reference');
+      ok(CMA.panel.root.querySelector('.cma-launcher'), 'launcher');
+      eq(CMA.panel.isOpen(), false);
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'M', code: 'KeyM', altKey: true, shiftKey: true, bubbles: true }));
+      eq(CMA.panel.isOpen(), true);
+      CMA.panel.close();
+      eq(CMA.panel.isOpen(), false);
+      // Ctrl+Alt+M is the alternative chord (Left Alt+Shift switches the input language on Windows) …
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', code: 'KeyM', ctrlKey: true, altKey: true, bubbles: true }));
+      eq(CMA.panel.isOpen(), true, 'Ctrl+Alt+M toggles');
+      // … but not while typing in a field: Windows reports AltGr as Ctrl+Alt and AltGr+M types a character on some layouts
+      const ta = document.createElement('textarea');
+      document.body.appendChild(ta);
+      ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'µ', code: 'KeyM', ctrlKey: true, altKey: true, bubbles: true }));
+      eq(CMA.panel.isOpen(), true, 'ignored on an editable target');
+      ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'M', code: 'KeyM', altKey: true, shiftKey: true, bubbles: true }));
+      eq(CMA.panel.isOpen(), false, 'Alt+Shift+M still works everywhere');
+      ta.remove();
+    });
+  });
+
+  T.describe('load-all: cross-module contracts', () => {
+    T.it('registry layouts behind CMA.gwt.SIG match SPEC 3.3', () => {
+      const S = CMA.gwt.SIG;
+      eq(kinds(S.SERVING), 'ozzoioidiliii'); eq(kinds(S.DAY), 'bbh'); eq(kinds(S.TIME), 'bbb');
+      eq(kinds(S.ADD_ENTRY_CHANGE), 'zzo'); eq(kinds(S.ADD_ENTRY_CHANGE_RESULT), 'o'); eq(kinds(S.ERROR_ENTRY_CHANGE_RESULT), 'oo');
+      eq(kinds(S.DAYINFO), 'zooozs'); eq(kinds(S.MEASURE), 'dziziosood'); eq(kinds(S.FOOD_MEASURES), 'io');
+      eq(kinds(S.FOOD).length, 20); eq(kinds(S.FOOD)[4], 's'); eq(kinds(S.FOOD)[7], 'i'); eq(kinds(S.FOOD)[11], 'o');
+      eq(kinds(S.USER).length, 42); eq(kinds(S.USER)[19], 'i'); eq(kinds(S.USER)[33], 's');
+      eq(CMA.registry.types[S.SINGLETON].k, 'singleton'); eq(CMA.registry.types[S.ARRAYLIST].k, 'list');
+      eq(CMA.registry.types[S.MEASURE_TYPE].k, 'enum');
+      ok(/^[0-9A-F]{32}$/.test(CMA.registry.permutation) && /^[0-9A-F]{32}$/.test(CMA.registry.policyHash), 'permutation + policy hash recorded');
+      deepEq(CMA.gwt.F, {
+        SERVING: { DAY: 0, ORDER: 4, TIME: 5, USER: 6, GRAMS: 7, FOOD: 8, ID: 9, MEASURE: 10, TRANSLATION: 12 },
+        MEASURE: { AMOUNT: 0, FOOD: 2, HIDDEN: 3, ID: 4, ML: 5, NAME: 6, TYPE: 8, GRAMS: 9 },
+        FOOD: { NAME: 4, ID: 7, MEASURES: 11, TRANSLATIONS: 17 },
+        DAYINFO: { LIST1: 2, LIST2: 3 },
+        USER: { ID: 19, SESSION: 33 },
+      });
+      eq(kinds(CMA.gwt.sig('com.cronometer.shared.foods.models.Translation')), 'osi', 'Translation = [Language, name, id] (plan.translationIdFor)');
+      eq(kinds(CMA.gwt.sig('com.cronometer.shared.user.models.Language')), 'ssss', 'Language = [code, ...]');
+    });
+    T.it('errors: one CMA.errors shared by rpc.js and plan.js, with kinds and isNetwork', () => {
+      const s = new CMA.errors.Session('x'); eq(s.kind, 'session'); ok(s instanceof Error);
+      const t = new CMA.errors.Throttled('y', { status: 429, retryable: true }); eq(t.kind, 'throttled'); eq(t.status, 429);
+      const n = new CMA.errors.Network('Failed to fetch'); eq(n.kind, 'network');
+      eq(CMA.errors.isNetwork(n), true); eq(CMA.errors.isNetwork(new TypeError('Failed to fetch')), true);
+      eq(CMA.errors.isNetwork(s), false); eq(CMA.errors.isNetwork(t), false); eq(CMA.errors.isNetwork(new Error('rpc')), false);
+    });
+    T.it('parse -> rpc.measuresOf -> units.pickMeasure -> plan.servingFor -> rpc.servingValue -> gwt.Writer is byte-equal to the SPEC 4 template', () => {
+      const FX = CMA.fixtures;
+      const item = CMA.parse.lines('50g chicken breast')[0];
+      eq(item.qty, 50); eq(item.unit, 'g'); eq(item.name, 'chicken breast');
+      const food = FX.food({ id: 464674, name: 'Chicken breast', defaultMeasureId: 1072101, measures: [
+        FX.measure({ foodId: 464674, id: 1072101, name: 'g', type: 0, grams: 1 }),
+        FX.measure({ foodId: 464674, id: 5, name: 'breast', type: 2, grams: 172 }),
+      ] });
+      const measures = CMA.rpc.measuresOf(food);
+      eq(measures.length, 2); eq(measures[0].type, 'Weight'); eq(measures[0].foodId, 464674);
+      const pick = CMA.units.pickMeasure(measures, item.unit, item.qty, { hitMeasureId: 1072101, defaultMeasureId: CMA.rpc.defaultMeasureIdOf(food) });
+      eq(pick.error, undefined); eq(pick.measure.id, 1072101); eq(pick.quantity, 50); eq(pick.grams, 50);
+      const row = { item, hit: { id: 464674, name: 'Chicken breast', translationId: 0 }, food, measures, pick,
+        translationId: CMA.plan.translationIdFor({ id: 464674, name: 'Chicken breast', translationId: 0 }, food),
+        groupId: 1, position: 1, order: (1 << 16) | 1, status: 'ready' };
+      const serving = CMA.plan.servingFor(row, { day: 4, month: 3, year: 2026 });
+      eq(serving.$t, CMA.gwt.SIG.SERVING, 'plan resolves the Serving signature through the registry');
+      eq(serving.f[0].$t, CMA.gwt.SIG.DAY);
+      eq(serving.f.length, 13);
+      eq(CMA.rpc.servingValue(serving), serving, 'rpc accepts the plan value as is');
+      const change = { $t: CMA.gwt.SIG.ADD_ENTRY_CHANGE, f: [true, true, serving] };
+      const body = new CMA.gwt.Writer(FX.moduleBase, 'POLICY').call('updateDiary', [CMA.gwt.STRING_SIG, 'I', 'java.util.List'],
+        ['NONCE', 1234567, { $t: CMA.gwt.SIG.SINGLETON, f: [change] }]);
+      eq(body, FX.updateDiaryTemplate);
+      // and the captured updateDiary response decodes to the id the engine will pass back to removeServing verbatim
+      const r = CMA.gwt.readResponse(FX.updateDiaryResponse);
+      eq(r.ok, true);
+      eq(r.value[0].f[0].f[CMA.gwt.F.SERVING.ID], 'D80lp$');
+      eq(CMA.gwt.isLongToken('D80lp$'), true);
+    });
+    T.it('capture.session() has exactly the keys rpc.js takes; snapshot and panel diagnostics never carry the nonce', () => {
+      deepEq(Object.keys(CMA.capture.session()), ['moduleBase', 'permutation', 'policyHash', 'nonce', 'userId']);
+      const secret = 'LOADALL-SECRET-NONCE-0123456789abcdef';
+      CMA.capture.state.nonce = secret;
+      try {
+        eq(JSON.stringify(CMA.capture.snapshot()).indexOf(secret), -1, 'snapshot');
+        const diag = CMA.panel.diagnosticsText();
+        eq(diag.indexOf(secret), -1, 'diagnostics');
+        ok(/"nonce": "present"/.test(diag), 'nonce reported as present');
+        eq(CMA.capture.redact('x ' + secret + ' y'), 'x ' + secret + ' y', 'redact only knows nonces captured through handleMessage');
+      } finally { CMA.capture.state.nonce = null; }
+    });
+    T.it('engine-ui and engine-rpc read the same plan row shape', () => {
+      const row = { hit: { name: 'Egg, Whole, Cooked' }, item: { name: 'egg' }, pick: { measure: { name: 'large', id: 1 }, quantity: 2, grams: 100 }, groupId: 1, status: 'ready' };
+      eq(CMA.engineUi.rowName(row), 'Egg, Whole, Cooked');
+      eq(CMA.engineUi.rowMeasureName(row), 'large');
+      eq(CMA.engineUi.rowQuantity(row), 2);
+      eq(CMA.engineUi.groupNameFor(row, CMA.plan.DEFAULT_GROUPS), 'Breakfast');
+      eq(CMA.engineUi.formatQuantity(1.5), CMA.units.formatQuantity(1.5));
+      eq(typeof CMA.engineRpc.run, 'function'); eq(typeof CMA.engineRpc.undo, 'function'); eq(typeof CMA.engineRpc.refreshDiary, 'function');
+      eq(CMA.plan.rechoose.length >= 3, true, 'rechoose(session, row, hitIndex)');
+    });
+  });
+
+  CMA.test.run({ timeoutMs: 8000 });
+})();
+</script>
+</body>
+</html>

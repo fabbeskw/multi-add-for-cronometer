@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>hook-buffer</title></head>
+<body>
+<pre id="results"></pre>
+<!-- hook-main.js alone: the early-traffic buffer must keep the authenticate exchange when it overflows
+     (SPEC 2.1: authenticate is the first RPC after load and the only source of the diary groups). -->
+<script src="lib.js"></script>
+<script src="../src/hook-main.js"></script>
+<script>
+(function () {
+  'use strict';
+  const T = CMA.test;
+  const { eq, ok } = T;
+  const msgs = [];
+  window.addEventListener('message', (ev) => {
+    if (ev.source === window && ev.data && typeof ev.data === 'object' && ev.data.source === 'cma-hook') msgs.push(ev.data);
+  });
+  function xhr(method, url, body) {
+    return new Promise((resolve) => {
+      const x = new XMLHttpRequest();
+      x.open(method, url);
+      x.addEventListener('loadend', () => resolve(x));
+      x.send(body === undefined ? null : body);
+    });
+  }
+  const SERVICE = 'com.cronometer.shared.rpc.CronometerService';
+  const AUTH = '7|0|5|https://cronometer.com/cronometer/|POLICY|' + SERVICE + '|authenticate|java.lang.Integer/3438268394|1|2|3|4|1|5|5|-300|';
+  const GETFOOD = (i) => '7|0|7|https://cronometer.com/cronometer/|POLICY|' + SERVICE + '|getFood|java.lang.String/2004016611|I|NONCE|1|2|3|4|2|5|6|7|' + i + '|';
+
+  T.describe('hook-main.js: buffer overflow keeps the authenticate exchange (SPEC 2.1 / 2.2)', () => {
+    T.it('106 relayed requests before the first ping: nothing is posted live, the replay holds 100 messages and still starts with authenticate', async () => {
+      await xhr('POST', '/cronometer/app', AUTH);
+      for (let i = 1; i <= 105; i++) await xhr('POST', '/cronometer/app', GETFOOD(i));
+      // postMessage deliveries are queued tasks: give any (unexpected) live copies time to arrive
+      await new Promise((r) => setTimeout(r, 200));
+      eq(msgs.filter((m) => m.type === 'xhr').length, 0, 'nothing is posted before the first ping (nobody legitimate listens yet)');
+      msgs.length = 0;
+      // a port-less ping (this page has no content script): the hook answers on the window
+      window.postMessage({ source: 'cma-content', type: 'ping' }, '/');
+      await new Promise((r) => { (function poll() { if (msgs.some((m) => m.type === 'pong')) return r(); setTimeout(poll, 10); })(); });
+      const pong = msgs.find((m) => m.type === 'pong');
+      eq(pong.replayed, 100);
+      const replays = msgs.filter((m) => m.type === 'xhr');
+      eq(replays.length, 100);
+      ok(replays.every((m) => m.replay === true), 'replays are marked');
+      eq(replays[0].seq, 1, 'authenticate (seq 1) survived the eviction');
+      ok(/\|authenticate\|/.test(replays[0].requestBody), 'and it is the authenticate body');
+      eq(replays[1].seq, 8, 'the six oldest getFood messages (seq 2..7) were evicted instead');
+      eq(replays[replays.length - 1].seq, 106);
+      const seqs = replays.map((m) => m.seq);
+      ok(seqs.every((s, i) => i === 0 || s > seqs[i - 1]), 'wire order kept');
+    });
+  });
+
+  T.run({ timeoutMs: 20000 });
+})();
+</script>
+</body>
+</html>

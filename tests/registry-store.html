@@ -1,0 +1,912 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>registry-store</title></head>
+<body>
+<pre id="results"></pre>
+<script src="lib.js"></script>
+<script src="../src/lib/gwt-registry.js"></script>
+<script src="../src/lib/gwt-stream.js"></script>
+<script>
+/* ---- STUBS installed before registry-store.js: a fake chrome.storage.local and a fake CMA.registryBuilder
+   (this page codes against the documented API of src/lib/registry-builder.js, SPEC 3.5:
+   fetchBundle(moduleBase, permutation, {onProgress}) -> {text, fragments, bytes}, build(text, {permutation,
+   generatedAt, bundle, onProgress, onWarning}) -> registry, validate(registry) -> {ok, problems}). ---- */
+(function () {
+  window.CMA = window.CMA || {};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // chrome.storage.local shim: JSON round trip like the real one; get() can be delayed or held back
+  const store = {};
+  const storeFlags = { getDelayMs: 0, hold: false, getError: null, removeError: null, setHang: false, setFailKeys: null };
+  const storeCalls = { get: 0, set: 0, remove: 0, pending: null };
+  // chrome.storage.onChanged: like the real API the event reaches every listener asynchronously, the writer's
+  // own context included; tests fire it by hand for "another tab" through window.__fireStorageChange
+  const changeListeners = [];
+  function fireChanges(changes) { setTimeout(() => changeListeners.slice().forEach((fn) => { try { fn(JSON.parse(JSON.stringify(changes)), 'local'); } catch (e) { /* ignore */ } }), 0); }
+  window.__store = store; window.__storeFlags = storeFlags; window.__storeCalls = storeCalls;
+  window.__fireStorageChange = (changes, area) => changeListeners.slice().forEach((fn) => fn(changes, area || 'local'));
+  // like the real API, a failure is reported through chrome.runtime.lastError, set only while the callback runs
+  function withLastError(msg, cb, arg) {
+    window.chrome.runtime.lastError = { message: msg };
+    try { cb(arg); } finally { delete window.chrome.runtime.lastError; }
+  }
+  window.chrome = { storage: { local: {
+    get(keys, cb) {
+      storeCalls.get++;
+      const out = {};
+      (Array.isArray(keys) ? keys : [keys]).forEach((k) => { if (k in store) out[k] = JSON.parse(JSON.stringify(store[k])); });
+      if (storeFlags.getError) { const msg = storeFlags.getError; setTimeout(() => withLastError(msg, cb, {}), 0); return; }
+      if (storeFlags.hold) { storeCalls.pending = () => cb(out); return; }   // answered by the test, or never
+      setTimeout(() => cb(out), storeFlags.getDelayMs);
+    },
+    set(obj, cb) {
+      storeCalls.set++;
+      if (storeFlags.setHang) return;                                                  // a hung backend: never calls back
+      if (storeFlags.setFailKeys && Object.keys(obj).some((k) => storeFlags.setFailKeys.indexOf(k) >= 0)) { withLastError('QUOTA_BYTES quota exceeded', cb || (() => {})); return; }   // nothing stored
+      const changes = {};
+      Object.keys(obj).forEach((k) => { changes[k] = { oldValue: store[k], newValue: obj[k] }; });
+      Object.assign(store, JSON.parse(JSON.stringify(obj)));
+      cb && cb();
+      fireChanges(changes);
+    },
+    remove(keys, cb) {
+      storeCalls.remove++;
+      if (storeFlags.removeError) { withLastError(storeFlags.removeError, cb || (() => {})); return; }   // nothing removed
+      const changes = {};
+      (Array.isArray(keys) ? keys : [keys]).forEach((k) => { if (k in store) changes[k] = { oldValue: store[k] }; delete store[k]; });
+      cb && cb();
+      fireChanges(changes);
+    },
+  }, onChanged: {
+    addListener(fn) { changeListeners.push(fn); },
+    removeListener(fn) { const i = changeListeners.indexOf(fn); if (i >= 0) changeListeners.splice(i, 1); },
+  } }, runtime: {} };
+
+  // fake builder: the "live" registry is the bundled one with the Serving CRC changed
+  const OLD_SERVING = 'com.cronometer.shared.entries.models.Serving/2553599101';
+  const NEW_SERVING = 'com.cronometer.shared.entries.models.Serving/1111';
+  window.__OLD_SERVING = OLD_SERVING; window.__NEW_SERVING = NEW_SERVING;
+  function liveRegistry(permutation, generatedAt) {
+    const r = JSON.parse(JSON.stringify(CMA.registry));
+    const serving = r.types[OLD_SERVING];
+    delete r.types[OLD_SERVING];
+    r.types[NEW_SERVING] = serving;
+    r.permutation = permutation;
+    r.generatedAt = generatedAt || 'fake';
+    delete r.source;
+    return r;
+  }
+  window.__liveRegistry = liveRegistry;
+  const builderCalls = { fetchBundle: [], build: [], validate: [] };
+  const builderFlags = { validateOk: true, validateProblems: null, fetchError: null, buildError: null, fetchDelayMs: 5, buildDelayMs: 5, warnings: null, truncated: false };
+  window.__builderCalls = builderCalls; window.__builderFlags = builderFlags;
+  CMA.registryBuilder = {
+    async fetchBundle(moduleBase, permutation, opts) {
+      builderCalls.fetchBundle.push({ moduleBase, permutation });
+      if (opts && opts.onProgress) opts.onProgress({ fragment: 1, fragments: 3, bytes: 100 });
+      await sleep(builderFlags.fetchDelayMs);
+      if (builderFlags.fetchError) throw new Error(builderFlags.fetchError);
+      if (opts && opts.onProgress) opts.onProgress({ fragment: 3, fragments: 3, bytes: 300 });
+      return { text: 'FAKE BUNDLE ' + permutation, fragments: 3, bytes: 300, truncated: !!builderFlags.truncated };
+    },
+    async build(text, opts) {
+      builderCalls.build.push({ text, permutation: opts && opts.permutation, generatedAt: opts && opts.generatedAt, bundle: opts && opts.bundle, hasOnWarning: !!(opts && typeof opts.onWarning === 'function') });
+      if (opts && opts.onProgress) opts.onProgress({ step: 'tables', index: 1, total: 2 });
+      // the real builder reports gen_registry.py's stderr warnings through onWarning (never in the registry)
+      if (opts && typeof opts.onWarning === 'function') (builderFlags.warnings || []).forEach((w) => opts.onWarning(w));
+      await sleep(builderFlags.buildDelayMs);
+      if (builderFlags.buildError) throw new Error(builderFlags.buildError);
+      return liveRegistry(opts.permutation, opts.generatedAt);
+    },
+    validate(registry, opts) {
+      builderCalls.validate.push({ registry, opts: opts || null });
+      return builderFlags.validateOk ? { ok: true, problems: [] } : { ok: false, problems: builderFlags.validateProblems || ['Serving: expected 13 fields, found 12'] };
+    },
+  };
+})();
+</script>
+<script src="../src/lib/registry-store.js"></script>
+<script src="../src/lib/rpc.js"></script>
+<script src="../src/lib/capture.js"></script>
+<script src="fixtures.js"></script>
+<script>
+(function () {
+  'use strict';
+  const T = CMA.test, G = CMA.gwt, FX = CMA.fixtures, C = CMA.capture, EV = CMA.events;
+  const { eq, ok, deepEq } = T;
+  const MB = FX.moduleBase;
+  const BUNDLED = CMA.registry;                                   // the generated registry, captured before any swap
+  const BUNDLED_PERM = String(BUNDLED.permutation).toUpperCase();
+  const OLD_SERVING = window.__OLD_SERVING, NEW_SERVING = window.__NEW_SERVING;
+  // 32-hex "permutations" standing in for Cronometer builds the bundled registry was not generated from
+  const LIVE1 = 'AB11AB11AB11AB11AB11AB11AB11AB11';
+  const LIVE2 = 'AB22AB22AB22AB22AB22AB22AB22AB22';
+  const LIVE3 = 'AB33AB33AB33AB33AB33AB33AB33AB33';
+  const LIVE4 = 'AB44AB44AB44AB44AB44AB44AB44AB44';
+  const LIVE5 = 'AB55AB55AB55AB55AB55AB55AB55AB55';
+  const LIVE6 = 'AB66AB66AB66AB66AB66AB66AB66AB66';
+  const LIVE7 = 'AB77AB77AB77AB77AB77AB77AB77AB77';
+  const LIVE9 = 'AB99AB99AB99AB99AB99AB99AB99AB99';
+  const store = window.__store, storeFlags = window.__storeFlags, storeCalls = window.__storeCalls;
+  const builderCalls = window.__builderCalls, builderFlags = window.__builderFlags;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const S = () => CMA.registryStore;
+  /** A storage record as this version writes it (stamped with the schema and the builder = extension version). */
+  function record(perm, extra) {
+    return Object.assign({ schema: S().RECORD_SCHEMA, builder: S().BUILDER_VERSION, permutation: perm, registry: window.__liveRegistry(perm, '2026-09-28T00:00:00.000Z'), builtAt: 1700000000000, bytes: 4200, fragments: 15 }, extra || {});
+  }
+  /** Re-evaluate registry-store.js: a fresh store instance (its init() is memoised per instance). */
+  function reloadStore() {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '../src/lib/registry-store.js?' + Date.now() + Math.random();
+      s.onload = () => resolve(CMA.registryStore);
+      s.onerror = () => reject(new Error('could not reload registry-store.js'));
+      document.head.appendChild(s);
+    });
+  }
+  function eventsOf(name) {
+    const got = [];
+    const off = EV.on(name, (p) => got.push(p));
+    return { got, off };
+  }
+  function rpcMsg(body, responseText, extra) {
+    return Object.assign({
+      source: 'cma-hook', type: 'xhr', method: 'POST', url: MB + 'app',
+      requestHeaders: { 'Content-Type': 'text/x-gwt-rpc; charset=utf-8', 'X-GWT-Permutation': BUNDLED_PERM, 'X-GWT-Module-Base': MB },
+      requestBody: body, status: 200, responseText: responseText === undefined ? FX.voidResponse : responseText,
+      responseHeaders: '', t: Date.now(),
+    }, extra || {});
+  }
+  /** Put the bundled registry back so every describe starts from the shipped state. */
+  async function restoreBundled() {
+    await S().forget();
+    S().activate(BUNDLED_PERM);
+    eq(CMA.registry, BUNDLED);
+    eq(G.SIG.SERVING, OLD_SERVING);
+  }
+
+  // ================================================================================================
+  T.describe('registry-store: init and activate (SPEC 3.5)', () => {
+    T.it('captures the bundled registry at load; init with nothing stored resolves and activate(X) keeps the bundled registry active', async () => {
+      eq(S().bundled, BUNDLED);
+      eq(S().stored, null);
+      eq(S().status().initDone, false);
+      const st = await S().init();
+      eq(st.initDone, true); eq(st.init.how, 'empty'); eq(st.storedPermutation, null); eq(st.active, 'bundled');
+      eq(await S().init(), await S().init(), 'init() is memoised');
+      eq(storeCalls.get, 1, 'one storage read');
+      const r = S().activate(LIVE1);
+      deepEq(r, { source: 'bundled', changed: false, permutation: LIVE1 });
+      eq(CMA.registry, BUNDLED, 'bundled stays active');
+      eq(S().status().activePermutation, LIVE1);
+      eq(S().status().active, 'bundled');
+      eq(G.SIG.SERVING, OLD_SERVING);
+      deepEq(G.registryInfo(), { permutation: BUNDLED_PERM, policyHash: String(BUNDLED.policyHash), generatedAt: BUNDLED.generatedAt, types: Object.keys(BUNDLED.types).length, source: 'bundled' });
+    });
+    T.it('init() resolves within 500 ms when storage never answers; a record arriving later is still adopted and activated', async () => {
+      storeFlags.hold = true;
+      store.cmaRegistry = record(LIVE1);
+      const s = await reloadStore();
+      const t0 = Date.now();
+      const st = await s.init();
+      const elapsed = Date.now() - t0;
+      ok(elapsed >= 400 && elapsed <= 900, 'resolved by the 500 ms timeout (took ' + elapsed + ' ms)');
+      eq(st.init.how, 'timeout'); eq(st.storedPermutation, null);
+      // the live permutation is learned while storage is still silent: the bundled registry serves it
+      deepEq(s.activate(LIVE1), { source: 'bundled', changed: false, permutation: LIVE1 });
+      eq(G.SIG.SERVING, OLD_SERVING, 'sig cache primed on the bundled registry');
+      // storage answers late: the record is adopted and, the permutation being known, installed at once
+      const ev = eventsOf('registry');
+      storeCalls.pending();
+      storeCalls.pending = null;
+      await sleep(5);
+      ev.off();
+      eq(s.stored.permutation, LIVE1);
+      eq(CMA.registry.permutation, LIVE1); eq(CMA.registry.source, 'runtime');
+      eq(s.status().active, 'runtime'); eq(s.status().init.late, 'loaded');
+      eq(ev.got.length, 1); eq(ev.got[0].source, 'runtime'); eq(ev.got[0].changed, true);
+      eq(G.SIG.SERVING, NEW_SERVING, 'CMA.gwt caches were reloaded');
+      eq(G.registryInfo().source, 'runtime'); eq(G.registryInfo().permutation, LIVE1);
+      storeFlags.hold = false;
+      await restoreBundled();
+    });
+    T.it('a stored registry for LIVE1: activate(LIVE1) swaps CMA.registry, reloads the gwt caches and emits "registry"; idempotent; activate(bundled) swaps back', async () => {
+      store.cmaRegistry = record(LIVE1);
+      const s = await reloadStore();
+      const st = await s.init();
+      eq(st.init.how, 'loaded'); eq(st.storedPermutation, LIVE1); eq(st.storedAt, 1700000000000); eq(st.active, 'bundled', 'init never activates by itself');
+      eq(CMA.registry, BUNDLED);
+      eq(G.SIG.SERVING, OLD_SERVING, 'prime the cache so the swap proves it was cleared');
+      const ev = eventsOf('registry');
+      const r = s.activate(LIVE1.toLowerCase());
+      deepEq(r, { source: 'runtime', changed: true, permutation: LIVE1 });
+      eq(CMA.registry.permutation, LIVE1); eq(CMA.registry !== BUNDLED, true);
+      eq(G.SIG.SERVING, NEW_SERVING, 'reloadRegistry() cleared sigCache');
+      eq(G.sig('com.cronometer.shared.entries.models.Serving'), NEW_SERVING);
+      eq(G.boxSig('i'), 'java.lang.Integer/3438268394', 'boxes resolve against the new registry');
+      eq(ev.got.length, 1);
+      eq(ev.got[0].source, 'runtime'); eq(ev.got[0].permutation, LIVE1); eq(ev.got[0].registryPermutation, LIVE1); eq(ev.got[0].types, Object.keys(BUNDLED.types).length);
+      deepEq(s.activate(LIVE1), { source: 'runtime', changed: false, permutation: LIVE1 }, 'idempotent');
+      eq(ev.got.length, 1, 'no event without a change');
+      // a Serving with the new CRC round-trips through Writer/Reader now, the old one is unknown
+      const sv = Object.assign(FX.serving({ grams: 50, foodId: 1, measureId: 2 }), { $t: NEW_SERVING });
+      const back = G.readResponse(G.encodeResponse(sv)).value;
+      eq(back.$t, NEW_SERVING); eq(back.f[G.F.SERVING.GRAMS], 50);
+      await T.throws(() => G.readResponse(FX.updateDiaryResponse), /unknown type signature .*Serving\/2553599101/);
+      // back to the bundled registry for the build it was generated from
+      deepEq(s.activate(BUNDLED_PERM), { source: 'bundled', changed: true, permutation: BUNDLED_PERM });
+      eq(CMA.registry, BUNDLED); eq(G.SIG.SERVING, OLD_SERVING); eq(ev.got.length, 2); eq(ev.got[1].source, 'bundled');
+      eq(G.readResponse(FX.updateDiaryResponse).ok, true);
+      ev.off();
+      eq(s.status().storedPermutation, LIVE1, 'the stored record is kept for the next visit');
+      await restoreBundled();
+    });
+    T.it('a malformed stored record is ignored (bundled stays active) and forget() removes the stored one', async () => {
+      store.cmaRegistry = { permutation: LIVE2, registry: { types: {} } };
+      let s = await reloadStore();
+      await s.init();
+      eq(s.stored, null); eq(s.status().init.how, 'empty');
+      ok(C.state.log.some((e) => e.kind === 'registry' && /unusable record/.test(e.note)), 'logged');
+      eq(store.cmaRegistry, undefined, 'an unusable record is removed from storage');
+      store.cmaRegistry = record(LIVE2, { registry: window.__liveRegistry(LIVE1) });   // permutation disagreement
+      s = await reloadStore();
+      await s.init();
+      eq(s.stored, null);
+      store.cmaRegistry = record(LIVE2);
+      s = await reloadStore();
+      await s.init();
+      eq(s.stored.permutation, LIVE2);
+      s.activate(LIVE2);
+      eq(CMA.registry.permutation, LIVE2);
+      const n = storeCalls.remove;
+      await s.forget();
+      eq(storeCalls.remove, n + 1);
+      eq(store.cmaRegistry, undefined);
+      eq(s.stored, null);
+      eq(CMA.registry, BUNDLED, 'forget() falls back to the bundled registry for the active permutation');
+      eq(s.status().active, 'bundled');
+      await restoreBundled();
+    });
+    T.it('a record written by another extension version or record schema is ignored AND removed (an update rebuilds instead of trusting an old builder)', async () => {
+      eq(S().BUILDER_VERSION, 'dev', 'no chrome.runtime.getManifest on this page');
+      eq(S().RECORD_SCHEMA, 1);
+      store.cmaRegistry = record(LIVE2, { builder: '0.0.1' });
+      let s = await reloadStore();
+      let st = await s.init();
+      eq(s.stored, null); eq(st.init.how, 'empty'); eq(st.storedPermutation, null);
+      ok(C.state.log.some((e) => e.kind === 'registry' && /stored registry ignored \(storage\): built by extension 0\.0\.1 \(this is dev\) \[build AB22/.test(e.note)), JSON.stringify(C.state.log.slice(-3)));
+      eq(store.cmaRegistry, undefined, 'removed from storage');
+      deepEq(s.activate(LIVE2), { source: 'bundled', changed: false, permutation: LIVE2 });
+      store.cmaRegistry = record(LIVE2, { schema: 0 });
+      s = await reloadStore();
+      await s.init();
+      eq(s.stored, null);
+      ok(C.state.log.some((e) => e.kind === 'registry' && /record schema 0 \(this version writes 1\)/.test(e.note)));
+      eq(store.cmaRegistry, undefined);
+      // a record without any stamp (written before this rule existed) is treated the same way
+      const legacy = record(LIVE2); delete legacy.schema; delete legacy.builder;
+      store.cmaRegistry = legacy;
+      s = await reloadStore();
+      await s.init();
+      eq(s.stored, null); eq(store.cmaRegistry, undefined);
+      await restoreBundled();
+    });
+    T.it('a stored record that fails CMA.registryBuilder.validate() is ignored and removed, with the problems logged', async () => {
+      builderFlags.validateOk = false;
+      store.cmaRegistry = record(LIVE2);
+      const s = await reloadStore();
+      try {
+        const st = await s.init();
+        eq(s.stored, null); eq(st.init.how, 'empty');
+        ok(C.state.log.some((e) => e.kind === 'registry' && /stored registry ignored \(storage\): fails validation: Serving: expected 13 fields, found 12/.test(e.note)), JSON.stringify(C.state.log.slice(-3)));
+        eq(store.cmaRegistry, undefined, 'removed');
+        deepEq(s.activate(LIVE2), { source: 'bundled', changed: false, permutation: LIVE2 });
+      } finally { builderFlags.validateOk = true; }
+      await restoreBundled();
+    });
+    T.it('the bundled registry is the reference for its own build: a stored record for the bundled permutation never replaces it', async () => {
+      store.cmaRegistry = record(BUNDLED_PERM);
+      const s = await reloadStore();
+      const st = await s.init();
+      eq(st.init.how, 'loaded'); eq(s.stored.permutation, BUNDLED_PERM, 'the record is kept in memory');
+      const ev = eventsOf('registry');
+      deepEq(s.activate(BUNDLED_PERM), { source: 'bundled', changed: false, permutation: BUNDLED_PERM });
+      eq(CMA.registry, BUNDLED); eq(s.status().active, 'bundled'); eq(G.SIG.SERVING, OLD_SERVING);
+      eq(ev.got.length, 0, 'no swap, no event');
+      ev.off();
+      eq(s.status().storedPermutation, BUNDLED_PERM);
+      // another build still gets its own runtime record
+      store.cmaRegistry = record(LIVE1);
+      const s2 = await reloadStore();
+      await s2.init();
+      eq(s2.activate(LIVE1).source, 'runtime');
+      await restoreBundled();
+    });
+    T.it('chrome.storage errors are read from runtime.lastError: a failed read is init.how "error" (not "empty"); a failed remove falls back to writing null', async () => {
+      store.cmaRegistry = record(LIVE1);
+      storeFlags.getError = 'Extension context invalidated.';
+      let s = await reloadStore();
+      let st;
+      try { st = await s.init(); } finally { storeFlags.getError = null; }
+      eq(st.init.how, 'error'); ok(/context invalidated/.test(st.init.error), st.init.error);
+      eq(s.stored, null);
+      ok(C.state.log.some((e) => e.kind === 'registry' && /chrome\.storage read failed: Extension context invalidated/.test(e.note)));
+      // the record itself is untouched by a read failure (nothing was judged)
+      ok(store.cmaRegistry && store.cmaRegistry.permutation === LIVE1);
+      s = await reloadStore();
+      await s.init();
+      eq(s.stored.permutation, LIVE1);
+      storeFlags.removeError = 'QUOTA_BYTES quota exceeded';
+      try { await s.forget(); } finally { storeFlags.removeError = null; }
+      eq(store.cmaRegistry, null, 'remove failed: overwritten with null instead');
+      eq(store.cmaRegistryAttempt, null);
+      eq(s.stored, null);
+      delete store.cmaRegistry; delete store.cmaRegistryAttempt;
+      await restoreBundled();
+    });
+  });
+
+  // ================================================================================================
+  T.describe('registry-store: rebuild (SPEC 3.5)', () => {
+    T.it('happy path: fetchBundle -> build -> validate -> store -> activate; status() and the stored record reflect it', async () => {
+      const s = await reloadStore();
+      await s.init();
+      builderCalls.fetchBundle.length = 0; builderCalls.build.length = 0; builderCalls.validate.length = 0;
+      const prog = eventsOf('registry-progress');
+      const reg = eventsOf('registry');
+      s.activate(LIVE2);                       // the live build, bundled registry for now
+      const p = s.rebuild({ moduleBase: MB, permutation: LIVE2, reason: 'mismatch' });
+      ok(p && typeof p.then === 'function', 'a promise');
+      await sleep(0);
+      eq(s.status().inProgress, true); eq(s.status().inProgressPermutation, LIVE2);
+      const r = await p;
+      prog.off(); reg.off();
+      eq(r.ok, true); eq(r.source, 'runtime'); eq(r.permutation, LIVE2); eq(r.reason, 'mismatch');
+      eq(r.bytes, 300); eq(r.fragments, 3); eq(r.types, Object.keys(BUNDLED.types).length); eq(r.persisted, true); eq(r.error, null);
+      deepEq(r.problems, []); ok(r.ms >= 0);
+      eq(builderCalls.fetchBundle.length, 1); deepEq(builderCalls.fetchBundle[0], { moduleBase: MB, permutation: LIVE2 });
+      eq(builderCalls.build.length, 1); eq(builderCalls.build[0].text, 'FAKE BUNDLE ' + LIVE2); eq(builderCalls.build[0].permutation, LIVE2);
+      ok(/^\d{4}-\d{2}-\d{2}T/.test(builderCalls.build[0].generatedAt), 'generatedAt is an ISO timestamp');
+      eq(builderCalls.validate.length, 1);
+      // stored: one record, replacing anything before
+      eq(store.cmaRegistry.permutation, LIVE2); eq(store.cmaRegistry.bytes, 300); eq(store.cmaRegistry.fragments, 3);
+      ok(typeof store.cmaRegistry.builtAt === 'number'); eq(store.cmaRegistry.registry.permutation, LIVE2); eq(store.cmaRegistry.registry.source, 'runtime');
+      eq(store.cmaRegistry.registry.generatedAt, builderCalls.build[0].generatedAt);
+      // activated
+      eq(CMA.registry.permutation, LIVE2); eq(G.SIG.SERVING, NEW_SERVING);
+      const st = s.status();
+      eq(st.active, 'runtime'); eq(st.activePermutation, LIVE2); eq(st.storedPermutation, LIVE2); eq(st.inProgress, false); eq(st.inProgressPermutation, null);
+      eq(st.lastRebuild.ok, true); eq(st.lastRebuild.permutation, LIVE2); eq(st.lastRebuild.reason, 'mismatch'); ok(st.lastRebuild.at > 0);
+      eq(st.lastRebuild.types, r.types); eq(st.lastRebuild.bytes, 300);
+      // events: progress phases in order, one 'registry' activation
+      const phases = prog.got.map((e) => e.phase);
+      deepEq(phases.filter((x, i) => phases.indexOf(x) === i), ['fetch', 'build', 'validate', 'store', 'done']);
+      ok(prog.got.every((e) => e.permutation === LIVE2 && e.reason === 'mismatch'), 'progress carries permutation + reason');
+      ok(prog.got.some((e) => e.phase === 'fetch' && e.fragment === 3 && e.fragments === 3), 'builder progress relayed');
+      eq(prog.got[prog.got.length - 1].types, r.types);
+      eq(reg.got.length, 1); eq(reg.got[0].source, 'runtime');
+      ok(C.state.log.some((e) => e.kind === 'registry' && /decoder rebuilt for build AB22/.test(e.note)), 'logged via capture.log');
+    });
+    T.it('validate failure keeps the current registry and reports the problems', async () => {
+      const s = S();
+      builderFlags.validateOk = false;
+      const before = CMA.registry;
+      const prog = eventsOf('registry-progress');
+      const r = await s.rebuild({ moduleBase: MB, permutation: LIVE3, reason: 'manual', force: true });
+      prog.off();
+      builderFlags.validateOk = true;
+      eq(r.ok, false); ok(/failed validation/.test(r.error), r.error); deepEq(r.problems, ['Serving: expected 13 fields, found 12']);
+      eq(r.source, 'runtime', 'the registry in use is reported'); eq(r.permutation, LIVE3);
+      eq(CMA.registry, before, 'registry unchanged'); eq(CMA.registry.permutation, LIVE2);
+      eq(store.cmaRegistry.permutation, LIVE2, 'storage unchanged');
+      eq(s.status().lastRebuild.ok, false); deepEq(s.status().lastRebuild.problems, r.problems); eq(s.status().inProgress, false);
+      eq(prog.got[prog.got.length - 1].phase, 'error');
+      ok(C.state.log.some((e) => e.kind === 'registry' && /rebuild failed/.test(e.note)));
+      eq(r.error, 'the rebuilt registry failed validation: Serving: expected 13 fields, found 12', 'one problem: no count');
+      // several problems: the count is named, the first (validate() puts the changed layout first) is quoted
+      builderFlags.validateOk = false;
+      builderFlags.validateProblems = ['com.cronometer.shared.entries.models.Day/1 layout unknown (expected bbh)', 'no writer method for kind h', 'no reader method for kind h'];
+      const r2 = await s.rebuild({ moduleBase: MB, permutation: LIVE3, reason: 'manual', force: true });
+      builderFlags.validateOk = true; builderFlags.validateProblems = null;
+      eq(r2.ok, false);
+      eq(r2.error, 'the rebuilt registry failed validation (3 problems): com.cronometer.shared.entries.models.Day/1 layout unknown (expected bbh)');
+      eq(r2.problems.length, 3);
+    });
+    T.it('a fetch or build error keeps the current registry too', async () => {
+      const s = S();
+      builderFlags.fetchError = 'HTTP 404 for 3.cache.js';
+      let r = await s.rebuild({ moduleBase: MB, permutation: LIVE3, force: true });
+      builderFlags.fetchError = null;
+      eq(r.ok, false); eq(r.error, 'HTTP 404 for 3.cache.js'); eq(CMA.registry.permutation, LIVE2);
+      builderFlags.buildError = 'no serializer table found';
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE3, force: true });
+      builderFlags.buildError = null;
+      eq(r.ok, false); eq(r.error, 'no serializer table found'); eq(r.bytes, 300, 'the fetch outcome is still reported');
+      eq(CMA.registry.permutation, LIVE2); eq(store.cmaRegistry.permutation, LIVE2);
+    });
+    T.it('single-flight: a second call while one runs returns the same promise', async () => {
+      const s = S();
+      const n = builderCalls.fetchBundle.length;
+      const p1 = s.rebuild({ moduleBase: MB, permutation: LIVE4, force: true });
+      const p2 = s.rebuild({ moduleBase: MB, permutation: LIVE4 });
+      const p3 = s.rebuild({ moduleBase: MB, permutation: LIVE3, force: true });
+      eq(p1, p2); eq(p1, p3);
+      eq(s.status().inProgress, true);
+      eq(s.inFlight(), p1, 'inFlight() is the running promise (the panel awaits it before sending RPCs)');
+      const r = await p1;
+      eq(r.ok, true); eq(r.permutation, LIVE4);
+      eq(builderCalls.fetchBundle.length, n + 1, 'one fetch');
+      eq(s.status().inProgress, false);
+      eq(s.inFlight(), null);
+      eq(CMA.registry.permutation, LIVE4);
+    });
+    T.it('the single flight is released BEFORE the final registry-progress event (done / error): a listener rendering from that event sees inProgress false and the recorded outcome', async () => {
+      const s = S();
+      const seen = [];
+      const offP = EV.on('registry-progress', (p) => seen.push({ phase: p.phase, inProgress: s.status().inProgress, inFlight: s.inFlight() !== null, lastOk: s.status().lastRebuild ? s.status().lastRebuild.ok : null }));
+      const offR = EV.on('registry', () => seen.push({ phase: 'registry', inProgress: s.status().inProgress }));
+      const r = await s.rebuild({ moduleBase: MB, permutation: LIVE2, reason: 'mismatch', force: true });
+      eq(r.ok, true);
+      const last = seen[seen.length - 1];
+      eq(last.phase, 'done');
+      eq(last.inProgress, false, 'the flight is over when the done event is delivered: ' + JSON.stringify(seen));
+      eq(last.inFlight, false); eq(last.lastOk, true, 'lastRebuild already records the outcome');
+      ok(seen.length >= 5 && seen.slice(0, -1).every((e) => e.inProgress === true), 'in progress during every earlier event: ' + JSON.stringify(seen));
+      // a failure: same rule for the error event
+      seen.length = 0;
+      builderFlags.fetchError = 'HTTP 503';
+      const r2 = await s.rebuild({ moduleBase: MB, permutation: LIVE3, reason: 'mismatch', force: true });
+      builderFlags.fetchError = null;
+      eq(r2.ok, false);
+      const last2 = seen[seen.length - 1];
+      eq(last2.phase, 'error'); eq(last2.inProgress, false); eq(last2.lastOk, false);
+      ok(seen.slice(0, -1).every((e) => e.inProgress === true), JSON.stringify(seen));
+      offP(); offR();
+      eq(s.inFlight(), null); eq(s.status().inProgress, false);
+    });
+    T.it('rate limit: the same permutation is refused for 10 min unless forced; refusals never overwrite lastRebuild', async () => {
+      const s = S();
+      const n = builderCalls.fetchBundle.length;
+      const last = s.status().lastRebuild;
+      const r = await s.rebuild({ moduleBase: MB, permutation: LIVE4, reason: 'mismatch' });
+      eq(r.ok, false); eq(r.error, 'recently attempted'); eq(r.refused, true); eq(r.permutation, LIVE4);
+      eq(builderCalls.fetchBundle.length, n, 'no fetch');
+      deepEq(s.status().lastRebuild, last, 'lastRebuild untouched');
+      ok(C.state.log.some((e) => e.kind === 'registry' && /rebuild refused \(mismatch\): recently attempted/.test(e.note)));
+      const forced = await s.rebuild({ moduleBase: MB, permutation: LIVE4, reason: 'manual', force: true });
+      eq(forced.ok, true); eq(builderCalls.fetchBundle.length, n + 1);
+      eq(s.RATE_LIMIT_MS, 600000);
+    });
+    T.it('the last attempt is persisted (cmaRegistryAttempt): a fresh page refuses an automatic retry within 10 min, a forced one runs, an old or foreign-version attempt does not count, forget() clears it', async () => {
+      let s = S();
+      eq(s.ATTEMPT_KEY, 'cmaRegistryAttempt');
+      builderFlags.fetchError = 'HTTP 503';
+      let r = await s.rebuild({ moduleBase: MB, permutation: LIVE5, reason: 'mismatch', force: true });
+      builderFlags.fetchError = null;
+      eq(r.ok, false);
+      const att = store.cmaRegistryAttempt;
+      eq(att.permutation, LIVE5); eq(att.ok, false); eq(att.error, 'HTTP 503'); eq(att.reason, 'mismatch'); eq(att.builder, 'dev');
+      ok(typeof att.at === 'number' && typeof att.ms === 'number');
+      deepEq(s.status().lastAttempt, att);
+      // a fresh page: the store instance has no memory of the attempt, storage has
+      s = await reloadStore();
+      await s.init();
+      eq(s.status().lastAttempt.permutation, LIVE5); eq(s.status().lastAttempt.ok, false);
+      const n = builderCalls.fetchBundle.length;
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE5, reason: 'mismatch' });
+      eq(r.refused, true); eq(r.error, 'recently attempted'); eq(builderCalls.fetchBundle.length, n, 'no download');
+      ok(C.state.log.some((e) => e.kind === 'registry' && /last attempt for build AB55.* was \d+ s ago \(failed: HTTP 503\)/.test(e.note)), JSON.stringify(C.state.log.slice(-3)));
+      // the manual button is forced
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE5, reason: 'manual', force: true });
+      eq(r.ok, true); eq(builderCalls.fetchBundle.length, n + 1);
+      eq(store.cmaRegistryAttempt.ok, true); eq(store.cmaRegistryAttempt.reason, 'manual');
+      // an attempt older than RATE_LIMIT_MS does not block
+      store.cmaRegistryAttempt = Object.assign({}, store.cmaRegistryAttempt, { at: Date.now() - 11 * 60 * 1000, ok: false });
+      s = await reloadStore();
+      await s.init();
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE5, reason: 'mismatch' });
+      eq(r.ok, true); eq(builderCalls.fetchBundle.length, n + 2);
+      // an attempt recorded by another extension version is ignored
+      store.cmaRegistryAttempt = Object.assign({}, store.cmaRegistryAttempt, { builder: '0.0.1', ok: false });
+      s = await reloadStore();
+      await s.init();
+      eq(s.status().lastAttempt, null);
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE5, reason: 'mismatch' });
+      eq(r.ok, true); eq(builderCalls.fetchBundle.length, n + 3);
+      // another build is never blocked by this one's attempt
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE6, reason: 'mismatch' });
+      eq(r.ok, true);
+      // an attempt that never finished (the tab was reloaded or closed during the download: ok null, the start
+      // note) is not a failure and does not block the next page load
+      store.cmaRegistryAttempt = { permutation: LIVE5, at: Date.now() - 5000, ok: null, error: null, reason: 'mismatch', ms: null, builder: 'dev', persisted: null };
+      s = await reloadStore();
+      await s.init();
+      eq(s.status().lastAttempt.ok, null);
+      const n2 = builderCalls.fetchBundle.length;
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE5, reason: 'mismatch' });
+      eq(r.ok, true, 'an unfinished attempt does not count'); eq(r.refused, undefined); eq(builderCalls.fetchBundle.length, n2 + 1);
+      ok(C.state.log.some((e) => e.kind === 'registry' && /last attempt for build AB55.* was \d+ s ago \(unfinished\): not counted against the rate limit/.test(e.note)), JSON.stringify(C.state.log.slice(-4)));
+      eq(s.status().lastRefusal, null, 'nothing was refused');
+      // a success whose registry could not be saved (ok true, persisted false: the record write failed while the
+      // small attempt note went through) leaves the next page load without a stored registry: it must rebuild
+      // again instead of being gated for 10 minutes without an error to show
+      delete store.cmaRegistry;
+      storeFlags.setFailKeys = ['cmaRegistry'];
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE6, reason: 'mismatch', force: true });
+      storeFlags.setFailKeys = null;
+      eq(r.ok, true); eq(r.persisted, false); eq(CMA.registry.permutation, LIVE6, 'used in memory');
+      eq(store.cmaRegistry, undefined, 'nothing stored');
+      eq(store.cmaRegistryAttempt.ok, true); eq(store.cmaRegistryAttempt.persisted, false); eq(store.cmaRegistryAttempt.permutation, LIVE6);
+      s = await reloadStore();
+      await s.init();
+      eq(s.status().storedPermutation, null); eq(s.status().lastAttempt.persisted, false);
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE6, reason: 'mismatch' });
+      eq(r.ok, true, 'rebuilt again on the next page load'); eq(r.persisted, true); eq(store.cmaRegistry.permutation, LIVE6);
+      ok(C.state.log.some((e) => e.kind === 'registry' && /last attempt for build AB66.* was \d+ s ago \(ok, not saved\): not counted/.test(e.note)), JSON.stringify(C.state.log.slice(-4)));
+      eq(store.cmaRegistryAttempt.persisted, true);
+      // only a COMPLETED failure blocks - and the refusal is exposed so the panel can say why nothing runs
+      store.cmaRegistryAttempt = Object.assign({}, store.cmaRegistryAttempt, { ok: false, error: 'HTTP 503', persisted: null });
+      s = await reloadStore();
+      await s.init();
+      eq(s.status().lastRefusal, null);
+      const n3 = builderCalls.fetchBundle.length;
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE6, reason: 'mismatch' });
+      eq(r.refused, true); eq(r.error, 'recently attempted'); eq(builderCalls.fetchBundle.length, n3);
+      const rf = s.status().lastRefusal;
+      eq(rf.permutation, LIVE6); eq(rf.reason, 'mismatch'); eq(rf.error, 'recently attempted'); ok(typeof rf.at === 'number' && Date.now() - rf.at < 5000, JSON.stringify(rf));
+      eq(s.status().lastRebuild, null, 'a refusal is not a rebuild');
+      await s.forget();
+      eq(store.cmaRegistryAttempt, undefined); eq(s.status().lastAttempt, null);
+      await restoreBundled();
+    });
+    T.it('a chrome.storage write that never calls back cannot hang a rebuild: bounded by STORAGE_TIMEOUT_MS, the decoder is used in memory and reported as not persisted', async () => {
+      const s = S();
+      eq(s.STORAGE_TIMEOUT_MS, 5000);
+      storeFlags.setHang = true;
+      const t0 = Date.now();
+      let r;
+      const prog = eventsOf('registry-progress');
+      try { r = await s.rebuild({ moduleBase: MB, permutation: LIVE9, reason: 'manual', force: true }); } finally { storeFlags.setHang = false; }
+      prog.off();
+      const elapsed = Date.now() - t0;
+      eq(r.ok, true); eq(r.persisted, false); eq(CMA.registry.permutation, LIVE9, 'used in memory');
+      // the start note is never awaited; the registry write and the outcome note are each bounded at 5 s
+      ok(elapsed >= 4900 && elapsed <= 12000, 'the writes were bounded (took ' + elapsed + ' ms of virtual time)');
+      eq(s.status().inProgress, false); eq(s.inFlight(), null);
+      eq(prog.got[prog.got.length - 1].phase, 'done');
+      ok(C.state.log.some((e) => e.kind === 'registry' && /could not be saved to chrome\.storage \(kept in memory for this page\)/.test(e.note)));
+      await restoreBundled();
+    });
+    T.it('a record stored by ANOTHER tab arrives through chrome.storage.onChanged: adopted, activated when its build is live, never removed; own writes, removals and foreign records are ignored', async () => {
+      await S().forget();
+      const s = await reloadStore();
+      await s.init();
+      s.activate(LIVE7);                                   // the live build has no decoder yet
+      eq(s.status().active, 'bundled'); eq(s.stored, null);
+      const ev = eventsOf('registry');
+      const rec = record(LIVE7, { builtAt: 1700000009999 });
+      store.cmaRegistry = rec;                             // the other tab's write lands in storage ...
+      window.__fireStorageChange({ cmaRegistry: { newValue: JSON.parse(JSON.stringify(rec)) } });   // ... and its onChanged reaches this tab
+      await sleep(5);
+      eq(s.stored && s.stored.permutation, LIVE7); eq(s.status().storedAt, 1700000009999);
+      eq(CMA.registry.permutation, LIVE7); eq(CMA.registry.source, 'runtime'); eq(s.status().active, 'runtime'); eq(G.SIG.SERVING, NEW_SERVING);
+      eq(ev.got.length, 1); eq(ev.got[0].source, 'runtime');
+      ok(C.state.log.some((e) => e.kind === 'registry' && /stored decoder loaded \(another tab\): build AB77/.test(e.note)), JSON.stringify(C.state.log.slice(-3)));
+      // the same record again (a write echoes back to its own context too): nothing happens
+      window.__fireStorageChange({ cmaRegistry: { newValue: JSON.parse(JSON.stringify(rec)) } });
+      await sleep(5);
+      eq(ev.got.length, 1);
+      // a record this version must not use is ignored but NOT removed: it is the other tab's
+      const foreign = record(LIVE9, { builder: '9.9.9', builtAt: 1700000000001 });
+      store.cmaRegistry = foreign;
+      const removes = storeCalls.remove;
+      window.__fireStorageChange({ cmaRegistry: { newValue: JSON.parse(JSON.stringify(foreign)) } });
+      await sleep(5);
+      eq(s.stored.permutation, LIVE7, 'kept'); eq(store.cmaRegistry, foreign, 'not removed'); eq(storeCalls.remove, removes);
+      ok(C.state.log.some((e) => e.kind === 'registry' && /record stored by another tab ignored: built by extension 9\.9\.9 \(this is dev\) \[build AB99/.test(e.note)), JSON.stringify(C.state.log.slice(-3)));
+      // a removal elsewhere (forget() in another tab) keeps this page's copy
+      window.__fireStorageChange({ cmaRegistry: { oldValue: JSON.parse(JSON.stringify(rec)) } });
+      await sleep(5);
+      eq(s.stored.permutation, LIVE7); eq(CMA.registry.permutation, LIVE7); eq(ev.got.length, 1);
+      // another area, and a record for the build this page is rebuilding right now, are ignored as well
+      window.__fireStorageChange({ cmaRegistry: { newValue: JSON.parse(JSON.stringify(record(LIVE2))) } }, 'sync');
+      await sleep(5);
+      eq(s.stored.permutation, LIVE7);
+      const p = s.rebuild({ moduleBase: MB, permutation: LIVE2, reason: 'manual', force: true });
+      window.__fireStorageChange({ cmaRegistry: { newValue: JSON.parse(JSON.stringify(record(LIVE2, { builtAt: 42 }))) } });
+      eq(s.stored.permutation, LIVE7, 'not adopted while this page rebuilds that build');
+      await p;
+      eq(s.stored.permutation, LIVE2); ok(s.stored.builtAt !== 42, 'this page\'s own record');
+      // a stale store instance (this page evaluated the script again) ignores the event: only CMA.registryStore acts
+      const fresh = await reloadStore();
+      await fresh.init();
+      eq(fresh.stored.permutation, LIVE2);
+      window.__fireStorageChange({ cmaRegistry: { newValue: JSON.parse(JSON.stringify(record(LIVE4, { builtAt: 43 }))) } });
+      await sleep(5);
+      eq(fresh.stored.permutation, LIVE4, 'the current instance adopted it');
+      eq(s.stored.permutation, LIVE2, 'the stale instance did not');
+      ev.off();
+      delete store.cmaRegistry;
+      await restoreBundled();
+    });
+    T.it('a bundle download truncated at the fragment cap is handed to validate() as {truncated, fragments} and recorded in the outcome', async () => {
+      const s = S();
+      builderFlags.truncated = true;
+      builderCalls.validate.length = 0;
+      let r;
+      try { r = await s.rebuild({ moduleBase: MB, permutation: LIVE6, reason: 'manual', force: true }); } finally { builderFlags.truncated = false; }
+      eq(r.ok, true, 'this page\'s fake validate accepts it; the real one refuses (tests/registry-builder.html)');
+      eq(r.truncated, true); eq(s.status().lastRebuild.truncated, true);
+      deepEq(builderCalls.validate[0].opts, { truncated: true, fragments: 3 });
+      ok(C.state.log.some((e) => e.kind === 'registry' && /stopped at the fragment cap \(3 fragments\)/.test(e.note)));
+      builderCalls.validate.length = 0;
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE6, reason: 'manual', force: true });
+      eq(r.truncated, false); deepEq(builderCalls.validate[0].opts, { truncated: false, fragments: 3 });
+      await restoreBundled();
+    });
+    T.it('builder warnings: logged through capture.log (kind registry, at most MAX_LOGGED_WARNINGS lines + a count), counted in the result, never thrown; build() gets bundle "live:<perm>"', async () => {
+      const s = S();
+      eq(s.MAX_LOGGED_WARNINGS, 5);
+      builderFlags.warnings = ["com.google.gwt.i18n.shared.impl.DateRecord/3173882066: serializer layout 'ziiiiiziiiiiil' differs from deserializer layout 'ziiiiiziiiiii'", 'second warning'];
+      builderCalls.build.length = 0;
+      let r = await s.rebuild({ moduleBase: MB, permutation: LIVE7, reason: 'manual', force: true });
+      builderFlags.warnings = null;
+      eq(r.ok, true); eq(r.warnings, 2); eq(s.status().lastRebuild.warnings, 2); eq(CMA.registry.permutation, LIVE7);
+      eq(builderCalls.build.length, 1); eq(builderCalls.build[0].bundle, 'live:' + LIVE7); eq(builderCalls.build[0].hasOnWarning, true);
+      const logged = (re) => C.state.log.filter((e) => e.kind === 'registry' && re.test(e.note)).length;
+      eq(logged(/^builder warning: .*DateRecord/), 1);
+      eq(logged(/^builder warning: second warning$/), 1);
+      eq(logged(/decoder rebuilt for build AB77.*2 builder warning\(s\)/), 1, 'the summary line counts them');
+      // beyond MAX_LOGGED_WARNINGS: the first five one by one, the rest as a count
+      builderFlags.warnings = ['w1', 'w2', 'w3', 'w4', 'w5', 'w6', 'w7'];
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE7, reason: 'manual', force: true });
+      builderFlags.warnings = null;
+      eq(r.ok, true); eq(r.warnings, 7);
+      eq(logged(/^builder warning: w[1-5]$/), 5); eq(logged(/^builder warning: w[67]$/), 0);
+      eq(logged(/^builder: 2 more warning\(s\) not shown$/), 1);
+      // no warnings: nothing more is logged and the count is 0
+      r = await s.rebuild({ moduleBase: MB, permutation: LIVE7, reason: 'manual', force: true });
+      eq(r.ok, true); eq(r.warnings, 0); eq(logged(/^builder warning: /), 7);
+    });
+    T.it('refusals: no permutation, no module base, builder missing', async () => {
+      const s = S();
+      const n = builderCalls.fetchBundle.length;
+      let r = await s.rebuild({ moduleBase: MB, force: true });
+      eq(r.ok, false); eq(r.error, 'no permutation');
+      r = await s.rebuild({ permutation: LIVE5, force: true });
+      eq(r.ok, false); eq(r.error, 'no module base');
+      r = await s.rebuild({ permutation: LIVE5, moduleBase: 'cronometer', force: true });
+      eq(r.error, 'no module base');
+      const b = CMA.registryBuilder;
+      CMA.registryBuilder = null;
+      try {
+        r = await s.rebuild({ moduleBase: MB, permutation: LIVE5, force: true });
+        eq(r.ok, false); eq(r.error, 'registry builder not loaded'); eq(s.status().builderLoaded, false);
+      } finally { CMA.registryBuilder = b; }
+      eq(s.status().builderLoaded, true);
+      eq(builderCalls.fetchBundle.length, n);
+      await restoreBundled();
+    });
+  });
+
+  // ================================================================================================
+  T.describe('capture integration (SPEC 3.5): activation from traffic, automatic rebuild', () => {
+    T.it('an xhr message with X-GWT-Permutation LIVE1 activates the stored registry: registryMismatch false, decoding uses the new CRCs, no rebuild', async () => {
+      await S().forget();
+      store.cmaRegistry = record(LIVE1);
+      const s = await reloadStore();
+      await s.init();
+      C.reset();
+      eq(CMA.registry, BUNDLED);
+      const n = builderCalls.fetchBundle.length;
+      const states = eventsOf('state');
+      const handled = C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': LIVE1 } }));
+      states.off();
+      eq(handled, true);
+      eq(C.state.permutation, LIVE1); eq(C.state.permutationSource, 'header');
+      eq(C.state.registryMismatch, false, 'the stored registry matches the live build');
+      eq(C.state.registrySource, 'runtime');
+      eq(CMA.registry.permutation, LIVE1); eq(G.SIG.SERVING, NEW_SERVING);
+      eq(C.state.moduleBase, MB); eq(C.state.policyHash, 'POLICY');
+      ok(states.got.length >= 1, 'state emitted');
+      ok(!C.state.log.some((e) => e.kind === 'warn' && /deployed a new build/.test(e.note)), 'no mismatch warning');
+      await sleep(20);
+      eq(builderCalls.fetchBundle.length, n, 'no rebuild for a build that has a stored registry');
+      eq(C.snapshot().registrySource, 'runtime', 'visible in the diagnostics snapshot');
+      // the same permutation again: nothing changes, nothing is re-triggered
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': LIVE1 } }));
+      eq(C.state.registryMismatch, false);
+    });
+    T.it('the header activates the registry BEFORE the response of the same message is decoded (the replayed authenticate case)', async () => {
+      // the stored registry knows Serving/1111 only; the bundled one only Serving/2553599101
+      await S().forget();
+      store.cmaRegistry = record(LIVE5);
+      const s = await reloadStore();
+      await s.init();
+      C.reset();
+      s.activate(BUNDLED_PERM);
+      eq(G.SIG.SERVING, OLD_SERVING);
+      const text = FX.updateDiaryResponse.split(OLD_SERVING).join(NEW_SERVING);   // the live app's reply under the new build
+      const events = [];
+      const off = EV.on('rpc', (ev) => events.push(ev));
+      C.handleMessage(rpcMsg(FX.updateDiaryTemplate, text, { requestHeaders: { 'X-GWT-Permutation': LIVE5 } }));
+      off();
+      eq(C.state.permutation, LIVE5); eq(C.state.registryMismatch, false); eq(C.state.registrySource, 'runtime');
+      eq(events.length, 1); eq(events[0].ok, true); eq(events[0].rejected, false, 'decoded with the runtime registry');
+      ok(!C.state.log.some((e) => e.kind === 'decode'), 'no decode failure: ' + JSON.stringify(C.state.log.filter((e) => e.kind === 'decode')));
+      // and the same reply is unreadable with the bundled registry, proving the order mattered
+      s.activate(BUNDLED_PERM);
+      await T.throws(() => G.readResponse(text), /unknown type signature/);
+      s.activate(LIVE5);
+    });
+    T.it('an unknown permutation with a known module base triggers exactly one automatic rebuild, which activates and clears the mismatch', async () => {
+      await S().forget();
+      const s = await reloadStore();
+      await s.init();
+      C.reset();
+      s.activate(BUNDLED_PERM);
+      const n = builderCalls.fetchBundle.length;
+      const states = eventsOf('state');
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': LIVE9 } }));
+      eq(C.state.permutation, LIVE9); eq(C.state.registryMismatch, true); eq(C.state.registrySource, 'bundled'); eq(C.state.moduleBase, MB);
+      ok(C.state.log.some((e) => e.kind === 'warn' && /deployed a new build/.test(e.note)));
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': LIVE9 } }));
+      C.handleMessage(rpcMsg(FX.getDayInfoTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': LIVE9 } }));
+      await sleep(5);
+      eq(builderCalls.fetchBundle.length, n + 1, 'exactly one rebuild started');
+      eq(builderCalls.fetchBundle[n].permutation, LIVE9); eq(builderCalls.fetchBundle[n].moduleBase, MB);
+      eq(s.status().inProgress, true);
+      ok(C.state.log.some((e) => e.kind === 'registry' && /no matching decoder: rebuilding/.test(e.note)));
+      await sleep(60);
+      states.off();
+      eq(s.status().inProgress, false); eq(s.status().lastRebuild.ok, true); eq(s.status().lastRebuild.reason, 'mismatch');
+      eq(CMA.registry.permutation, LIVE9); eq(G.SIG.SERVING, NEW_SERVING);
+      eq(C.state.registryMismatch, false, 're-evaluated on the registry event'); eq(C.state.registrySource, 'runtime');
+      ok(C.state.log.some((e) => e.kind === 'registry' && /decoder now matches live build/.test(e.note)));
+      ok(states.got.length >= 4, 'state events for the messages and for the registry event: ' + states.got.length);
+      eq(store.cmaRegistry.permutation, LIVE9, 'persisted for the next page load');
+      // more traffic for the same build starts nothing else
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': LIVE9 } }));
+      await sleep(20);
+      eq(builderCalls.fetchBundle.length, n + 1);
+    });
+    T.it('no rebuild while the module base is unknown; it starts once the module base arrives (gwt message), and reset() re-arms the trigger', async () => {
+      await S().forget();
+      const s = await reloadStore();
+      await s.init();
+      C.reset();
+      s.activate(BUNDLED_PERM);
+      const n = builderCalls.fetchBundle.length;
+      C.handleMessage({ source: 'cma-hook', type: 'gwt', strongName: LIVE6, moduleBase: null });
+      eq(C.state.permutation, LIVE6); eq(C.state.registryMismatch, true); eq(C.state.moduleBase, null);
+      await sleep(10);
+      eq(builderCalls.fetchBundle.length, n, 'nothing to fetch from');
+      C.handleMessage({ source: 'cma-hook', type: 'gwt', strongName: LIVE6, moduleBase: MB });
+      await sleep(10);
+      eq(builderCalls.fetchBundle.length, n + 1);
+      eq(builderCalls.fetchBundle[n].permutation, LIVE6);
+      await s.rebuild({ moduleBase: MB, permutation: LIVE6 });   // the running one (single flight)
+      eq(C.state.registryMismatch, false);
+      // a failed automatic rebuild is logged, the mismatch stays and the trigger is not repeated on this page
+      await S().forget();
+      C.reset();
+      s.activate(BUNDLED_PERM);
+      builderFlags.fetchError = 'HTTP 503';
+      const m = builderCalls.fetchBundle.length;
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': LIVE3 } }));
+      await sleep(40);
+      builderFlags.fetchError = null;
+      eq(builderCalls.fetchBundle.length, m + 1);
+      eq(C.state.registryMismatch, true); eq(C.state.registrySource, 'bundled'); eq(CMA.registry, BUNDLED);
+      ok(C.state.log.some((e) => e.kind === 'registry' && /automatic rebuild failed: HTTP 503/.test(e.note)));
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': LIVE3 } }));
+      await sleep(20);
+      eq(builderCalls.fetchBundle.length, m + 1, 'once per permutation per page load');
+      // reset() (a fresh page in the tests) re-arms it; the store's rate limit then refuses the repeat
+      C.reset();
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': LIVE3 } }));
+      await sleep(20);
+      eq(builderCalls.fetchBundle.length, m + 1, 'rate-limited by the store');
+      ok(C.state.log.some((e) => e.kind === 'registry' && /automatic rebuild failed: recently attempted/.test(e.note)));
+      await restoreBundled();
+    });
+    T.it('the DOM probe path activates too, and the snapshot / logs never carry the nonce', async () => {
+      await S().forget();
+      store.cmaRegistry = record(LIVE2);
+      const s = await reloadStore();
+      await s.init();
+      C.reset();
+      const host = document.createElement('div');
+      host.style.display = 'none';
+      const tag = document.createElement('script');
+      tag.type = 'text/plain';
+      tag.setAttribute('src', MB + LIVE2 + '.cache.js');
+      host.appendChild(tag);
+      document.body.appendChild(host);
+      try {
+        const out = C.probeDom(document);
+        eq(out.permutation, LIVE2); eq(out.changed, true);
+        eq(C.state.registryMismatch, false); eq(C.state.registrySource, 'runtime'); eq(CMA.registry.permutation, LIVE2);
+      } finally { host.remove(); }
+      C.handleMessage(rpcMsg(FX.getDayInfoTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': LIVE2 } }));
+      eq(C.state.nonce, 'NONCE');
+      const dump = JSON.stringify([C.snapshot(), s.status(), G.registryInfo(), store]);
+      eq(dump.indexOf('NONCE'), -1, 'nothing registry-related carries the nonce');
+      await restoreBundled();
+    });
+    /** The replayed authenticate reply of the NEW build arrives before storage answered: it cannot be decoded with
+     *  the bundled registry (its User graph carries a Serving under the new CRC). Once the stored decoder is adopted
+     *  late, capture re-reads the reply it kept in memory (SPEC 3.5). */
+    async function lateAuthenticate(withNonceFirst) {
+      await S().forget();
+      storeFlags.hold = true;
+      store.cmaRegistry = record(LIVE5);
+      const s = await reloadStore();
+      const st = await s.init();
+      eq(st.init.how, 'timeout');
+      C.reset();
+      s.activate(BUNDLED_PERM);
+      builderFlags.fetchError = 'offline';       // the automatic rebuild must not race the late record
+      const groups = [{ id: 1, name: 'Morning', enabled: true }, { id: 2, name: 'Midday', enabled: true }, { id: 3, name: 'Evening', enabled: false }];
+      const u = FX.user({ userId: 424242, session: 'LATEKEY', groups });
+      u.f[5] = [FX.serving({ grams: 1 })];
+      const text = G.encodeResponse(u).split(OLD_SERVING).join(NEW_SERVING);
+      C.handleMessage(rpcMsg(FX.authenticateTemplate, text, { requestHeaders: { 'X-GWT-Permutation': LIVE5 } }));
+      eq(C.state.permutation, LIVE5); eq(C.state.registryMismatch, true);
+      eq(C.state.groupsSource, 'default'); eq(C.state.userId, null); eq(C.state.nonce, null);
+      ok(C.state.log.some((e) => e.kind === 'warn' && /authenticate response could not be decoded/.test(e.note) && /read again once a matching decoder/.test(e.note)), JSON.stringify(C.state.log.filter((e) => e.kind === 'warn')));
+      if (withNonceFirst) {
+        // the app's next request carries the session key; a request also names the account (rank below authenticate)
+        C.handleMessage(rpcMsg(FX.getDayInfoTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': LIVE5 } }));
+        eq(C.state.nonce, 'NONCE'); eq(C.state.userId, 1234567); eq(C.state.userIdSource, 'method');
+      }
+      await sleep(40);                            // the automatic rebuild fails (offline)
+      builderFlags.fetchError = null;
+      eq(C.state.registryMismatch, true); eq(C.state.groupsSource, 'default');
+      const snapshotBefore = JSON.stringify(C.snapshot());
+      eq(snapshotBefore.indexOf('user@example.com'), -1, 'the retained reply is not part of the state');
+      eq(snapshotBefore.indexOf('LATEKEY'), -1);
+      // storage answers late: the record is adopted, activated, and the authenticate reply is read again
+      storeCalls.pending(); storeCalls.pending = null;
+      await sleep(5);
+      storeFlags.hold = false;
+      eq(C.state.registryMismatch, false); eq(C.state.registrySource, 'runtime');
+      eq(C.state.groupsSource, 'authenticate');
+      deepEq(C.state.groups.filter((g) => g.id >= 1 && g.id <= 3).map((g) => g.name + (g.enabled ? '' : ' (off)')), ['Morning', 'Midday', 'Evening (off)']);
+      eq(C.state.userId, 424242); eq(C.state.userIdSource, 'authenticate', 'authenticate outranks the request-derived id');
+      if (withNonceFirst) { eq(C.state.nonce, 'NONCE', 'a nonce captured meanwhile is newer in wire order: never overwritten by the replay'); eq(C.state.nonceSource, 'request'); }
+      else { eq(C.state.nonce, 'LATEKEY', 'no nonce was known: the reply\'s session key is adopted'); eq(C.state.nonceSource, 'authenticate'); }
+      ok(C.state.log.some((e) => e.kind === 'registry' && /authenticate reply re-read with the decoder for build AB55/.test(e.note)));
+      const dump = JSON.stringify([C.snapshot(), s.status(), G.registryInfo()]);
+      eq(dump.indexOf('user@example.com'), -1); eq(dump.indexOf('LATEKEY'), -1); eq(dump.indexOf('NONCE'), -1);
+      // a second registry event does not re-read again (groups already from authenticate)
+      const n = C.state.log.filter((e) => e.kind === 'registry' && /re-read/.test(e.note)).length;
+      EV.emit('registry', { source: 'runtime', permutation: LIVE5, changed: true });
+      eq(C.state.log.filter((e) => e.kind === 'registry' && /re-read/.test(e.note)).length, n);
+      await restoreBundled();
+    }
+    T.it('a stored decoder adopted after the first ping re-reads the replayed authenticate reply from memory: groups, userId and the session key when none is known', async () => {
+      await lateAuthenticate(false);
+    });
+    T.it('… and never overwrites a nonce captured meanwhile (the request-side key is newer in wire order)', async () => {
+      await lateAuthenticate(true);
+    });
+    T.it('reset() drops the retained authenticate reply', async () => {
+      const s = S();
+      s.activate(BUNDLED_PERM);
+      C.reset();
+      C.handleMessage(rpcMsg(FX.authenticateTemplate, FX.authenticateResponse({ userId: 7 }), { requestHeaders: { 'X-GWT-Permutation': BUNDLED_PERM } }));
+      eq(C.state.userId, 7); eq(C.state.groupsSource, 'authenticate');
+      C.reset();
+      eq(C.state.groupsSource, 'default');
+      EV.emit('registry', { source: 'bundled', permutation: BUNDLED_PERM, changed: true });
+      eq(C.state.groupsSource, 'default', 'nothing to replay after reset()');
+      eq(C.state.userId, null);
+    });
+  });
+
+  CMA.test.run({ timeoutMs: 20000 });   // the bounded-storage test spends ~10 s of virtual time
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,571 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>engine-ui</title>
+<style>
+  /* Minimal styling so isVisible() sees real layout boxes (headless Chrome lays out file:// pages). */
+  .pretty-dialog { position: fixed; top: 20px; left: 20px; background: #fff; border: 1px solid #999; padding: 8px; z-index: 10; }
+  .food-search-spinner { align-items: center; }
+  .dropdown-menu { display: block; }
+</style>
+</head>
+<body>
+<pre id="results"></pre>
+<div id="stage"></div>
+<script src="lib.js"></script>
+<script src="../src/lib/dom.js"></script>
+<script src="../src/lib/engine-ui.js"></script>
+<script src="mock-cronometer.js"></script>
+<script>
+(function () {
+  const { describe, it, ok, eq, deepEq, throws } = CMA.test;
+  const dom = CMA.dom;
+  const GROUPS = [
+    { id: 0, name: 'Uncategorized', enabled: false },
+    { id: 1, name: 'Breakfast', enabled: true },
+    { id: 2, name: 'Lunch', enabled: true },
+    { id: 3, name: 'Dinner', enabled: true },
+    { id: 4, name: 'Snacks', enabled: true },
+  ];
+  // Fast engine timings for tests (the mock keeps its realistic 100/200/150/100 ms delays).
+  const ENGINE_OPTS = { groups: GROUPS, delayMs: 20, refreshMs: 60, settleMs: 200, hashSettleMs: 50 };
+
+  function row(name, measure, quantity, groupId, extra) {
+    return Object.assign({
+      item: { name: name.toLowerCase(), qty: quantity, unit: measure },
+      hits: [{ id: 1, name }], hit: { id: 1, name },
+      food: null, measures: [],
+      pick: { measure: { name: measure, grams: 1, type: 'Weight' }, quantity, grams: quantity },
+      groupId, status: 'ready', message: '',
+    }, extra || {});
+  }
+  const threeRows = () => [
+    // the dataset holds two 'Chicken Breast, Roasted' (NCCDB / USDA): the plan's hit source makes the pick unambiguous
+    row('Chicken Breast, Roasted', 'g', 150, 2, { hit: { id: 1, name: 'Chicken Breast, Roasted', source: 'NCCDB' } }),
+    row('Egg, Whole, Cooked', 'large', 2, 1),
+    row('Rice, White, Cooked', 'cup', 1, 3),
+  ];
+
+  let mock = null;
+  function fresh(opts) {
+    if (mock) mock.uninstall();
+    mock = CMA.mock.install(document, Object.assign({ container: document.getElementById('stage') }, opts || {}));
+    return mock;
+  }
+  function collect() { const lines = []; const cb = (p) => lines.push('[' + p.index + '] ' + p.step + ': ' + p.message); cb.lines = lines; return cb; }
+
+  describe('dom helpers', () => {
+    it('sleep resolves', async () => { const t = Date.now(); await dom.sleep(20); ok(Date.now() - t >= 15, 'slept'); });
+    it('waitFor resolves the truthy value and times out with a label', async () => {
+      let n = 0;
+      const v = await dom.waitFor(() => (++n >= 3 ? 'ready' : null), { interval: 5, timeout: 1000 });
+      eq(v, 'ready');
+      const err = await throws(() => dom.waitFor(() => false, { timeout: 60, interval: 5, label: 'never' }), /Timed out after 60 ms waiting for never/);
+      ok(err.timeout === true, 'err.timeout flag');
+      const ab = await throws(() => dom.waitFor(() => false, { timeout: 1000, interval: 5, abort: () => 'stop now' }), /aborted: stop now/);
+      ok(ab.aborted === true, 'err.aborted flag');
+      await throws(() => dom.waitFor(() => { throw new Error('boom'); }, { timeout: 1000 }), /boom/);
+    });
+    it('setNativeValue uses the prototype setter and dispatches input/change/keyup', () => {
+      const input = document.createElement('input');
+      document.body.append(input);
+      let instanceSetterCalls = 0;
+      Object.defineProperty(input, 'value', { configurable: true, set() { instanceSetterCalls++; }, get() { return 'patched'; } });
+      const seen = [];
+      for (const t of ['input', 'change', 'keyup']) input.addEventListener(t, (e) => seen.push(t + (e.bubbles ? '+b' : '')));
+      dom.setNativeValue(input, 12.5, { change: true, keyup: true });
+      eq(instanceSetterCalls, 0, 'instance setter bypassed');
+      eq(Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').get.call(input), '12.5');
+      deepEq(seen, ['input+b', 'change+b', 'keyup+b']);
+      delete input.value;
+      dom.setNativeValue(input, 'abc');
+      eq(input.value, 'abc');
+      input.remove();
+    });
+    it('click/mousedown/mouseup dispatch button 0, bubbling, cancelable', () => {
+      const d = document.createElement('div'); const c = document.createElement('span'); d.append(c); document.body.append(d);
+      const got = [];
+      d.addEventListener('mousedown', (e) => got.push(['mousedown', e.button, e.bubbles, e.cancelable]));
+      d.addEventListener('mouseup', (e) => got.push(['mouseup', e.button, e.bubbles, e.cancelable]));
+      d.addEventListener('click', (e) => got.push(['click', e.button, e.bubbles, e.cancelable]));
+      dom.press(c); dom.click(c);
+      deepEq(got, [['mousedown', 0, true, true], ['mouseup', 0, true, true], ['click', 0, true, true]]);
+      d.remove();
+    });
+    it('keydown honours keyCode and ctrlKey', () => {
+      const got = [];
+      const h = (e) => got.push([e.key, e.keyCode, e.which, e.ctrlKey]);
+      document.body.addEventListener('keydown', h);
+      dom.keydown(document.body, { key: 'Enter', keyCode: 13, ctrlKey: true });
+      dom.keydown(document.body, { key: 'Escape' });
+      document.body.removeEventListener('keydown', h);
+      deepEq(got, [['Enter', 13, 13, true], ['Escape', 27, 27, false]]);
+    });
+    it('textOf, findByText tiers, isVisible', () => {
+      const wrap = document.createElement('div');
+      wrap.innerHTML = '<a class="x">  Cup,\n chopped </a><a class="x">g</a><a class="x">Gram</a><a class="x" style="display:none">hidden</a>';
+      document.body.append(wrap);
+      eq(dom.textOf(wrap.firstChild), 'Cup, chopped');
+      eq(dom.findByText('a.x', 'g', { root: wrap }).textContent, 'g');
+      eq(dom.findByText('a.x', 'G', { root: wrap }), null, 'exact only');
+      eq(dom.findByText('a.x', 'G', { root: wrap, ci: true }).textContent, 'g', 'ci prefers exact-ci over startsWith');
+      eq(dom.findByText('a.x', 'cup', { root: wrap, ci: true, startsWith: true }).textContent.trim(), 'Cup,\n chopped'.trim());
+      eq(dom.findByText('a.x', 'chopped', { root: wrap, ci: true, contains: true }).textContent.trim(), 'Cup,\n chopped'.trim());
+      eq(dom.findByText('a.x', 'nope', { root: wrap, ci: true, startsWith: true, contains: true }), null);
+      eq(dom.isVisible(wrap.children[0]), true);
+      eq(dom.isVisible(wrap.children[3]), false);
+      eq(dom.isVisible(document.createElement('div')), false, 'detached');
+      wrap.remove();
+    });
+    it('formatQuantity: ≤3 decimals, trailing zeros stripped, ≤6 chars', () => {
+      const f = CMA.engineUi.formatQuantity;
+      eq(f(150), '150'); eq(f(1.5), '1.5'); eq(f(0.3333333), '0.333'); eq(f(2.10), '2.1');
+      eq(f(1234.5678), '1234.6'); eq(f(99999.999), '100000'.slice(0, 6)); eq(f(0.0004), '0');
+      let threw = false; try { f('x'); } catch (e) { threw = true; } ok(threw, 'NaN throws');
+    });
+  });
+
+  describe('mock fidelity', () => {
+    it('builds the diary skeleton', () => {
+      fresh();
+      const btns = document.querySelectorAll('button.button-panel-btn');
+      eq(btns.length, 5);
+      ok(document.querySelector('button.button-panel-btn[title="Log a serving to your diary"]'), 'FOOD button with exact title');
+      ok(document.querySelector('.diary-date-previous') && document.querySelector('.diary-date-next'), 'date nav');
+      deepEq(Array.from(document.querySelectorAll('.diary-group .diary-group-title')).map(dom.textOf), ['Breakfast', 'Lunch', 'Dinner', 'Snacks']);
+      // the diary is a FlexTable (Mud/Krd): header rows with td.diary-group-row > div.diary-group (title + macros +
+      // collapse button only); servings are the rows that follow a header, never children of .diary-group
+      const headers = Array.from(document.querySelectorAll('table.diary-table tr td.diary-group-row'));
+      eq(headers.length, 4, 'one header row per group');
+      ok(headers.every((td) => td.querySelector('.diary-group > .diary-group-title-container > .diary-group-title') && td.querySelector('.diary-group .btn-collapse')), 'Krd shape');
+      eq(document.querySelectorAll('table.diary-table tr').length, 4, 'no serving rows yet');
+      eq(document.querySelector('.pretty-dialog'), null, 'no dialog initially');
+      deepEq(window.__added, []);
+    });
+    it('mousedown on the <tr> does NOT select (Wpd needs a td); mousedown on a cell and Enter on the focused row do; click never', async () => {
+      fresh();
+      dom.click(document.querySelector('button.button-panel-btn[title="Log a serving to your diary"]'));
+      const dlg = await dom.waitFor(() => document.querySelector('.pretty-dialog'), { timeout: 2000 });
+      eq(dom.textOf(dlg.querySelector('.titlebar-title')), 'Add Food to Diary');
+      const input = dlg.querySelector('input.gwt-TextBox.search-field');
+      eq(input.getAttribute('placeholder'), 'Search all foods & recipes...');
+      eq(dlg.querySelector('div.measure-selector'), null, 'KBe replaced the row class: no .measure-selector in the dialog');
+      const msRoot = dlg.querySelector('.add-serving-measure-selector');
+      ok(msRoot && msRoot.querySelector('div.row-container.mb-0[role="group"]'), 'MeasureSelector root > KBe row');
+      const amount = msRoot.querySelector('.amount input.text-box');
+      ok(amount && !amount.classList.contains('disabled-input') && amount.closest('.amount').classList.contains('disabled-input'), 'disabled-input sits on the NumberBox root, not on the input');
+      eq(msRoot.querySelector('.selection-dropdown').getAttribute('aria-disabled'), 'true');
+      dom.setNativeValue(input, 'egg');
+      dom.click(dlg.querySelector('button.food-search-btn'));
+      await dom.waitFor(() => dom.isVisible(dlg.querySelector('.food-search-spinner')), { timeout: 1000, label: 'spinner' });
+      await dom.waitFor(() => !dom.isVisible(dlg.querySelector('.food-search-spinner')) && dlg.querySelectorAll('table.crono-table tr').length > 1, { timeout: 3000 });
+      const rows = Array.from(dlg.querySelectorAll('table.crono-table tr')).slice(1);
+      eq(rows.length, 2);
+      dom.click(rows[0]);
+      await dom.sleep(300);
+      eq(dom.textOf(dlg.querySelector('div.food-search-name')), 'no food selected', 'click did nothing');
+      dom.mousedown(rows[0]);
+      await dom.sleep(300);
+      eq(dom.textOf(dlg.querySelector('div.food-search-name')), 'no food selected', 'mousedown targeted at the tr did nothing (Wpd reaches the tbody first)');
+      eq(mock.state.selections, 0);
+      dom.keydown(rows[0], { key: 'Enter', keyCode: 13 });
+      await dom.sleep(300);
+      eq(mock.state.selections, 0, 'Enter without focus on the row does nothing (hDf reads document.activeElement)');
+      dom.mousedown(rows[0].cells[0]);
+      eq(dom.textOf(dlg.querySelector('div.food-search-name')), 'loading...');
+      await dom.waitFor(() => dom.textOf(dlg.querySelector('div.food-search-name')) === 'Egg, Whole, Cooked', { timeout: 2000 });
+      ok(!amount.closest('.amount').classList.contains('disabled-input'), 'amount enabled after load');
+      eq(amount.value, '1');
+      eq(dom.textOf(msRoot.querySelector('.selection-dropdown button.dropdown-btn')), 'large');
+      deepEq(Array.from(msRoot.querySelectorAll('.selection-dropdown a.dropdown-item')).map(dom.textOf), ['large', 'medium', 'g']);
+      // Enter on the focused second row selects it (nDf → hDf) when the headless document can focus
+      rows[1].focus();
+      if (document.activeElement === rows[1]) {
+        dom.keydown(rows[1], { key: 'Enter', keyCode: 13 });
+        await dom.waitFor(() => dom.textOf(dlg.querySelector('div.food-search-name')) === 'Egg White, Raw', { timeout: 2000 });
+        dom.mousedown(rows[0].cells[0]);
+        await dom.waitFor(() => dom.textOf(dlg.querySelector('div.food-search-name')) === 'Egg, Whole, Cooked', { timeout: 2000 });
+      }
+      // 1↔100 auto-flip, exactly like TBe
+      dom.click(dom.findByText('.selection-dropdown a.dropdown-item', 'g', { root: dlg }));
+      eq(amount.value, '100', '1 → 100 when switching to a 1 g measure');
+      dom.click(dom.findByText('.selection-dropdown a.dropdown-item', 'g', { root: dlg }));
+      eq(amount.value, '1', '100 → 1 for ANY new measure, even re-selecting g (TBe has no other guard)');
+      dom.click(dom.findByText('.selection-dropdown a.dropdown-item', 'g', { root: dlg }));
+      eq(amount.value, '100');
+      dom.click(dom.findByText('.selection-dropdown a.dropdown-item', 'medium', { root: dlg }));
+      eq(amount.value, '1', '100 → 1 when leaving the 1 g measure');
+      // the diary-group row is vue's template: no role="group", the dropdown sits under div.col-8 > span
+      const gl = dlg.querySelector('#food-summary-diaryGroupLabel');
+      eq(gl.closest('[role="group"]'), null, 'the group row carries no role=group');
+      ok(gl.parentElement.querySelector('.col-8 > span > div.d-flex.align-items-center.w-100 div.dropdown'), 'gNh root under the col-8 slot');
+      // the SEARCH button always re-searches (jre sets the force flag); the typed path short-circuits the same query
+      const searches = mock.state.searches;
+      dom.click(dlg.querySelector('button.food-search-btn'));
+      eq(mock.state.searches, searches + 1, 'button: forced re-search of the same query');
+      dom.keydown(input, { key: 'g', keyCode: 71 });
+      await dom.sleep(500);
+      eq(mock.state.searches, searches + 1, 'typed path: same query short-circuited');
+      // Escape: keydown 27 on the search box does nothing ($qe listens for keyup); keyup closes
+      dom.keydown(input, { key: 'Escape', keyCode: 27 });
+      await dom.sleep(150);
+      ok(dlg.isConnected && !dlg.classList.contains('top-slide-out'), 'keydown Escape ignored');
+      eq(mock.state.closedWithoutAdd, 0);
+      dom.keyup(input, { key: 'Escape', keyCode: 27 });
+      ok(dlg.classList.contains('top-slide-out'), 'keyup Escape closes');
+      ok(dlg.isConnected, 'still attached right after close');
+      await dom.waitFor(() => !dlg.isConnected, { timeout: 1000 });
+      eq(mock.state.closedWithoutAdd, 1);
+      // close via X: slide-out then detach after 100 ms
+      dom.click(document.querySelector('button.button-panel-btn[title="Log a serving to your diary"]'));
+      const dlg2 = await dom.waitFor(() => document.querySelector('.pretty-dialog'), { timeout: 2000 });
+      dom.click(dlg2.querySelector('.titlebar-cancelbox .icon-x-big'));
+      ok(dlg2.classList.contains('top-slide-out'));
+      await dom.waitFor(() => !dlg2.isConnected, { timeout: 1000 });
+      eq(mock.state.closedWithoutAdd, 2);
+    });
+    it('measure items are labelled like the app: amount prefix, gram/ml suffixes (qqj/pqj); the engine parses them back', () => {
+      const L = CMA.mock.labelFor;
+      eq(L(null, { name: 'g', grams: 1, type: 'Weight' }), 'g');
+      eq(L(null, { name: 'oz', grams: 28.3495, type: 'Weight' }), 'oz  — 28g');
+      eq(L(null, { name: 'slice', grams: 1.5, type: 'Weight' }), 'slice  — 1.5g');
+      eq(L(null, { name: 'large', grams: 50, type: 'Atomic' }), 'large');
+      eq(L(null, { name: 'cup', grams: 240, type: 'Volume', ml: 240 }), 'cup  — 240 ml');
+      eq(L(null, { name: 'cup', grams: 120, type: 'Volume', ml: 120, amount: 0.5 }), '1/2 cup  — 120 ml');
+      eq(L(null, { name: 'ml', grams: 0.92, type: 'Volume', ml: 1 }), 'ml');
+      eq(L({ isRecipe: true }, { name: 'serving', grams: 45, type: 'Recipe' }), 'serving  — 45g');
+      const E = CMA.engineUi;
+      eq(E.measureLabel({ name: 'cup', grams: 120, type: 'Volume', ml: 120, amount: 0.5 }), '1/2 cup  — 120 ml');
+      eq(E.measureLabel({ name: 'oz', grams: 28.3495, type: 'Weight' }), 'oz  — 28g');
+      eq(E.measureLabel({ name: 'g', grams: 1, type: 'Weight' }), 'g');
+      deepEq(E.parseMeasureLabel('1/2 cup  — 120 ml'), { amount: 0.5, name: 'cup', num: 120, unit: 'ml', text: '1/2 cup — 120 ml' });
+      eq(E.parseMeasureLabel('cup, chopped  — 240 ml').name, 'cup, chopped');
+      deepEq(E.parseMeasureLabel('1 breast - 172g'), { amount: 1, name: 'breast', num: 172, unit: 'g', text: '1 breast - 172g' });
+      eq(E.parseMeasureLabel('large').name, 'large');
+      eq(E.sourceMatches('Custom Recipe', { source: 'Custom' }), true);
+      eq(E.sourceMatches('NCCDB', { source: 'USDA' }), false);
+      eq(E.sourceMatches('USDA', { source: null }), null);
+    });
+  });
+
+  describe('engine-ui against the mock', () => {
+    it('adds a 3-row plan with the right measure/quantity/group', async () => {
+      fresh();
+      const cb = collect();
+      const res = await CMA.engineUi.run(threeRows(), ENGINE_OPTS, cb);
+      eq(res.failed.length, 0, 'no failures: ' + res.failed.map((f) => f.error.message).join('; ') + '\n' + cb.lines.join('\n'));
+      eq(res.added.length, 3);
+      deepEq(window.__added, [
+        { name: 'Chicken Breast, Roasted', quantity: 150, measure: 'g', group: 'Lunch' },
+        { name: 'Egg, Whole, Cooked', quantity: 2, measure: 'large', group: 'Breakfast' },
+        { name: 'Rice, White, Cooked', quantity: 1, measure: 'cup', group: 'Dinner' },
+      ]);
+      eq(mock.entries('Lunch').length, 1); eq(mock.entries('Breakfast').length, 1); eq(mock.entries('Dinner').length, 1);
+      eq(mock.entries('Lunch')[0].getAttribute('data-name'), 'Chicken Breast, Roasted');
+      ok(!mock.groupBlock('Lunch').textContent.includes('Chicken'), '.diary-group never contains an entry');
+      eq(document.querySelector('.pretty-dialog'), null, 'no dialog left open');
+      eq(location.hash, '#diary');
+      eq(mock.state.closedWithoutAdd, 0, 'never closed a dialog without adding');
+      ok(cb.lines.some((l) => /\[0\] search: searching "Chicken Breast, Roasted"/.test(l)), 'search progress line');
+      ok(cb.lines.some((l) => /\[1\] measure: measure "large"/.test(l)), 'measure progress line');
+      ok(cb.lines.some((l) => /\[2\] group: group "Dinner"/.test(l)), 'group progress line');
+      ok(cb.lines.some((l) => /batch: done: 3 added, 0 failed/.test(l)), 'batch summary');
+      ok(res.added.every((a) => Array.isArray(a.warnings) && a.warnings.length === 0), 'clean rows carry no warnings');
+      eq(cb.lines.filter((l) => /^\[\d\] row: added$/.test(l)).length, 3, 'plain "added" outcome lines');
+      ok(cb.lines.filter((l) => /refresh: entry visible in the diary$/.test(l)).length === 3, 'the entry was found in the diary table:\n' + cb.lines.join('\n'));
+    });
+    it('accepts {rows:[...]} and falls back to item.name when hit is missing', async () => {
+      fresh();
+      const r = row('Banana, Raw', 'medium', 1, 4); delete r.hit; r.item.name = 'Banana, Raw';
+      const res = await CMA.engineUi.run({ rows: [r] }, ENGINE_OPTS, null);
+      eq(res.added.length, 1);
+      deepEq(window.__added, [{ name: 'Banana, Raw', quantity: 1, measure: 'medium', group: 'Snacks' }]);
+    });
+    it('handles the "Adding a Food?" fast interstitial on every row', async () => {
+      fresh({ fastRunning: true });
+      const cb = collect();
+      const res = await CMA.engineUi.run(threeRows(), ENGINE_OPTS, cb);
+      eq(res.failed.length, 0, cb.lines.join('\n'));
+      eq(res.added.length, 3);
+      eq(mock.state.fastPrompts, 3, 'prompt shown once per dialog open');
+      eq(mock.options.fastRunning, true, 'Continue Fast keeps the fast running');
+      eq(window.__added.length, 3);
+      ok(cb.lines.filter((l) => /Continue Fast/.test(l)).length === 3, 'engine reported clicking Continue Fast 3 times');
+    });
+    it('a food that is not in the dataset fails with "no results" without breaking later rows', async () => {
+      fresh();
+      const plan = [row('Chicken Breast, Roasted', 'g', 150, 2), row('Unicorn Steak', 'g', 100, 2), row('Rice, White, Cooked', 'cup', 1, 3)];
+      const cb = collect();
+      const res = await CMA.engineUi.run(plan, ENGINE_OPTS, cb);
+      eq(res.added.length, 2, cb.lines.join('\n'));
+      eq(res.failed.length, 1);
+      ok(res.failed[0].row === plan[1], 'the middle row failed');
+      ok(/no results for "Unicorn Steak"/.test(res.failed[0].error.message), res.failed[0].error.message);
+      deepEq(window.__added.map((a) => a.name), ['Chicken Breast, Roasted', 'Rice, White, Cooked']);
+      eq(document.querySelector('.pretty-dialog'), null, 'failed row closed its dialog');
+      eq(mock.state.closedWithoutAdd, 1);
+      eq(res.abortReason, null);
+    });
+    it('sets the measure before the amount so the 1↔100 auto-flip cannot clobber the quantity', async () => {
+      fresh();
+      // Olive Oil defaults to tbsp; picking "g" flips 1 → 100 in the app, then the engine writes the real amount.
+      const plan = [row('Olive Oil', 'g', 1, 3), row('Olive Oil', 'g', 100, 3), row('Olive Oil', 'ml', 15, 3), row('Egg, Whole, Cooked', 'medium', 100, 1)];
+      const res = await CMA.engineUi.run(plan, ENGINE_OPTS, null);
+      eq(res.failed.length, 0);
+      deepEq(window.__added.map((a) => [a.quantity, a.measure]), [[1, 'g'], [100, 'g'], [15, 'ml'], [100, 'medium']]);
+    });
+    it('case-insensitive / startsWith row matching; a measure that is not offered fails the row unless the amount can be converted', async () => {
+      fresh();
+      const plan = [
+        row('chicken breast, roasted', 'OZ', 4, 2),   // ci row match + ci measure match ('oz  — 28g')
+        row('Rice, White', 'cup', 2, 3),              // startsWith row match ("Rice, White" → "Rice, White, Cooked")
+        row('Egg, Whole, Cooked', 'dozen', 1, 1),     // measure not offered, nothing to convert → the row fails
+        Object.assign(row('Egg, Whole, Cooked', 'dozen', 1, 1), {   // not offered, but the shown 'large' (50 g) is known: 600 g → 12 large
+          measures: [{ id: 1, name: 'large', grams: 50, type: 'Atomic' }, { id: 2, name: 'g', grams: 1, type: 'Weight' }],
+          pick: { measure: { name: 'dozen', grams: 600 }, quantity: 1, grams: 600 },
+        }),
+      ];
+      const cb = collect();
+      const res = await CMA.engineUi.run(plan, ENGINE_OPTS, cb);
+      eq(res.added.length, 3, cb.lines.join('\n'));
+      eq(res.failed.length, 1);
+      ok(res.failed[0].row === plan[2], 'the dozen row without measures failed');
+      ok(/measure "dozen" is not offered/.test(res.failed[0].error.message), res.failed[0].error.message);
+      deepEq(window.__added, [
+        { name: 'Chicken Breast, Roasted', quantity: 4, measure: 'oz', group: 'Lunch' },
+        { name: 'Rice, White, Cooked', quantity: 2, measure: 'cup', group: 'Dinner' },
+        { name: 'Egg, Whole, Cooked', quantity: 12, measure: 'large', group: 'Breakfast' },
+      ]);
+      ok(cb.lines.some((l) => /\[3\] measure: measure "dozen" not offered .*keeping "large" with amount 12/.test(l)), 'converted with a warning:\n' + cb.lines.join('\n'));
+      ok(cb.lines.some((l) => /\[1\] select: row "Rice, White, Cooked" \(startsWith\)/.test(l)), 'reported the startsWith match');
+      eq(mock.state.closedWithoutAdd, 1, 'the failed row closed its dialog');
+      // the silent fallback is carried by the row outcome, not only by a diagnostic line
+      const converted = res.added.find((a) => a.row === plan[3]);
+      ok(converted && converted.warnings.length === 1 && /not offered/.test(converted.warnings[0]), JSON.stringify(converted && converted.warnings));
+      ok(cb.lines.some((l) => /\[3\] row: added \(measure "dozen" not offered/.test(l)), 'outcome line names the fallback:\n' + cb.lines.join('\n'));
+    });
+    it('a measure click that does not register (toggle text unchanged) fails the row: the app logs whatever the toggle shows', async () => {
+      fresh({ ignoreMeasureClicks: true });
+      const cb = collect();
+      // Chicken defaults to 'breast'; picking 'g' is swallowed by the dialog, so 150 would be logged as 150 breasts
+      const res = await CMA.engineUi.run([row('Chicken Breast, Roasted', 'g', 150, 2), row('Egg, Whole, Cooked', 'large', 2, 1)], ENGINE_OPTS, cb);
+      eq(res.failed.length, 1, cb.lines.join('\n'));
+      ok(/measure click did not register: toggle shows "breast" \(wanted "g"\)/.test(res.failed[0].error.message), res.failed[0].error.message);
+      eq(res.added.length, 1, 'the egg row asked for the measure already shown (large) and went through');
+      deepEq(window.__added, [{ name: 'Egg, Whole, Cooked', quantity: 2, measure: 'large', group: 'Breakfast' }]);
+      eq(document.querySelector('.pretty-dialog'), null, 'the failed row closed its dialog');
+      eq(mock.state.closedWithoutAdd, 1);
+    });
+    it('a group click that does not register is a row warning, not a silent success', async () => {
+      fresh({ ignoreGroupClicks: true });
+      const cb = collect();
+      const res = await CMA.engineUi.run([row('Banana, Raw', 'medium', 1, 3)], ENGINE_OPTS, cb);
+      eq(res.added.length, 1, cb.lines.join('\n'));
+      eq(res.added[0].warnings.length, 1);
+      ok(/group click did not register: toggle shows "Breakfast" after clicking "Dinner"/.test(res.added[0].warnings[0]), res.added[0].warnings[0]);
+      eq(window.__added[0].group, 'Breakfast', 'the preselected group received the entry');
+      ok(cb.lines.some((l) => /\[0\] row: added \(group click did not register/.test(l)), cb.lines.join('\n'));
+    });
+    it('a Custom Meal hides the measure selector: only the dialog defaults can be added (with a warning), anything else fails', async () => {
+      fresh();
+      const meal = (qty, unit) => ({ item: { name: 'my meal', qty, unit }, hits: [{ id: 30, name: 'My Meal', source: 'Custom', type: 'MEAL' }], hit: { id: 30, name: 'My Meal', source: 'Custom', type: 'MEAL' },
+        food: null, measures: [], pick: { measure: unit ? { name: unit, grams: null, type: null } : null, quantity: qty, grams: null }, groupId: 1, status: 'ready', message: '' });
+      const cb = collect();
+      const res = await CMA.engineUi.run([meal(1, null), meal(2, null), meal(1, 'serving'), meal(1, 'meal')], ENGINE_OPTS, cb);
+      eq(res.added.length, 2, cb.lines.join('\n'));
+      eq(res.failed.length, 2);
+      ok(/meal: the amount cannot be set in the dialog .*only 1 × "meal" can be added, not 2/.test(res.failed[0].error.message), res.failed[0].error.message);
+      ok(/meal: measure "serving" cannot be selected in the dialog/.test(res.failed[1].error.message), res.failed[1].error.message);
+      deepEq(window.__added, [{ name: 'My Meal', quantity: 1, measure: 'meal', group: 'Breakfast' }, { name: 'My Meal', quantity: 1, measure: 'meal', group: 'Breakfast' }]);
+      ok(res.added.every((a) => a.warnings.length === 1 && /^meal: amount\/measure are not settable/.test(a.warnings[0])), JSON.stringify(res.added.map((a) => a.warnings)));
+      ok(!cb.lines.some((l) => /amount: amount/.test(l)), 'the hidden amount box was never written');
+    });
+    it('closing a dialog without an X icon uses keyup Escape on the search box (the app ignores keydown there)', async () => {
+      fresh();
+      // strip the X as soon as the dialog opens so the engine must fall back to the keyboard path
+      const strip = setInterval(() => { const x = document.querySelector('.pretty-dialog .titlebar-cancelbox .icon-x-big'); if (x) x.remove(); }, 5);
+      try {
+        const res = await CMA.engineUi.run([row('Unicorn Steak', 'g', 100, 2), row('Banana, Raw', 'medium', 1, 4)], ENGINE_OPTS, null);
+        eq(res.failed.length, 1); eq(res.added.length, 1);
+        eq(document.querySelector('.pretty-dialog'), null, 'the no-results dialog was closed by keyup Escape');
+        eq(mock.state.closedWithoutAdd, 1);
+        ok(!mock.state.log.some((l) => /keydown 27 ignored/.test(l)), 'the engine never relies on a keydown Escape');
+      } finally { clearInterval(strip); }
+    });
+    it('equally named results are disambiguated by the hit source; no name match fails the row', async () => {
+      fresh();
+      const plan = [
+        row('Chicken Breast, Roasted', 'oz', 2, 2, { hit: { id: 9, name: 'Chicken Breast, Roasted', source: 'USDA' } }),
+        row('Chicken Breast, Roasted', 'breast', 1, 2, { hit: { id: 1, name: 'Chicken Breast, Roasted', source: 'NCCDB' } }),
+        row("Mum's Granola", 'serving', 2, 1, { hit: { id: 20, name: "Mum's Granola", source: 'Custom', type: 'RECIPE' } }),
+        row('Broccoli', 'g', 50, 3),                        // startsWith match on the single 'Broccoli, Raw' row
+        row('Breast', 'g', 50, 3),                          // 3 chicken rows, none named or starting with 'Breast' → fails
+      ];
+      const cb = collect();
+      const res = await CMA.engineUi.run(plan, ENGINE_OPTS, cb);
+      eq(res.failed.length, 1, cb.lines.join('\n'));
+      ok(/no result row matches "Breast" \(3 rows:/.test(res.failed[0].error.message), res.failed[0].error.message);
+      deepEq(mock.state.addedIds, [9, 1, 20, 10]);
+      deepEq(window.__added.map((a) => [a.name, a.measure, a.quantity]), [['Chicken Breast, Roasted', 'oz', 2], ['Chicken Breast, Roasted', 'breast', 1], ["Mum's Granola", 'serving', 2], ['Broccoli, Raw', 'g', 50]]);
+      ok(cb.lines.some((l) => /\[0\] select: row "Chicken Breast, Roasted" \(exact, source USDA\)/.test(l)), cb.lines.join('\n'));
+      ok(cb.lines.some((l) => /\[1\] select: row "Chicken Breast, Roasted" \(exact, source NCCDB\)/.test(l)));
+      ok(cb.lines.some((l) => /\[2\] select: row "Mum's Granola" \(exact\)/.test(l)), 'a single match carries no source note');
+    });
+    it('measure labels: "cup" picks "cup — 240 ml" (not "cup, chopped"); amount-prefixed items and gram suffixes are honoured', async () => {
+      fresh();
+      const plan = [
+        row('Broccoli, Raw', 'cup', 2, 3, { pick: { measure: { name: 'cup', grams: 88, type: 'Volume', ml: 240 }, quantity: 2, grams: 176 } }),
+        row('Broccoli, Raw', 'cup', 1, 3, { pick: { measure: { name: 'cup', grams: 44, type: 'Volume', ml: 120, amount: 0.5 }, quantity: 1, grams: 44 } }),
+        row('Broccoli, Raw', 'cup, chopped', 1, 3, { pick: { measure: { name: 'cup, chopped', grams: 91, type: 'Volume', ml: 240 }, quantity: 1, grams: 91 } }),
+        row('Chicken Breast, Roasted', 'oz', 3, 2, { pick: { measure: { name: 'oz', grams: 28.3495, type: 'Weight' }, quantity: 3, grams: 85 } }),
+      ];
+      const cb = collect();
+      const res = await CMA.engineUi.run(plan, ENGINE_OPTS, cb);
+      eq(res.failed.length, 0, cb.lines.join('\n'));
+      deepEq(window.__added.map((a) => [a.measure, a.quantity]), [['cup', 2], ['cup', 1], ['cup, chopped', 1], ['oz', 3]]);
+      ok(cb.lines.some((l) => /\[0\] measure: measure "cup — 240 ml" \(name\+size\)/.test(l)), cb.lines.join('\n'));
+      ok(cb.lines.some((l) => /\[1\] measure: measure "1\/2 cup — 120 ml" \(name\+size\)/.test(l)), cb.lines.join('\n'));
+      ok(cb.lines.some((l) => /\[2\] measure: measure "cup, chopped — 240 ml" \(name\+size\)/.test(l)));
+      ok(cb.lines.some((l) => /\[3\] measure: measure "oz — 28g" \(name\+size\)/.test(l)));
+    });
+    it('a rejected refresh signal fails the row; a timed-out signal fails it unless the entry is visible; no hook → fixed delay', async () => {
+      fresh();
+      const rejected = () => { const e = new Error('rejected: bad measure'); e.rejected = true; return Promise.reject(e); };
+      let res = await CMA.engineUi.run([row('Olive Oil', 'tsp', 1, 4)], Object.assign({}, ENGINE_OPTS, { waitForRefresh: rejected }), null);
+      eq(res.added.length, 0); eq(res.failed.length, 1);
+      ok(/the server rejected the entry: bad measure/.test(res.failed[0].error.message), res.failed[0].error.message);
+      eq(document.querySelector('.pretty-dialog'), null);
+      // timeout without a visible entry (the server dropped the add) → failed
+      fresh({ dropAdds: true });
+      const timeout = async () => { await dom.sleep(200); throw new Error('no updateDiary response seen within 5000 ms'); };
+      res = await CMA.engineUi.run([row('Olive Oil', 'tsp', 1, 4)], Object.assign({}, ENGINE_OPTS, { waitForRefresh: timeout }), null);
+      eq(res.added.length, 0); eq(res.failed.length, 1);
+      ok(/no updateDiary response after Add/.test(res.failed[0].error.message), res.failed[0].error.message);
+      eq(mock.state.droppedAdds, 1);
+      // timeout but the entry is visible in the diary TABLE (the rows after the group's header) → added with a warning
+      fresh();
+      const cb = collect();
+      res = await CMA.engineUi.run([row('Olive Oil', 'tsp', 1, 4)], Object.assign({}, ENGINE_OPTS, { waitForRefresh: timeout }), cb);
+      eq(res.added.length, 1, cb.lines.join('\n'));
+      ok(cb.lines.some((l) => /treating it as added/.test(l)), cb.lines.join('\n'));
+      eq(res.added[0].warnings.length, 1); ok(/but the entry is visible in the diary/.test(res.added[0].warnings[0]), res.added[0].warnings[0]);
+      eq(mock.entries('Snacks').length, 1, 'the mock appended a serving row after the Snacks header');
+      // the same entry in another group is not "visible" for the Snacks row, and an entry-less group is not either
+      fresh();
+      const cb2 = collect();
+      res = await CMA.engineUi.run([row('Olive Oil', 'tsp', 1, 3)], Object.assign({}, ENGINE_OPTS, { waitForRefresh: async () => { await dom.sleep(120); } }), cb2);
+      eq(res.added.length, 1);
+      ok(cb2.lines.some((l) => /refresh: entry visible in the diary$/.test(l)), cb2.lines.join('\n'));
+      eq(mock.entries('Dinner').length, 1); eq(mock.entries('Snacks').length, 0);
+      // no hook → fixed delay, added
+      fresh();
+      res = await CMA.engineUi.run([row('Olive Oil', 'tsp', 1, 4)], Object.assign({}, ENGINE_OPTS, { refreshMs: 200, waitForRefresh: () => { const e = new Error('hook not available; using the fixed delay'); e.noHook = true; return Promise.reject(e); } }), null);
+      eq(res.added.length, 1);
+    });
+    it('disabled diary groups (DG_ON false): the dropdown root is disabled and the single "Disabled" item is left alone', async () => {
+      fresh({ groupsDisabled: true });
+      const cb = collect();
+      const res = await CMA.engineUi.run([row('Banana, Raw', 'medium', 1, 4)], ENGINE_OPTS, cb);
+      eq(res.added.length, 1, cb.lines.join('\n'));
+      ok(cb.lines.some((l) => /diary groups are disabled/.test(l)), cb.lines.join('\n'));
+      eq(window.__added[0].group, 'Breakfast', 'the preselected group stays');
+      ok(res.added[0].warnings.some((w) => /diary groups are disabled/.test(w)), 'reported on the row: ' + JSON.stringify(res.added[0].warnings));
+      ok(cb.lines.some((l) => /\[0\] row: added \(diary groups are disabled/.test(l)), cb.lines.join('\n'));
+    });
+    it('skips rows that are not ready and rows without a name', async () => {
+      fresh();
+      const bad = row('Chicken Breast, Roasted', 'g', 100, 2, { status: 'error', message: 'unit not available' });
+      const noname = row('', 'g', 1, 2); noname.hit = null; noname.item = { name: '' };
+      const res = await CMA.engineUi.run([bad, noname, row('Olive Oil', 'tsp', 2, 4)], ENGINE_OPTS, null);
+      eq(res.added.length, 1); eq(res.failed.length, 2);
+      ok(/unit not available/.test(res.failed[0].error.message));
+      ok(/no food name/.test(res.failed[1].error.message));
+      deepEq(window.__added, [{ name: 'Olive Oil', quantity: 2, measure: 'tsp', group: 'Snacks' }]);
+    });
+    it('aborts when the dialog title is not "Add Food to Diary"', async () => {
+      fresh({ dialogTitle: 'Add Ingredient to Recipe' });
+      const res = await CMA.engineUi.run(threeRows(), ENGINE_OPTS, null);
+      eq(res.added.length, 0);
+      eq(res.failed.length, 3);
+      ok(/unexpected dialog "Add Ingredient to Recipe"/.test(res.abortReason), res.abortReason);
+      ok(res.failed.every((f) => f.error.aborted), 'all rows carry the abort');
+      await dom.sleep(300);
+      eq(document.querySelector('.pretty-dialog'), null, 'wrong dialog was closed');
+      eq(window.__added.length, 0);
+    });
+    it('"Enter a valid time" → row error and batch abort, dialogs closed', async () => {
+      fresh({ invalidTime: true });
+      const cb = collect();
+      const res = await CMA.engineUi.run(threeRows(), ENGINE_OPTS, cb);
+      eq(res.added.length, 0);
+      eq(res.failed.length, 3);
+      ok(res.failed[0].error.invalidTime === true, 'first row carries the invalid-time error');
+      eq(res.failed[0].error.message, 'Enter a valid time');
+      ok(/Enter a valid time/.test(res.abortReason), res.abortReason);
+      eq(mock.state.invalidTimePrompts, 1, 'only one attempt');
+      await dom.sleep(300);
+      eq(document.querySelectorAll('.pretty-dialog').length, 0, 'modal and dialog closed');
+      eq(window.__added.length, 0);
+    });
+    it('Escape twice within 1 s cancels the batch', async () => {
+      fresh();
+      const p = CMA.engineUi.run(threeRows(), ENGINE_OPTS, null);
+      await dom.sleep(150); // first dialog is opening
+      dom.keydown(document.body, { key: 'Escape', keyCode: 27 });
+      await dom.sleep(100);
+      dom.keydown(document.body, { key: 'Escape', keyCode: 27 });
+      const res = await p;
+      eq(res.cancelled, true);
+      ok(/Escape pressed twice/.test(res.abortReason), res.abortReason);
+      eq(res.added.length + res.failed.length, 3);
+      ok(res.failed.length >= 2, 'remaining rows failed as cancelled');
+      ok(window.__added.length <= 1);
+    });
+    it('a single Escape (or two more than 1 s apart) does not cancel', async () => {
+      fresh();
+      const p = CMA.engineUi.run([row('Olive Oil', 'tbsp', 1, 4)], ENGINE_OPTS, null);
+      await dom.sleep(20);
+      dom.keydown(document.body, { key: 'Escape', keyCode: 27 }); // before the dialog exists: harmless
+      const res = await p;
+      eq(res.cancelled, false);
+      eq(res.added.length, 1);
+    });
+    it('a dialog closed mid-row (single Escape on it) fails only that row', async () => {
+      fresh();
+      const plan = [row('Chicken Breast, Roasted', 'g', 150, 2), row('Olive Oil', 'tsp', 1, 4)];
+      const p = CMA.engineUi.run(plan, ENGINE_OPTS, null);
+      const dlg = await dom.waitFor(() => document.querySelector('.pretty-dialog'), { timeout: 3000 });
+      await dom.waitFor(() => dom.isVisible(dlg.querySelector('.food-search-spinner')), { timeout: 3000, label: 'search in progress' });
+      dom.keyup(dlg, { key: 'Escape', keyCode: 27 }); // the app closes the dialog on keyup 27 (recipe §3)
+      const res = await p;
+      eq(res.failed.length, 1); eq(res.added.length, 1);
+      ok(/dialog closed unexpectedly/.test(res.failed[0].error.message), res.failed[0].error.message);
+      eq(res.cancelled, false); eq(res.abortReason, null);
+      deepEq(window.__added, [{ name: 'Olive Oil', quantity: 1, measure: 'tsp', group: 'Snacks' }]);
+    });
+    it('aborts with a clear message when the FOOD button is missing', async () => {
+      fresh();
+      mock.uninstall(); mock = null;
+      const res = await CMA.engineUi.run(threeRows(), ENGINE_OPTS, null);
+      eq(res.added.length, 0); eq(res.failed.length, 3);
+      ok(/FOOD toolbar button not found/.test(res.abortReason), res.abortReason);
+    });
+    it('uses opts.waitForRefresh when provided', async () => {
+      fresh();
+      let calls = 0;
+      // In the extension this callback resolves when the hook sees the post-add getDayInfo; here it stands in
+      // for that by waiting past the mock's simulated diary refresh (close 100 ms + refresh 50 ms after Add).
+      const cb = collect();
+      const res = await CMA.engineUi.run([row('Egg, Whole, Cooked', 'g', 120, 1)], Object.assign({}, ENGINE_OPTS, { refreshMs: 0, waitForRefresh: async () => { calls++; await dom.sleep(120); } }), cb);
+      eq(res.added.length, 1); eq(calls, 1);
+      ok(cb.lines.some((l) => /refresh: entry visible in the diary/.test(l)), 'refresh diagnostic saw the entry:\n' + cb.lines.join('\n'));
+      deepEq(window.__added, [{ name: 'Egg, Whole, Cooked', quantity: 120, measure: 'g', group: 'Breakfast' }]);
+    });
+  });
+
+  CMA.test.run({ timeoutMs: 14000 }).then(() => { if (mock) mock.uninstall(); });
+})();
+</script>
+</body>
+</html>

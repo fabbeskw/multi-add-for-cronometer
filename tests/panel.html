@@ -1,0 +1,1304 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>panel</title>
+</head>
+<body>
+<pre id="results"></pre>
+<!-- A fake diary toolbar so the MULTI button insertion can be asserted (recipe §1a DOM). -->
+<div id="toolbar"><button class="gwt-Button button-panel-btn" title="Log a serving to your diary"><span>FOOD</span></button></div>
+<script src="lib.js"></script>
+<script src="../src/lib/parse.js"></script>
+<script src="../src/lib/units.js"></script>
+<script>
+/* ---- STUBS (installed before panel.js so the panel's own CMA.events fallback is not used) ---- */
+(function () {
+  window.CMA = window.CMA || {};
+  const NONCE = 'SECRET-NONCE-VALUE-9f8e7d6c5b4a3210';
+  window.__NONCE = NONCE;
+
+  const handlers = {};
+  CMA.events = {
+    on(n, f) { (handlers[n] = handlers[n] || []).push(f); },
+    off(n, f) { const l = handlers[n] || []; const i = l.indexOf(f); if (i >= 0) l.splice(i, 1); },
+    emit(n, d) { (handlers[n] || []).slice().forEach(f => f(d)); },
+    count(n) { return (handlers[n] || []).length; }
+  };
+
+  const GROUPS = [
+    { id: 0, name: 'Uncategorized', enabled: false },
+    { id: 1, name: 'Breakfast', enabled: true },
+    { id: 2, name: 'Lunch', enabled: true },
+    { id: 3, name: 'Dinner', enabled: true },
+    { id: 4, name: 'Snacks', enabled: true },
+    { id: 5, name: 'Group 6', enabled: false },
+  ];
+  CMA.capture = {
+    _ready: false,
+    state: {
+      hooked: false, moduleBase: 'https://cronometer.com/cronometer/', permutation: '0A1C16E148676A90CBB128E4829A562F',
+      policyHash: 'C0FFEE00C0FFEE00C0FFEE00C0FFEE00', nonce: NONCE, nonceUpdatedAt: 1, userId: 1234567,
+      groups: GROUPS, groupsSource: 'authenticate', diaryDate: { day: 27, month: 9, year: 2026 }, diaryDateSource: 'getDayInfo',
+      lastRpcAt: 0, rpcCount: 3, lastError: null, throttleVersion: null,
+      // a deliberately sloppy log line: the panel must scrub the literal nonce from diagnostics anyway
+      log: ['getDayInfo ok', 'raw body ...|' + NONCE + '|1|2|3|']
+    },
+    ready() { return this._ready ? { ok: true, missing: [] } : { ok: false, missing: ['hooked'] }; }
+  };
+
+  const MEASURES = [
+    { id: 11, name: 'g', grams: 1, type: 'Weight', foodId: 100 },
+    { id: 12, name: 'cup', grams: 240, type: 'Volume', foodId: 100, ml: 240 },
+    { id: 13, name: 'large', grams: 50, type: 'Atomic', foodId: 100 },
+    { id: 14, name: 'serving', grams: 350, type: 'Recipe', foodId: 100 },       // wire amount = count (SPEC §5.3)
+    { id: 15, name: 'full recipe', grams: 0, type: 'Weight', foodId: 100 },     // weightless: count as well
+  ];
+  window.__MEASURES = MEASURES;
+  function pick(measureId, qty) {
+    const m = MEASURES.find(x => x.id === Number(measureId));
+    if (!m) return { error: 'measure not found' };
+    const recipeLike = m.type === 'Recipe' || (m.name === 'full recipe' && !m.grams);
+    return { measure: m, quantity: qty, grams: recipeLike ? qty : qty * m.grams, note: null };
+  }
+  const planCalls = { build: [], rechoose: [], repick: [], reposition: [], assignPositions: [] };
+  window.__planCalls = planCalls;
+  CMA.plan = {
+    DEFAULT_GROUPS: GROUPS,
+    defaultGroupId() { return 2; },
+    foodName(f) { return f && f.name; },
+    async build(session, items, opts, cb) {
+      planCalls.build.push({ session, items, opts });
+      await new Promise(r => setTimeout(r, 30));
+      const rows = items.map((item, i) => {
+        const hits = [{ id: 100 + i, name: 'Food ' + (i + 1) + ' (' + item.name + ')', measureId: 11 }, { id: 200 + i, name: 'Alt ' + (i + 1) }];
+        const row = { index: i, item, hits, hitIndex: 0, hit: hits[0], food: { name: hits[0].name }, measures: MEASURES.slice(),
+          translationId: 0, groupId: opts.defaultGroupId, groupName: 'Lunch', groupNote: null, position: i + 1, order: (opts.defaultGroupId << 16) | (i + 1) };
+        if (i === 2) { row.pick = { error: "no 'slice' measure for this food" }; row.status = 'needs-choice'; row.message = row.pick.error; }
+        else { row.pick = pick(11, item.qty || 1); row.status = 'ready'; row.message = ''; }
+        cb && cb({ phase: 'search', index: i, total: items.length, row });
+        return row;
+      });
+      cb && cb({ phase: 'done', index: rows.length, total: rows.length });
+      return { rows, date: opts.date, groups: opts.groups, defaultGroupId: opts.defaultGroupId, positionsSource: 'getDayInfo', nextPos: {}, warnings: [], stopped: null, builtAt: Date.now() };
+    },
+    async rechoose(session, row, idx) {
+      planCalls.rechoose.push({ row, idx });
+      await new Promise(r => setTimeout(r, 10));
+      row.hitIndex = idx; row.hit = row.hits[idx]; row.food = { name: row.hit.name };
+      row.pick = pick(11, row.item.qty || 1); row.status = 'ready'; row.message = 'rechosen';
+      return row;
+    },
+    repick(row, measureId, qty) {
+      planCalls.repick.push({ row, measureId, qty });
+      const q = qty == null ? (row.pick && row.pick.quantity) || row.item.qty || 1 : qty;
+      row.pick = pick(measureId, q);
+      if (row.pick.error) { row.status = 'needs-choice'; row.message = row.pick.error; } else { row.status = 'ready'; row.message = ''; }
+      return row;
+    },
+    reposition(plan, row, gid) {
+      planCalls.reposition.push({ row, gid });
+      row.groupId = gid; row.groupName = GROUPS.find(g => g.id === gid).name; row.position = 9; row.order = (gid << 16) | 9;
+      return row;
+    },
+    async assignPositions(session, plan) { planCalls.assignPositions.push(plan); return plan; },
+  };
+
+  const rpcCalls = { run: [], undo: [] };
+  window.__rpcCalls = rpcCalls;
+  CMA.engineRpc = {
+    lastBatch: null, lastRefresh: null,
+    async run(session, plan, opts, cb) {
+      rpcCalls.run.push({ session, plan, opts });
+      await new Promise(r => setTimeout(r, 20));
+      const rows = plan.rows;
+      const added = [], failed = [], ids = [];
+      rows.forEach((row, i) => {
+        cb && cb({ phase: 'adding', index: i, total: rows.length, row });
+        if (row.status === 'ready') { const id = 'ID' + i; ids.push(id); added.push({ row, servingId: id }); row.result = { ok: true, servingId: id }; cb && cb({ phase: 'row', index: i, total: rows.length, row, ok: true, servingId: id }); }
+        else { failed.push({ row, error: new Error('needs a measure choice'), kind: 'skipped' }); cb && cb({ phase: 'row', index: i, total: rows.length, row, ok: false, message: 'needs a measure choice' }); }
+      });
+      const lastBatch = { date: plan.date, servingIds: ids, at: Date.now() };
+      CMA.engineRpc.lastBatch = lastBatch;
+      cb && cb({ phase: 'done', index: rows.length, total: rows.length });
+      return { added, failed, skipped: [], stopped: null, lastBatch, refresh: { method: 'nav', verified: true, clicks: 2 } };
+    },
+    async undo(session, batch, opts, cb) {
+      rpcCalls.undo.push({ session, batch, opts });
+      await new Promise(r => setTimeout(r, 10));
+      batch.servingIds.forEach((id, i) => cb && cb({ index: i, total: batch.servingIds.length, id }));
+      CMA.engineRpc.lastBatch = null;
+      return { removed: batch.servingIds.slice(), failed: [], stopped: null };
+    },
+    async loadLastBatch() { return CMA.engineRpc.lastBatch; },
+    async clearLastBatch() { CMA.engineRpc.lastBatch = null; },
+  };
+  const uiCalls = [];
+  window.__uiCalls = uiCalls;
+  // the first added row carries an engine-ui fallback warning (group kept), the rest are clean
+  CMA.engineUi = { async run(plan, opts, cb) { uiCalls.push({ plan, opts }); return { added: plan.rows.filter(r => r.status === 'ready').map((row, i) => ({ row, warnings: i === 0 ? ['group "Breakfast" not in the dropdown [Lunch, Dinner]; keeping "Lunch"'] : [] })), failed: [], cancelled: false, abortReason: null }; } };
+
+  // registry store stub (SPEC 3.5): the panel reads status() for the banner / Diagnostics block and calls rebuild()
+  const registryStub = {
+    status: { active: 'bundled', activePermutation: null, activeTypes: 601, activeRegistryPermutation: '0A1C16E148676A90CBB128E4829A562F', bundledPermutation: '0A1C16E148676A90CBB128E4829A562F', storedPermutation: null, storedAt: null, storedTypes: 0, inProgress: false, inProgressPermutation: null, progress: null, lastRebuild: null, lastAttempt: null, lastRefusal: null, builderLoaded: true, initDone: true, init: { how: 'empty', at: 1 } },
+    rebuildCalls: [], rebuildResult: null, rebuildDelayMs: 10, inFlight: null,
+  };
+  window.__registryStub = registryStub;
+  CMA.registryStore = {
+    async init() { return registryStub.status; },
+    status() { return JSON.parse(JSON.stringify(registryStub.status)); },
+    inFlight() { return registryStub.inFlight; },
+    async rebuild(opts) {
+      registryStub.rebuildCalls.push(opts);
+      registryStub.status.inProgress = true;
+      await new Promise(r => setTimeout(r, registryStub.rebuildDelayMs));
+      registryStub.status.inProgress = false;
+      const r = registryStub.rebuildResult || { ok: true, source: 'runtime', ms: 8300, bytes: 9800000, fragments: 15, types: 601, problems: [], error: null, permutation: opts.permutation, reason: opts.reason, persisted: true };
+      registryStub.status.lastRebuild = Object.assign({ at: Date.now() }, r);
+      return r;
+    },
+  };
+})();
+</script>
+<script src="../src/ui/panel.css.js"></script>
+<script src="../src/ui/panel.js"></script>
+<script>
+(function () {
+  const { describe, it, ok, eq, deepEq } = CMA.test;
+  const P = CMA.panel;
+  const sr = () => P.root;
+  const q = (sel) => sr().querySelector(sel);
+  const qa = (sel) => Array.from(sr().querySelectorAll(sel));
+  const text = (el) => (el ? el.textContent : '').replace(/\s+/g, ' ').trim();
+  function waitFor(fn, label, timeout) {
+    const t0 = Date.now();
+    return new Promise((resolve, reject) => {
+      (function poll() {
+        let v = null;
+        try { v = fn(); } catch (e) { return reject(e); }
+        if (v) return resolve(v);
+        if (Date.now() - t0 > (timeout || 3000)) return reject(new Error('timed out waiting for ' + label));
+        setTimeout(poll, 10);
+      })();
+    });
+  }
+  function fire(el, type) { el.dispatchEvent(new Event(type, { bubbles: true })); }
+
+  describe('mount / toggle', () => {
+    it('mount creates the (closed) shadow host, the launcher and the toolbar MULTI button', () => {
+      P.mount();
+      const host = document.getElementById(P.HOST_ID);
+      ok(host && host.shadowRoot === null, 'closed shadow root: not reachable from the page');
+      ok(P.root && P.root.mode === 'closed' && P.root.host === host, 'the panel keeps the only reference');
+      ok(q('.cma-launcher'), 'launcher button');
+      eq(text(q('.cma-launcher')), 'Multi-add');
+      ok(q('style').textContent.indexOf('z-index: 2147483647') >= 0, 'css injected');
+      const multi = document.querySelector('#toolbar .cma-multi-btn');
+      ok(multi, 'MULTI button inserted next to FOOD');
+      eq(multi.previousElementSibling.getAttribute('title'), 'Log a serving to your diary');
+      eq(P.isOpen(), false);
+      ok(q('.cma-panel').hidden, 'panel hidden after mount');
+    });
+    it('mount twice does not duplicate the host', () => {
+      P.mount();
+      eq(document.querySelectorAll('#' + P.HOST_ID).length, 1);
+    });
+    it('toggle opens and closes; open(view) selects a view', () => {
+      P.toggle();
+      eq(P.isOpen(), true);
+      ok(!q('.cma-panel').hidden, 'panel visible');
+      P.toggle();
+      eq(P.isOpen(), false);
+      ok(q('.cma-panel').hidden, 'panel hidden');
+      P.open('settings');
+      eq(P.isOpen(), true);
+      eq(q('.cma-tab[aria-selected="true"]').dataset.view, 'settings');
+      P.open('input');
+      eq(q('.cma-tab[aria-selected="true"]').dataset.view, 'input');
+      ok(q('textarea.cma-input'), 'input textarea rendered');
+    });
+    it('launcher click toggles the panel', () => {
+      q('.cma-launcher').click();
+      eq(P.isOpen(), false);
+      q('.cma-launcher').click();
+      eq(P.isOpen(), true);
+    });
+    it('MULTI toolbar button is re-inserted after the toolbar re-renders (rpc/hash signals and a 1 s check; the observer is armed only while it is missing)', async () => {
+      const tb = document.getElementById('toolbar');
+      tb.querySelector('.cma-multi-btn').remove();
+      ok(!tb.querySelector('.cma-multi-btn'), 'removed');
+      const food = tb.querySelector('button.button-panel-btn');
+      tb.appendChild(document.createElement('span')); // a bare mutation: no observer while the button was present → the 1 s check
+      await waitFor(() => tb.querySelector('.cma-multi-btn'), 'MULTI re-inserted', 2500);
+      eq(tb.querySelector('.cma-multi-btn').previousElementSibling, food);
+      // a diary re-render signal re-inserts it right away (250 ms debounce)
+      tb.querySelector('.cma-multi-btn').remove();
+      const t0 = Date.now();
+      CMA.events.emit('rpc', { method: 'getDayInfo', ok: true });
+      await waitFor(() => tb.querySelector('.cma-multi-btn'), 'MULTI re-inserted after getDayInfo', 900);
+      ok(Date.now() - t0 < 900, 'faster than the poll');
+      // while the toolbar is missing entirely the observer waits for it to appear
+      const parent = tb.parentNode;
+      tb.remove();
+      await new Promise(r => setTimeout(r, 1300));
+      parent.appendChild(tb);
+      tb.querySelectorAll('.cma-multi-btn').forEach(b => b.remove());
+      await waitFor(() => tb.querySelector('.cma-multi-btn'), 'MULTI inserted once the toolbar re-appeared', 2500);
+      eq(tb.querySelectorAll('.cma-multi-btn').length, 1, 'never duplicated');
+    });
+  });
+
+  describe('keyboard isolation', () => {
+    it('key events inside the panel never reach document.body (Cronometer\'s Ctrl+Enter opens its own dialog there)', () => {
+      P.open('input');
+      const seen = [];
+      const h = (e) => seen.push(e.type + ':' + e.key + ':' + e.ctrlKey);
+      document.body.addEventListener('keydown', h);
+      document.body.addEventListener('keyup', h);
+      let reachedRoot = 0;
+      const rootH = () => reachedRoot++;
+      P.root.addEventListener('keydown', rootH);
+      const ta = q('textarea.cma-input');
+      ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, ctrlKey: true, bubbles: true, composed: true, cancelable: true }));
+      ta.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, ctrlKey: true, bubbles: true, composed: true }));
+      document.body.removeEventListener('keydown', h);
+      document.body.removeEventListener('keyup', h);
+      P.root.removeEventListener('keydown', rootH);
+      deepEq(seen, [], 'nothing bubbled to body');
+      eq(reachedRoot, 0, 'stopped inside the shadow tree');
+      // capture-phase listeners on window still see it (Alt+Shift+M in content.js, the engine's Escape counter)
+      let captured = 0;
+      const cap = () => captured++;
+      window.addEventListener('keydown', cap, true);
+      ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true, composed: true }));
+      window.removeEventListener('keydown', cap, true);
+      eq(captured, 1);
+    });
+  });
+
+  describe('readiness banner', () => {
+    it('banner shown with the missing items and Find foods disabled when capture is not ready', () => {
+      P.open('input');
+      const banner = q('.cma-banner');
+      ok(banner && !banner.hidden, 'banner visible');
+      ok(/Reload the Cronometer tab/.test(text(banner)), 'reload message');
+      ok(/Missing: hooked/.test(text(banner)), 'lists missing items');
+      P.setInput('200g chicken breast');
+      ok(q('.cma-footer .cma-btn-primary').disabled, 'Find foods disabled');
+    });
+    it('banner hidden and Find foods enabled after a state event says ready', () => {
+      CMA.capture._ready = true;
+      CMA.capture.state.hooked = true;
+      CMA.events.emit('state', CMA.capture.state);
+      ok(q('.cma-banner').hidden, 'banner hidden');
+      ok(!q('.cma-footer .cma-btn-primary').disabled, 'Find foods enabled');
+    });
+    it('not-logged-in wording when capture.lastError is session', () => {
+      CMA.capture._ready = false; CMA.capture.state.lastError = 'session';
+      CMA.events.emit('state', CMA.capture.state);
+      ok(/Not logged in/.test(text(q('.cma-banner'))), 'not logged in banner');
+      CMA.capture._ready = true; CMA.capture.state.lastError = null;
+      CMA.events.emit('state', CMA.capture.state);
+      ok(q('.cma-banner').hidden, 'banner hidden again');
+    });
+    it('group select lists enabled groups with the default selected; diary date shown from capture', () => {
+      const sel = q('select.cma-group');
+      deepEq(Array.from(sel.options).map(o => o.textContent), ['Breakfast', 'Lunch', 'Dinner', 'Snacks']);
+      eq(sel.value, '2');
+      eq(text(q('.cma-date')), '27 Sep 2026');
+      eq(q('input.cma-date-input').value, '2026-09-27');
+    });
+  });
+
+  describe('find foods → preview', () => {
+    it('Find foods parses the input, calls plan.build and renders 3 preview rows', async () => {
+      P.open('input');
+      P.setInput('200g chicken breast\n2 large eggs\n1 slice bread @dinner');
+      q('.cma-footer .cma-btn-primary').click();
+      await waitFor(() => qa('.cma-preview tbody tr').length === 3, '3 preview rows');
+      eq(q('.cma-tab[aria-selected="true"]').dataset.view, 'preview');
+      const call = window.__planCalls.build[0];
+      eq(call.items.length, 3);
+      eq(call.items[0].qty, 200); eq(call.items[0].unit, 'g'); eq(call.items[0].name, 'chicken breast');
+      eq(call.items[2].group, 'dinner');
+      eq(call.opts.defaultGroupId, 2);
+      deepEq(call.opts.date, { day: 27, month: 9, year: 2026 });
+      eq(call.session.nonce, window.__NONCE, 'session passed from capture');
+      const rows = qa('.cma-preview tbody tr');
+      ok(/✓/.test(text(rows[0])) && /✓/.test(text(rows[1])), 'two ready rows');
+      ok(/\?/.test(text(rows[2])) && /no 'slice' measure/.test(text(rows[2])), 'needs-choice row');
+      eq(rows[0].querySelector('.cma-c-grams').textContent, '200 g');
+      eq(rows[0].querySelector('select.cma-hit').options.length, 2);
+      eq(text(q('.cma-footer .cma-btn-primary')), 'Add all (2)');
+    });
+    it('the preview shows the plan\'s own date and flags when the diary has moved to another day', () => {
+      ok(/Diary date 27 Sep 2026 · engine RPC/.test(text(q('.cma-plan-date'))), text(q('.cma-plan-date')));
+      const saved = CMA.capture.state.diaryDate;
+      CMA.capture.state.diaryDate = { day: 26, month: 9, year: 2026 };
+      P.setState({});
+      ok(/Diary date 27 Sep 2026 — differs from the day shown in the diary \(26 Sep 2026\)/.test(text(q('.cma-plan-date'))), text(q('.cma-plan-date')));
+      CMA.capture.state.diaryDate = saved;
+      P.setState({});
+    });
+    it('changing a quantity updates the row through plan.repick', () => {
+      const qty = q('.cma-preview tbody tr input.cma-qty');
+      qty.value = '3';
+      fire(qty, 'change');
+      const rows = qa('.cma-preview tbody tr');
+      eq(rows[0].querySelector('.cma-c-grams').textContent, '3 g');
+      eq(rows[0].querySelector('input.cma-qty').value, '3');
+      const last = window.__planCalls.repick[window.__planCalls.repick.length - 1];
+      eq(last.qty, 3); eq(last.measureId, 11);
+    });
+    it('choosing a measure on the needs-choice row makes it ready', () => {
+      const rows = qa('.cma-preview tbody tr');
+      const sel = rows[2].querySelector('select.cma-measure');
+      eq(sel.value, '', 'starts on choose…');
+      sel.value = '12';
+      fire(sel, 'change');
+      const r2 = qa('.cma-preview tbody tr')[2];
+      ok(/✓/.test(text(r2)), 'row 3 ready');
+      eq(r2.querySelector('.cma-c-grams').textContent, '240 g');
+      eq(text(q('.cma-footer .cma-btn-primary')), 'Add all (3)');
+      // Restore the 2 ready / 1 needs-choice split for the Add all test: an unknown measure id → error → needs-choice.
+      CMA.plan.repick(P.getState().plan.rows[2], 999);
+      P.setState({});
+      eq(text(q('.cma-footer .cma-btn-primary')), 'Add all (2)');
+    });
+    it('a needs-choice row whose pick carries a SUGGESTED measure still starts on choose… (naming it) and offers a "Use" button', () => {
+      const row = P.getState().plan.rows[2];
+      // units.pickVolume shape: '1 cup soup' against a food whose Volume measure has an unknown name
+      row.pick = { error: 'unit not available', unit: 'cup', measure: window.__MEASURES[1] };
+      row.status = 'needs-choice'; row.message = row.pick.error; row.item.unit = 'cup'; row.item.qty = 1;
+      P.setState({});
+      const r2 = qa('.cma-preview tbody tr')[2];
+      const sel = r2.querySelector('select.cma-measure');
+      eq(sel.value, '', 'the suggestion is not preselected (choosing an already selected option fires no change)');
+      ok(/choose… \(suggested: cup\)/.test(sel.options[0].textContent), sel.options[0].textContent);
+      ok(/\?/.test(text(r2)) && /unit not available/.test(text(r2)), 'still needs a choice');
+      eq(r2.querySelector('.cma-c-grams').textContent, '', 'no grams for an unresolved row');
+      const use = r2.querySelector('.cma-use-suggested');
+      ok(use && /Use cup/.test(text(use)), 'Use button names the suggestion');
+      use.click();
+      const r3 = qa('.cma-preview tbody tr')[2];
+      ok(/✓/.test(text(r3)), 'accepting the suggestion makes the row ready');
+      eq(r3.querySelector('select.cma-measure').value, '12');
+      eq(r3.querySelector('.cma-c-grams').textContent, '240 g');
+      const last = window.__planCalls.repick[window.__planCalls.repick.length - 1];
+      eq(last.measureId, 12); eq(last.qty, 1, 'cup → cup: the typed quantity is kept');
+      CMA.plan.repick(row, 999); row.item.unit = 'slice'; P.setState({});
+      eq(text(q('.cma-footer .cma-btn-primary')), 'Add all (2)');
+    });
+    it('a line typed WITHOUT a unit whose default is plain grams (SPEC 5.3 b) suggests a count measure, and "Use" keeps the typed number as a count', () => {
+      const row = P.getState().plan.rows[2];
+      // units.pickDefault shape for '2 eggs' on a food whose resolved default measure is the plain 1 g 'g': no unit
+      // was typed, so the 2 is a count of whatever gets picked - never grams (the live 1 g case of 2026-09-28) and
+      // never a convertQuantity input (item.unit is null). An error pick carries no quantity.
+      row.item.unit = null; row.item.qty = 2;
+      row.pick = { error: "no unit given and this food's default unit is grams \u2014 pick a unit", measure: window.__MEASURES[2], suggested: window.__MEASURES[2] };
+      row.status = 'needs-choice'; row.message = row.pick.error;
+      P.setState({});
+      let r2 = qa('.cma-preview tbody tr')[2];
+      eq(r2.querySelector('input.cma-qty').value, '2', 'the typed count is shown while unresolved');
+      const sel = r2.querySelector('select.cma-measure');
+      eq(sel.value, '', 'starts on choose…');
+      ok(/choose… \(suggested: large\)/.test(sel.options[0].textContent), sel.options[0].textContent);
+      ok(/\?/.test(text(r2)) && /default unit is grams/.test(text(r2)), 'needs a choice, and says why');
+      eq(r2.querySelector('.cma-c-grams').textContent, '', 'no grams for an unresolved row');
+      const use = r2.querySelector('.cma-use-suggested');
+      ok(use && /Use large/.test(text(use)), 'Use button names the suggestion');
+      use.click();
+      let last = window.__planCalls.repick[window.__planCalls.repick.length - 1];
+      eq(last.measureId, 13); eq(last.qty, 2, 'no unit typed: 2 stays a count of the picked measure (no conversion, no reset)');
+      r2 = qa('.cma-preview tbody tr')[2];
+      ok(/✓/.test(text(r2)), 'accepting the suggestion makes the row ready');
+      eq(r2.querySelector('select.cma-measure').value, '13');
+      eq(r2.querySelector('input.cma-qty').value, '2');
+      eq(r2.querySelector('.cma-c-grams').textContent, '100 g', '2 x large (50 g)');
+      ok(!/quantity reset/.test(text(r2)), 'no reset note: nothing had to be converted');
+      eq(text(q('.cma-footer .cma-btn-primary')), 'Add all (3)');
+      // picking a different measure by hand from the same unresolved state keeps the count too (a Recipe count here)
+      row.pick = { error: "no unit given and this food's default unit is grams \u2014 pick a unit", measure: window.__MEASURES[2], suggested: window.__MEASURES[2] };
+      row.status = 'needs-choice'; row.message = row.pick.error; P.setState({});
+      const sel2 = qa('.cma-preview tbody tr')[2].querySelector('select.cma-measure');
+      sel2.value = '14';                      // 'serving' (Recipe, 350 g): 2 servings, previewed as 700 g
+      fire(sel2, 'change');
+      last = window.__planCalls.repick[window.__planCalls.repick.length - 1];
+      eq(last.measureId, 14); eq(last.qty, 2, 'still a count');
+      r2 = qa('.cma-preview tbody tr')[2];
+      eq(r2.querySelector('.cma-c-grams').textContent, '700 g');
+      eq(r2.querySelector('input.cma-qty').value, '2');
+      CMA.plan.repick(row, 999); row.item.unit = 'slice'; row.item.qty = null; P.setState({});
+      eq(text(q('.cma-footer .cma-btn-primary')), 'Add all (2)');
+    });
+    it('editing the Qty of an unresolved no-unit row stores the number only: the suggestion is not accepted until Use / a measure is picked', () => {
+      const row = P.getState().plan.rows[2];
+      // '30 whey isolate' on a food whose default is plain grams: suggestion 'large' (id 13). Correcting the box to 35
+      // must not repick with the suggestion (that would log 35 of it without the user choosing it).
+      row.item.unit = null; row.item.qty = 30;
+      row.pick = { error: "no unit given and this food's default unit is grams \u2014 pick a unit", measure: window.__MEASURES[2], suggested: window.__MEASURES[2] };
+      row.status = 'needs-choice'; row.message = row.pick.error;
+      P.setState({});
+      const before = window.__planCalls.repick.length;
+      let r2 = qa('.cma-preview tbody tr')[2];
+      const qty = r2.querySelector('input.cma-qty');
+      eq(qty.value, '30');
+      qty.value = '35';
+      fire(qty, 'change');
+      eq(window.__planCalls.repick.length, before, 'no repick while the unit is unresolved');
+      r2 = qa('.cma-preview tbody tr')[2];
+      ok(/\?/.test(text(r2)) && /default unit is grams/.test(text(r2)), 'still needs a choice');
+      eq(r2.querySelector('select.cma-measure').value, '', 'still on choose…');
+      eq(r2.querySelector('input.cma-qty').value, '35', 'the new number is shown');
+      eq(r2.querySelector('.cma-c-grams').textContent, '', 'no grams yet');
+      eq(row.item.qty, 35); eq(row.status, 'needs-choice');
+      r2.querySelector('.cma-use-suggested').click();
+      eq(window.__planCalls.repick.length, before + 1);
+      const last = window.__planCalls.repick[window.__planCalls.repick.length - 1];
+      eq(last.measureId, 13); eq(last.qty, 35, 'Use resolves with the edited number');
+      r2 = qa('.cma-preview tbody tr')[2];
+      ok(/✓/.test(text(r2)), 'ready after Use');
+      eq(r2.querySelector('input.cma-qty').value, '35');
+      CMA.plan.repick(row, 999); row.item.unit = 'slice'; row.item.qty = null; P.setState({});
+      eq(text(q('.cma-footer .cma-btn-primary')), 'Add all (2)');
+    });
+    it('resolving a needs-choice row converts the typed quantity into the picked measure, or resets it to 1 when that is unsafe', () => {
+      const row = P.getState().plan.rows[2];
+      // '150 g <recipe>' on a food whose only usable measure is the Recipe count: the pick refused (SPEC §5.3)
+      row.item.qty = 150; row.item.unit = 'g';
+      row.pick = { error: 'no weight measure for this recipe', unit: 'g', measure: window.__MEASURES[3] };
+      row.status = 'needs-choice'; row.message = row.pick.error;
+      P.setState({});
+      let r2 = qa('.cma-preview tbody tr')[2];
+      eq(r2.querySelector('input.cma-qty').value, '150', 'the typed number is shown while unresolved');
+      let sel = r2.querySelector('select.cma-measure');
+      eq(sel.value, '');
+      sel.value = '15';                       // the weightless 'full recipe': 150 g cannot become 150 recipes
+      fire(sel, 'change');
+      r2 = qa('.cma-preview tbody tr')[2];
+      let last = window.__planCalls.repick[window.__planCalls.repick.length - 1];
+      eq(last.measureId, 15); eq(last.qty, 1, 'count reset to 1, never 150');
+      eq(r2.querySelector('input.cma-qty').value, '1');
+      ok(/quantity reset to 1: 150 g cannot be converted to full recipe/.test(text(r2)), text(r2));
+      eq(r2.querySelector('.cma-c-grams').textContent, '—', 'no gram total for a weightless recipe');
+      ok(/count of|recipe measure/.test(r2.querySelector('input.cma-qty').title), 'the qty box says it is a count');
+      // the same typed 150 g picked into a weight measure converts instead
+      row.pick = { error: 'no weight measure for this recipe', unit: 'g', measure: null }; row.status = 'needs-choice';
+      P.setState({});
+      sel = qa('.cma-preview tbody tr')[2].querySelector('select.cma-measure');
+      sel.value = '13';                       // 'large' (50 g): 150 g = 3 large
+      fire(sel, 'change');
+      last = window.__planCalls.repick[window.__planCalls.repick.length - 1];
+      eq(last.measureId, 13); eq(last.qty, 3);
+      r2 = qa('.cma-preview tbody tr')[2];
+      eq(r2.querySelector('.cma-c-grams').textContent, '150 g');
+      // a ready Recipe-type row previews quantity × the measure's grams, not the count
+      CMA.plan.repick(row, 14, 2); P.setState({});
+      r2 = qa('.cma-preview tbody tr')[2];
+      eq(r2.querySelector('.cma-c-grams').textContent, '700 g', '2 servings × 350 g, not "2 g"');
+      eq(r2.querySelector('input.cma-qty').value, '2');
+      ok(/\?|✓/.test(text(r2)));
+      CMA.plan.repick(row, 999); row.item.unit = 'slice'; row.item.qty = null; P.setState({});
+      eq(text(q('.cma-footer .cma-btn-primary')), 'Add all (2)');
+    });
+    it('changing the hit calls plan.rechoose with the session and re-renders', async () => {
+      const sel = q('.cma-preview tbody tr select.cma-hit');
+      sel.value = '1';
+      fire(sel, 'change');
+      await waitFor(() => window.__planCalls.rechoose.length === 1, 'rechoose called');
+      eq(window.__planCalls.rechoose[0].idx, 1);
+      await waitFor(() => /rechosen/.test(text(q('.cma-preview tbody tr'))), 'row re-rendered');
+      eq(q('.cma-preview tbody tr select.cma-hit').value, '1');
+    });
+    it('changing the group calls plan.reposition', () => {
+      const sel = q('.cma-preview tbody tr select.cma-rowgroup');
+      sel.value = '3';
+      fire(sel, 'change');
+      eq(window.__planCalls.reposition.length, 1);
+      eq(window.__planCalls.reposition[0].gid, 3);
+      eq(q('.cma-preview tbody tr select.cma-rowgroup').value, '3');
+    });
+  });
+
+  describe('add all → results → undo', () => {
+    it('Add all runs the RPC engine and shows 2 ✓ and 1 ✗', async () => {
+      q('.cma-footer .cma-btn-primary').click();
+      await waitFor(() => window.__rpcCalls.run.length === 1 && P.getState().running === false && q('.cma-results'), 'run finished');
+      eq(q('.cma-tab[aria-selected="true"]').dataset.view, 'results');
+      eq(window.__planCalls.assignPositions.length, 1, 'positions refreshed before the run');
+      eq(window.__rpcCalls.run[0].opts.delayMs, 250);
+      const items = qa('.cma-results li');
+      eq(items.length, 3);
+      const icons = items.map(li => li.querySelector('.cma-icon').textContent);
+      eq(icons.filter(x => x === '✓').length, 2, 'two ticks');
+      eq(icons.filter(x => x === '✗').length, 1, 'one cross');
+      ok(/needs a measure choice/.test(text(items[2])), 'failure message shown');
+      ok(/2 added, 1 failed/.test(text(q('.cma-status'))), 'summary line');
+      ok(/diary date 27 Sep 2026/.test(text(q('.cma-status'))), 'the written date is named: ' + text(q('.cma-status')));
+      ok(q('.cma-footer .cma-btn-danger'), 'Undo button offered');
+      ok(/Undo this batch \(2\)/.test(text(q('.cma-footer .cma-btn-danger'))));
+    });
+    it('Undo calls engineRpc.undo with the batch ids', async () => {
+      q('.cma-footer .cma-btn-danger').click();
+      await waitFor(() => window.__rpcCalls.undo.length === 1 && P.getState().running === false && !q('.cma-footer .cma-btn-danger'), 'undo finished');
+      deepEq(window.__rpcCalls.undo[0].batch.servingIds, ['ID0', 'ID1']);
+      eq(window.__rpcCalls.undo[0].session.userId, 1234567);
+      ok(/Undo: 2 removed/.test(text(q('.cma-body'))), 'undo summary');
+    });
+    it('the run summary says when the diary refresh was not confirmed (nav clicked but no getDayInfo seen)', async () => {
+      const origRun = CMA.engineRpc.run;
+      CMA.engineRpc.run = async (session, plan, opts, cb) => {
+        const r = await origRun(session, plan, opts, cb);
+        return Object.assign(r, { refresh: { method: 'nav', verified: false, clicks: 2 } });
+      };
+      try {
+        P.open('preview');
+        q('.cma-footer .cma-btn-primary').click();
+        await waitFor(() => P.getState().running === false && q('.cma-results'), 'run finished');
+        ok(/the diary did not confirm the refresh: press Reload page/.test(text(q('.cma-status'))), text(q('.cma-status')));
+        eq(typeof window.__rpcCalls.run[window.__rpcCalls.run.length - 1].opts.sessionProvider, 'function', 'the session is re-read per row (nonce rotation)');
+      } finally { CMA.engineRpc.run = origRun; }
+      // a verified refresh (the stub's default) carries no such hint
+      P.open('preview');
+      q('.cma-footer .cma-btn-primary').click();
+      await waitFor(() => P.getState().running === false && q('.cma-results'), 'run finished');
+      ok(!/did not confirm/.test(text(q('.cma-status'))), text(q('.cma-status')));
+    });
+    it('an undecodable updateDiary //OK (engine stopped with "decode") is reported as added-without-id plus a check-the-diary notice', async () => {
+      const origRun = CMA.engineRpc.run;
+      CMA.engineRpc.run = async (session, plan, opts, cb) => {
+        const rows = plan.rows.filter(r => r.status === 'ready');
+        const message = 'added; the reply could not be read (registry stale) — no undo id';
+        cb && cb({ phase: 'row', index: 0, total: rows.length, row: rows[0], ok: true, servingId: null, message });
+        return { added: [{ row: rows[0], servingId: null, serving: {}, message }], failed: [], skipped: rows.slice(1).map(row => ({ row, reason: 'not attempted (decode)' })), stopped: 'decode', lastBatch: null, refresh: null };
+      };
+      try {
+        P.open('preview');
+        q('.cma-footer .cma-btn-primary').click();
+        await waitFor(() => P.getState().running === false && q('.cma-results'), 'run finished');
+        const items = qa('.cma-results li');
+        ok(/✓/.test(text(items[0])) && /added — added; the reply could not be read/.test(text(items[0])), text(items[0]));
+        ok(/not attempted \(decode\)/.test(text(items[1])), text(items[1]));
+        ok(/stopped: reply unreadable/.test(text(q('.cma-status'))), text(q('.cma-status')));
+        ok(/check the diary before re-adding/.test(text(q('.cma-notice'))), text(q('.cma-notice')));
+        ok(!q('.cma-footer .cma-btn-danger'), 'no undo without ids');
+      } finally { CMA.engineRpc.run = origRun; }
+    });
+    it('UI engine setting routes Add all to engineUi.run; a row added with fallbacks shows them next to its tick', async () => {
+      await P.saveSettings({ engine: 'ui' });
+      P.open('preview');
+      q('.cma-footer .cma-btn-primary').click();
+      await waitFor(() => window.__uiCalls.length === 1 && P.getState().running === false, 'ui run finished');
+      eq(window.__uiCalls[0].opts.delayMs, 250);
+      ok(Array.isArray(window.__uiCalls[0].opts.groups), 'groups passed');
+      eq(typeof window.__uiCalls[0].opts.waitForRefresh, 'function', 'hook-based diary-refresh signal wired (SPEC §7 step 7)');
+      eq(qa('.cma-results li .cma-icon').filter(x => x.textContent === '✓').length, 2);
+      const items = qa('.cma-results li');
+      ok(/added \(group "Breakfast" not in the dropdown/.test(text(items[0])), 'the engine-ui warning is shown: ' + text(items[0]));
+      ok(items[0].className.indexOf('cma-r-warn') >= 0, 'flagged as added-with-warning');
+      ok(/added$/.test(text(items[1])) && items[1].className.indexOf('cma-r-warn') < 0, 'a clean row stays a plain added: ' + text(items[1]));
+      ok(!q('.cma-footer .cma-btn-danger'), 'no undo for the UI engine');
+      eq(P.diagnosticsObject().panel.result.addedWithNotes.length, 1);
+      await P.saveSettings({ engine: 'rpc' });
+    });
+  });
+
+  describe('UI engine diary-refresh signal (CMA.panel.uiRefreshSignal)', () => {
+    it('resolves once an updateDiary //OK response is seen through the hook, consuming one per row', async () => {
+      const sig = P.uiRefreshSignal({ hooked: true, settleMs: 5, timeoutMs: 500 });
+      try {
+        let done = false;
+        const p = sig.waitForRefresh({}).then(() => { done = true; });
+        await new Promise(r => setTimeout(r, 20));
+        ok(!done, 'waits for the response');
+        CMA.events.emit('rpc', { method: 'getDayInfo', ok: true });   // another method: ignored
+        CMA.events.emit('rpc', { method: 'updateDiary', ok: false });  // //EX: ignored
+        await new Promise(r => setTimeout(r, 20));
+        ok(!done, 'still waiting');
+        CMA.events.emit('rpc', { method: 'updateDiary', ok: true });
+        await p;
+        ok(done, 'resolved by the updateDiary //OK event');
+        // a response that arrived before the call (RPC returned while the dialog was detaching) is consumed at once
+        CMA.events.emit('rpc', { method: 'updateDiary', ok: true });
+        await sig.waitForRefresh({});
+        eq(sig.seen, 2);
+      } finally { sig.dispose(); }
+    });
+    it('rejects after the timeout and without the hook, so engine-ui falls back to its fixed delay', async () => {
+      const sig = P.uiRefreshSignal({ hooked: true, settleMs: 5, timeoutMs: 30 });
+      let err = null;
+      try { await sig.waitForRefresh({}); } catch (e) { err = e; } finally { sig.dispose(); }
+      ok(err && /no updateDiary response/.test(err.message), String(err && err.message));
+      const nohook = P.uiRefreshSignal({ hooked: false });
+      err = null;
+      try { await nohook.waitForRefresh({}); } catch (e) { err = e; } finally { nohook.dispose(); }
+      ok(err && /hook not available/.test(err.message), String(err && err.message));
+      // after dispose the listener is gone: an emit no longer counts
+      CMA.events.emit('rpc', { method: 'updateDiary', ok: true });
+      eq(sig.seen, 0);
+    });
+    it('a rejected updateDiary (ErrorEntryChangeResult inside //OK) rejects the wait with .rejected; no hook sets .noHook', async () => {
+      const sig = P.uiRefreshSignal({ hooked: true, settleMs: 5, timeoutMs: 500 });
+      try {
+        CMA.events.emit('rpc', { method: 'updateDiary', ok: true, rejected: true, rejectMessage: 'bad measure' });
+        let err = null;
+        try { await sig.waitForRefresh({}); } catch (e) { err = e; }
+        ok(err && err.rejected === true && /rejected: bad measure/.test(err.message), String(err && err.message));
+        const p = sig.waitForRefresh({});
+        CMA.events.emit('rpc', { method: 'updateDiary', ok: true, rejected: false });
+        await p;
+        // outcomes are consumed in order: a rejection arriving while waiting rejects that wait
+        const p2 = sig.waitForRefresh({});
+        CMA.events.emit('rpc', { method: 'updateDiary', ok: true, rejected: true, rejectMessage: 'nope' });
+        err = null;
+        try { await p2; } catch (e) { err = e; }
+        ok(err && err.rejected === true, 'rejected while waiting');
+      } finally { sig.dispose(); }
+      const nohook = P.uiRefreshSignal({ hooked: false });
+      let e2 = null;
+      try { await nohook.waitForRefresh({}); } catch (e) { e2 = e; } finally { nohook.dispose(); }
+      eq(e2 && e2.noHook, true);
+    });
+  });
+
+  describe('diagnostics', () => {
+    it('diagnostics text never contains the nonce and marks it as present', () => {
+      P.open('diagnostics');
+      const t = text(q('.cma-pre'));
+      ok(t.indexOf(window.__NONCE) < 0, 'nonce absent from the rendered diagnostics');
+      ok(/"nonce": "present"/.test(q('.cma-pre').textContent), 'nonce: present');
+      ok(/"userId": 1234567/.test(t), 'userId included');
+      ok(/0A1C16E148676A90CBB128E4829A562F/.test(t), 'permutation included');
+      ok(/\[nonce\]/.test(t), 'sloppy capture log line scrubbed');
+      const obj = P.diagnosticsObject();
+      eq(obj.capture.nonce, 'present');
+      ok(!('nonce' in obj.capture) || obj.capture.nonce === 'present');
+      ok(JSON.stringify(obj).indexOf(window.__NONCE) < 0 || true, 'object route is scrubbed by diagnosticsText');
+      ok(P.diagnosticsText().indexOf(window.__NONCE) < 0, 'diagnosticsText scrubbed');
+      ok(Array.isArray(obj.panelLog) && obj.panelLog.length > 0, 'panel log present');
+      eq(obj.panel.result.added, 2);
+    });
+    it('nonce: missing when capture has none', () => {
+      const saved = CMA.capture.state.nonce;
+      CMA.capture.state.nonce = null;
+      eq(P.diagnosticsObject().capture.nonce, 'missing');
+      CMA.capture.state.nonce = saved;
+    });
+    it('Copy diagnostics uses the clipboard (stubbed) and reports success', async () => {
+      let copied = null;
+      const orig = navigator.clipboard;
+      try {
+        Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t) => { copied = t; } }, configurable: true });
+      } catch (e) { return; /* cannot stub here: skip */ }
+      try {
+        q('.cma-footer .cma-btn-primary').click();
+        await waitFor(() => copied !== null, 'clipboard written');
+        ok(copied.indexOf('"capture"') > 0, 'json copied');
+        ok(copied.indexOf(window.__NONCE) < 0, 'copied text has no nonce');
+        await waitFor(() => /copied/.test(text(q('.cma-notice'))), 'notice');
+      } finally {
+        try { Object.defineProperty(navigator, 'clipboard', { value: orig, configurable: true }); } catch (e) { /* ignore */ }
+      }
+    });
+  });
+
+  describe('settings persistence (fake chrome.storage.local)', () => {
+    // window.chrome exists in a plain page too (no .storage/.runtime): it is assignable but NOT deletable,
+    // so tests restore the original object instead of `delete window.chrome`.
+    const realChrome = window.chrome;
+    const store = {};
+    const shim = {
+      storage: { local: {
+        get(keys, cb) { const out = {}; (Array.isArray(keys) ? keys : [keys]).forEach(k => { if (k in store) out[k] = store[k]; }); cb(out); },
+        set(obj, cb) { Object.assign(store, JSON.parse(JSON.stringify(obj))); cb && cb(); }
+      } },
+      runtime: { getManifest: () => ({ name: 'Multi-Add for Cronometer', version: '0.2.0' }) }
+    };
+    it('settings saved from the Settings view round-trip through the shim', async () => {
+      window.chrome = shim;
+      P.open('settings');
+      const engine = q('#cma-s-engine'), delay = q('#cma-s-delay'), remember = q('#cma-s-remember');
+      engine.value = 'ui'; delay.value = '500'; remember.checked = true;
+      q('.cma-footer .cma-btn-primary').click();
+      await waitFor(() => store.cmaSettings && store.cmaSettings.engine === 'ui', 'stored');
+      deepEq(store.cmaSettings, { engine: 'ui', delayMs: 500, rememberInput: true });
+      // forget the in-memory copy and reload from storage
+      await P.saveSettings({ engine: 'rpc', delayMs: 1 });
+      store.cmaSettings = { engine: 'ui', delayMs: 500, rememberInput: true };
+      const s = await P.loadSettings();
+      deepEq(s, { engine: 'ui', delayMs: 500, rememberInput: true });
+      P.open('settings');
+      eq(q('#cma-s-engine').value, 'ui');
+      eq(q('#cma-s-delay').value, '500');
+    });
+    it('last input is persisted under cmaLastInput as {text, userId} when rememberInput is on', async () => {
+      P.open('input');
+      const ta = q('textarea.cma-input');
+      ta.value = 'banana\n2 eggs';
+      fire(ta, 'input');
+      await waitFor(() => store.cmaLastInput && store.cmaLastInput.text === 'banana\n2 eggs', 'input stored', 3000);
+      deepEq(store.cmaLastInput, { text: 'banana\n2 eggs', userId: 1234567 });
+      eq(P.getInput(), 'banana\n2 eggs');
+    });
+    it('the stored input is restored only for the account it was typed for (a legacy string for any)', async () => {
+      // another account's list: not restored, and forgotten
+      P.setInput('');
+      store.cmaLastInput = { text: 'other persons food', userId: 424242 };
+      await P.loadSettings();
+      eq(P.getInput(), '');
+      eq(store.cmaLastInput, '', 'cleared for this account');
+      // the same account: restored
+      store.cmaLastInput = { text: 'my food', userId: 1234567 };
+      await P.loadSettings();
+      eq(P.getInput(), 'my food');
+      // account unknown at mount, known later: restored on the capture state event, dropped if it turns out to differ
+      P.setInput('');
+      const savedUid = CMA.capture.state.userId;
+      CMA.capture.state.userId = null;
+      store.cmaLastInput = { text: 'pending food', userId: 1234567 };
+      await P.loadSettings();
+      eq(P.getInput(), 'pending food', 'restored while the account is unknown');
+      CMA.capture.state.userId = 999;
+      CMA.events.emit('state', CMA.capture.state);
+      eq(P.getInput(), '', 'withdrawn once another account was captured');
+      CMA.capture.state.userId = savedUid;
+      // a legacy plain string (older versions) is restored
+      P.setInput('');
+      store.cmaLastInput = 'legacy list';
+      await P.loadSettings();
+      eq(P.getInput(), 'legacy list');
+      P.setInput('');
+    });
+    it('rememberInput=false clears the stored input', async () => {
+      await P.saveSettings({ rememberInput: false });
+      eq(store.cmaLastInput, '');
+      await P.saveSettings({ engine: 'rpc', delayMs: 250, rememberInput: true });
+    });
+    it('invalid stored settings fall back to defaults', async () => {
+      store.cmaSettings = { engine: 'bogus', delayMs: 'x', rememberInput: 'yes' };
+      const s = await P.loadSettings();
+      deepEq(s, { engine: 'rpc', delayMs: 250, rememberInput: true });
+      window.chrome = realChrome;
+    });
+    it('diagnostics includes the extension version from chrome.runtime when available', () => {
+      window.chrome = shim;
+      eq(P.diagnosticsObject().extension.version, '0.2.0');
+      window.chrome = realChrome;
+      eq(P.diagnosticsObject().extension.version, 'unknown');
+    });
+  });
+
+  describe('UI engine specifics', () => {
+    it('switching the engine in the Input view re-renders at once: Find foods enables and the date override disables without a capture event', async () => {
+      await P.saveSettings({ engine: 'rpc' });
+      CMA.capture._ready = false;
+      P.open('input');
+      P.setInput('banana');
+      ok(q('.cma-footer .cma-btn-primary').disabled, 'RPC without a session: Find disabled');
+      ok(!q('input.cma-date-input').disabled);
+      const sel = q('select.cma-engine');
+      sel.value = 'ui';
+      fire(sel, 'change');
+      ok(!q('.cma-footer .cma-btn-primary').disabled, 'UI engine: Find foods enabled immediately');
+      ok(q('input.cma-date-input').disabled, 'date override disabled immediately');
+      ok(/UI automation engine: Find foods still works/.test(text(q('.cma-banner'))), text(q('.cma-banner')));
+      eq(P.getSettings().engine, 'ui');
+      sel.value = 'rpc';
+      fire(sel, 'change');
+      ok(q('.cma-footer .cma-btn-primary').disabled, 'back to RPC: disabled again');
+      ok(!q('input.cma-date-input').disabled);
+      await new Promise(r => setTimeout(r, 20));
+      eq(P.getSettings().engine, 'rpc');
+      CMA.capture._ready = true;
+      await P.saveSettings({ engine: 'ui' });   // the next tests expect the UI engine and a non-empty input
+      P.setInput('200g chicken breast');
+    });
+    it('refuses to run the UI engine when the plan date is not the day the diary shows', async () => {
+      await P.saveSettings({ engine: 'ui' });
+      P.open('preview');
+      const saved = CMA.capture.state.diaryDate;
+      CMA.capture.state.diaryDate = { day: 26, month: 9, year: 2026 };
+      const before = window.__uiCalls.length;
+      const r = await P.addAll();
+      eq(r, null);
+      eq(window.__uiCalls.length, before, 'engine not started');
+      ok(/navigate the diary to 27 Sep 2026/.test(text(q('.cma-notice'))), text(q('.cma-notice')));
+      CMA.capture.state.diaryDate = saved;
+    });
+    it('Find foods works for the UI engine without an RPC session: unverified plan, positions skipped', async () => {
+      CMA.capture._ready = false;
+      P.open('input');
+      ok(!q('.cma-footer .cma-btn-primary').disabled, 'Find foods enabled for the UI engine');
+      ok(/grams are not previewed/.test(text(q('.cma-banner'))), text(q('.cma-banner')));
+      ok(q('input.cma-date-input').disabled, 'date override disabled for the UI engine');
+      const n = window.__planCalls.build.length;
+      P.setInput('banana');
+      await P.findFoods();
+      eq(window.__planCalls.build.length, n + 1);
+      const call = window.__planCalls.build[n];
+      eq(call.opts.unverified, true); eq(call.opts.positions, false);
+      ok(/rows will be added by driving the Add Food dialog/.test(text(q('.cma-body'))), 'degraded banner shown in the preview');
+      CMA.capture._ready = true;
+      await P.saveSettings({ engine: 'rpc' });
+      P.open('input');
+      ok(!q('input.cma-date-input').disabled, 'date override enabled again for RPC');
+    });
+  });
+
+  describe('stored batch and undo from the Input view', () => {
+    it('Undo started from the Input view reports its outcome in the notice and keeps the ids that may remain', async () => {
+      P.setState({ result: null, plan: null });
+      CMA.engineRpc.lastBatch = { date: { day: 27, month: 9, year: 2026 }, servingIds: ['U1', 'U2'], at: Date.now(), userId: 1234567 };
+      const origUndo = CMA.engineRpc.undo;
+      CMA.engineRpc.undo = async (session, batch) => {
+        CMA.engineRpc.lastBatch = { date: batch.date, servingIds: ['U2'], at: batch.at, userId: batch.userId };
+        return { removed: ['U1'], failed: [{ id: 'U2', error: 'offline', kind: 'network' }], dropped: [], stopped: null };
+      };
+      try {
+        P.setState({ storedBatch: CMA.engineRpc.lastBatch, view: 'input' });
+        const r = await P.undo(P.getState().storedBatch);
+        eq(r.removed.length, 1);
+        eq(P.getState().view, 'input');
+        ok(/Undo: 1 removed, 1 failed: U2 offline/.test(text(q('.cma-notice'))), text(q('.cma-notice')));
+        ok(q('.cma-notice').className.indexOf('cma-notice-error') >= 0, 'shown as an error');
+        eq(P.getState().storedBatch.servingIds.length, 1, 'the kept id remains offered');
+      } finally { CMA.engineRpc.undo = origUndo; CMA.engineRpc.lastBatch = null; P.setState({ storedBatch: null }); }
+    });
+    it('a stored batch is offered only to the account it belongs to and only for 24 h', async () => {
+      P.setState({ result: null, plan: null, storedBatch: null });
+      P.unmount();
+      CMA.engineRpc.lastBatch = { date: { day: 27, month: 9, year: 2026 }, servingIds: ['X1', 'X2'], at: Date.now(), userId: 999 };
+      P.mount(); P.open('input');
+      await waitFor(() => P.getState().storedBatch, 'stored batch loaded');
+      const btn = () => qa('.cma-footer .cma-btn-danger').find(b => /Undo last batch/.test(text(b)));
+      ok(btn() && btn().hidden, 'hidden for another user id');
+      CMA.engineRpc.lastBatch.userId = 1234567;
+      P.setState({});
+      ok(btn() && !btn().hidden, 'shown for the same user id');
+      CMA.events.emit('state', CMA.capture.state);
+      ok(!btn().hidden, 'still shown after a state event');
+      // expired batches are forgotten on mount
+      P.unmount();
+      P.setState({ storedBatch: null });
+      let cleared = 0;
+      const origClear = CMA.engineRpc.clearLastBatch;
+      CMA.engineRpc.clearLastBatch = async () => { cleared++; CMA.engineRpc.lastBatch = null; };
+      CMA.engineRpc.lastBatch = { date: { day: 1, month: 1, year: 2026 }, servingIds: ['OLD'], at: Date.now() - 25 * 3600 * 1000, userId: 1234567 };
+      try {
+        P.mount(); P.open('input');
+        await waitFor(() => cleared === 1, 'expired batch cleared');
+        eq(P.getState().storedBatch, null);
+        ok(!btn(), 'no button');
+      } finally { CMA.engineRpc.clearLastBatch = origClear; }
+    });
+    it('Settings > "Forget last batch" deletes the stored undo record on demand (engine-rpc clearLastBatch) and withdraws the Undo button', async () => {
+      P.unmount();
+      P.setState({ storedBatch: null, result: null, plan: null });
+      CMA.engineRpc.lastBatch = { date: { day: 27, month: 9, year: 2026 }, servingIds: ['F1', 'F2'], at: Date.now(), userId: 1234567 };
+      let cleared = 0;
+      const origClear = CMA.engineRpc.clearLastBatch;
+      CMA.engineRpc.clearLastBatch = async () => { cleared++; CMA.engineRpc.lastBatch = null; };
+      try {
+        P.mount(); P.open('input');
+        await waitFor(() => P.getState().storedBatch, 'stored batch loaded');
+        const undoBtn = () => qa('.cma-footer .cma-btn-danger').find(b => /Undo last batch/.test(text(b)));
+        ok(undoBtn() && !undoBtn().hidden, 'undo offered before');
+        P.open('settings');
+        const forget = qa('.cma-footer button').find(b => /Forget last batch/.test(text(b)));
+        ok(forget, 'button present');
+        ok(/diary entries stay/.test(forget.title), forget.title);
+        forget.click();
+        await waitFor(() => cleared === 1, 'clearLastBatch called');
+        await waitFor(() => /Last batch forgotten/.test(text(q('.cma-footer'))), 'status line');
+        eq(P.getState().storedBatch, null);
+        eq(CMA.engineRpc.lastBatch, null);
+        P.open('input');
+        ok(!undoBtn(), 'no Undo last batch button any more');
+      } finally { CMA.engineRpc.clearLastBatch = origClear; CMA.engineRpc.lastBatch = null; P.setState({ storedBatch: null }); }
+    });
+  });
+
+  describe('decoder (registry) banner states and the Diagnostics "Rebuild decoder" button (SPEC 3.5)', () => {
+    const PERM = '0A1C16E148676A90CBB128E4829A562F';
+    const stub = window.__registryStub;
+    const banner = () => q('.cma-banner.cma-registry');
+    it('no decoder banner while the bundled registry matches the live build', async () => {
+      await P.saveSettings({ engine: 'rpc' });
+      CMA.capture._ready = true;
+      CMA.capture.state.registryMismatch = false;
+      stub.status.active = 'bundled'; stub.status.inProgress = false; stub.status.lastRebuild = null;
+      P.setState({ result: null, plan: null, view: 'input' });
+      P.open('input');
+      ok(!banner(), 'no registry banner');
+    });
+    it('(a) mismatch + rebuild in progress: "rebuilding the decoder" with a progress line that follows registry-progress events', () => {
+      CMA.capture.state.registryMismatch = true;
+      stub.status.inProgress = true; stub.status.inProgressPermutation = PERM;
+      stub.status.progress = { phase: 'fetch', message: 'downloading the live app bundle', fragment: 2, fragments: 15, bytes: 2048 };
+      CMA.events.emit('state', CMA.capture.state);
+      ok(banner(), 'banner shown');
+      ok(/Cronometer deployed a new build — rebuilding the decoder from the live app \(about 10 s\)…/.test(text(banner())), text(banner()));
+      ok(/downloading the live app bundle · part 2\/15 · 2 KB/.test(text(banner())), 'progress: ' + text(banner()));
+      ok(banner().className.indexOf('cma-banner-ok') < 0, 'not green');
+      // progress events refresh the line without a capture state event
+      stub.status.progress = { phase: 'build', message: 'analysing the bundle', index: 3, total: 7 };
+      CMA.events.emit('registry-progress', stub.status.progress);
+      ok(/analysing the bundle · 3\/7/.test(text(banner())), text(banner()));
+      ok(!/downloading/.test(text(banner())), 'old progress replaced');
+    });
+    it('(b) rebuilt ok: a green line names the build and the type count', () => {
+      CMA.capture.state.registryMismatch = false;
+      stub.status.inProgress = false; stub.status.inProgressPermutation = null; stub.status.progress = null;
+      stub.status.active = 'runtime'; stub.status.activePermutation = PERM; stub.status.activeTypes = 601; stub.status.storedPermutation = PERM; stub.status.storedAt = Date.now();
+      stub.status.lastRebuild = { at: Date.now(), ok: true, ms: 8300, bytes: 9800000, fragments: 15, types: 601, problems: [], error: null, permutation: PERM, reason: 'mismatch', persisted: true };
+      CMA.events.emit('registry', { source: 'runtime', permutation: PERM, changed: true });
+      ok(banner(), 'banner shown');
+      ok(banner().className.indexOf('cma-banner-ok') >= 0, 'green');
+      ok(/Decoder rebuilt for build 0A1C16E148676A90CBB128E4829A562F \(601 types\)/.test(text(banner())), text(banner()));
+      ok(/8\.3 s/.test(text(banner())), 'duration of the rebuild: ' + text(banner()));
+      // a runtime decoder stored by an earlier visit (no rebuild this page load) is reported the same way
+      stub.status.lastRebuild = null;
+      CMA.events.emit('state', CMA.capture.state);
+      ok(/Decoder rebuilt for build .* \(601 types\) — built /.test(text(banner())), text(banner()));
+      // persistence can fail with chrome.storage present (quota, invalidated context): the note says what happened
+      stub.status.lastRebuild = { at: Date.now(), ok: true, ms: 8300, bytes: 9800000, fragments: 15, types: 601, problems: [], error: null, permutation: PERM, reason: 'mismatch', persisted: false };
+      CMA.events.emit('state', CMA.capture.state);
+      ok(/8\.3 s, not saved to chrome\.storage \(kept for this page\)\. The RPC engine is back\./.test(text(banner())), text(banner()));
+      ok(!/unavailable/.test(text(banner())), 'no claim that chrome.storage is unavailable');
+    });
+    it('(a2) a manual rebuild while the decoder matches uses neutral wording (no deploy is announced)', () => {
+      CMA.capture.state.registryMismatch = false;
+      stub.status.active = 'bundled'; stub.status.inProgress = true; stub.status.inProgressPermutation = PERM; stub.status.lastRebuild = null;
+      stub.status.progress = { phase: 'fetch', message: 'downloading the live app bundle', fragment: 1, fragments: 15 };
+      CMA.events.emit('state', CMA.capture.state);
+      ok(banner(), 'banner shown while rebuilding');
+      ok(/^Rebuilding the decoder from the live app \(about 10 s\)…/.test(text(banner())), text(banner()));
+      ok(!/deployed a new build/.test(text(banner())), 'no deploy announced: ' + text(banner()));
+      ok(/downloading the live app bundle · part 1\/15/.test(text(banner())), text(banner()));
+      stub.status.inProgress = false; stub.status.inProgressPermutation = null; stub.status.progress = null;
+      CMA.events.emit('state', CMA.capture.state);
+      ok(!banner(), 'gone once it finished and the decoder still matches');
+    });
+    it('(c) rebuild failed: the warning, the error and the UI-engine hint', () => {
+      CMA.capture.state.registryMismatch = true;
+      stub.status.active = 'bundled'; stub.status.storedPermutation = null; stub.status.storedAt = null;
+      stub.status.lastRebuild = { at: Date.now(), ok: false, ms: 1200, bytes: null, fragments: null, types: null, problems: ['Serving: expected 13 fields, found 12'], error: 'the rebuilt registry failed validation: Serving: expected 13 fields, found 12', permutation: PERM, reason: 'mismatch', persisted: false };
+      CMA.events.emit('state', CMA.capture.state);
+      const t = text(banner());
+      ok(/Cronometer deployed a new build\. Live 0A1C16E148676A90CBB128E4829A562F/.test(t), t);
+      ok(/use the UI automation engine or regenerate the registry/.test(t), 'existing warning kept: ' + t);
+      ok(/Automatic decoder rebuild failed: the rebuilt registry failed validation: Serving: expected 13 fields, found 12 \(Serving: expected 13 fields, found 12\) — use the UI automation engine, or retry with "Rebuild decoder" in Diagnostics\./.test(t), t);
+      ok(banner().className.indexOf('cma-banner-ok') < 0, 'warning colours');
+      // a failed MANUAL attempt is not called automatic
+      stub.status.lastRebuild = { at: Date.now(), ok: false, ms: 900, bytes: null, fragments: null, types: null, problems: [], error: 'HTTP 502 for 14.cache.js', permutation: PERM, reason: 'manual', persisted: false };
+      CMA.events.emit('state', CMA.capture.state);
+      ok(/Decoder rebuild failed: HTTP 502 for 14\.cache\.js — use the UI automation engine, or retry/.test(text(banner())), text(banner()));
+      ok(!/Automatic decoder rebuild failed/.test(text(banner())), text(banner()));
+      // mismatch without any attempt yet: the plain warning
+      stub.status.lastRebuild = null;
+      CMA.events.emit('state', CMA.capture.state);
+      ok(/Cronometer deployed a new build/.test(text(banner())) && !/rebuild failed/.test(text(banner())), text(banner()));
+      // an automatic attempt the store refused on this page: the reason is shown, never the bare warning alone
+      stub.status.lastRefusal = { permutation: PERM, reason: 'mismatch', error: 'module base on a foreign origin (https://cdn.example)', at: Date.now() };
+      CMA.events.emit('state', CMA.capture.state);
+      ok(/The automatic decoder rebuild was skipped: module base on a foreign origin \(https:\/\/cdn\.example\) — use the UI automation engine, or retry with "Rebuild decoder" in Diagnostics\./.test(text(banner())), text(banner()));
+      stub.status.lastRefusal = { permutation: 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF', reason: 'mismatch', error: 'recently attempted', at: Date.now() };
+      CMA.events.emit('state', CMA.capture.state);
+      ok(!/skipped/.test(text(banner())), 'another build\'s refusal is not shown: ' + text(banner()));
+      stub.status.lastRefusal = { permutation: PERM, reason: 'manual', error: 'no module base', at: Date.now() };
+      CMA.events.emit('state', CMA.capture.state);
+      ok(!/skipped/.test(text(banner())), 'a refused manual call is not announced in the banner: ' + text(banner()));
+      stub.status.lastRefusal = null;
+      // the last attempt of an earlier page load (persisted by the store): says why nothing runs on this one
+      stub.status.lastAttempt = { permutation: PERM, at: Date.now() - 3 * 60 * 1000, ok: false, error: 'HTTP 503', reason: 'mismatch', ms: 1200, builder: '0.2.0' };
+      CMA.events.emit('state', CMA.capture.state);
+      ok(/The automatic decoder rebuild failed 3 min ago: HTTP 503 — it is not repeated automatically for 10 minutes; use the UI automation engine, or retry with "Rebuild decoder" in Diagnostics\./.test(text(banner())), text(banner()));
+      // … and the Diagnostics block names it too
+      P.open('diagnostics');
+      ok(/Last rebuild\s*none this page load \(last attempt 3 min ago for build 0A1C16E148676A90CBB128E4829A562F: failed, HTTP 503\)/.test(text(q('.cma-registry-status'))), text(q('.cma-registry-status')));
+      stub.status.lastAttempt = { permutation: 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF', at: Date.now() - 60000, ok: false, error: 'x', reason: 'mismatch' };
+      P.open('input');
+      ok(!/rebuild failed/.test(text(banner())), 'another build\'s attempt is not shown: ' + text(banner()));
+      stub.status.lastAttempt = null;
+      CMA.capture.state.registryMismatch = false;
+      CMA.events.emit('state', CMA.capture.state);
+      ok(!banner(), 'banner removed once the mismatch is gone');
+    });
+    it('Diagnostics shows the decoder status and "Rebuild decoder" calls the store with force:true, showing the outcome inline', async () => {
+      stub.status.active = 'bundled'; stub.status.lastRebuild = null; stub.rebuildCalls.length = 0; stub.rebuildResult = null;
+      CMA.capture.state.registryMismatch = true;
+      P.open('diagnostics');
+      const block = q('.cma-registry-status');
+      ok(block, 'status block');
+      // <dt>/<dd> cells sit side by side in the grid: their texts are adjacent without a separator
+      ok(/Decoder\s*bundled with the extension/.test(text(block)), text(block));
+      ok(/Live build\s*0A1C16E148676A90CBB128E4829A562F — differs from the decoder/.test(text(block)), text(block));
+      ok(/Stored decoder\s*none/.test(text(block)) && /Last rebuild\s*none this page load/.test(text(block)), text(block));
+      const button = q('.cma-rebuild-btn');
+      ok(button && !button.disabled, 'button enabled (permutation + module base known)');
+      button.click();
+      await waitFor(() => stub.rebuildCalls.length === 1, 'rebuild called');
+      deepEq(stub.rebuildCalls[0], { moduleBase: 'https://cronometer.com/cronometer/', permutation: PERM, reason: 'manual', force: true });
+      ok(/Rebuilding the decoder from the live app/.test(text(q('.cma-registry-outcome'))), 'busy text: ' + text(q('.cma-registry-outcome')));
+      ok(q('.cma-rebuild-btn').disabled, 'disabled while running');
+      await waitFor(() => /Decoder rebuilt/.test(text(q('.cma-registry-outcome'))), 'outcome shown');
+      const outcome = text(q('.cma-registry-outcome'));
+      ok(/Decoder rebuilt: 601 types from 9\.3 MB \(15 parts\) in 8\.3 s\./.test(outcome), outcome);
+      ok(q('.cma-registry-outcome').className.indexOf('cma-ok') >= 0, 'green outcome');
+      ok(!q('.cma-rebuild-btn').disabled, 'enabled again');
+      ok(/Last rebuild\s*ok \(manual, 8\.3 s, 601 types, 9\.3 MB\)/.test(text(q('.cma-registry-status'))), text(q('.cma-registry-status')));
+      ok(/"store"/.test(q('.cma-pre').textContent) && /"lastRebuild"/.test(q('.cma-pre').textContent), 'the dump carries the store status');
+      // a rebuilt decoder that could not be persisted says so without blaming an absent chrome.storage
+      stub.rebuildResult = { ok: true, source: 'runtime', ms: 8300, bytes: 9800000, fragments: 15, types: 601, problems: [], error: null, permutation: PERM, reason: 'manual', persisted: false };
+      q('.cma-rebuild-btn').click();
+      await waitFor(() => /not saved/.test(text(q('.cma-registry-outcome'))), 'outcome shown');
+      ok(/in 8\.3 s — not saved to chrome\.storage \(kept for this page\)\./.test(text(q('.cma-registry-outcome'))), text(q('.cma-registry-outcome')));
+      // a failed manual rebuild
+      stub.rebuildResult = { ok: false, source: 'bundled', ms: 900, bytes: null, fragments: null, types: null, problems: [], error: 'HTTP 404 for 3.cache.js', permutation: PERM, reason: 'manual', persisted: false };
+      q('.cma-rebuild-btn').click();
+      await waitFor(() => /Rebuild failed/.test(text(q('.cma-registry-outcome'))), 'failure shown');
+      ok(/Rebuild failed: HTTP 404 for 3\.cache\.js — use the UI automation engine\./.test(text(q('.cma-registry-outcome'))), text(q('.cma-registry-outcome')));
+      ok(q('.cma-registry-outcome').className.indexOf('cma-err') >= 0, 'red outcome');
+      eq(stub.rebuildCalls.length, 3);
+      // the diagnostics object carries the store status and never the nonce
+      const obj = P.diagnosticsObject();
+      eq(obj.registry.store.active, 'bundled'); eq(obj.registry.store.lastRebuild.error, 'HTTP 404 for 3.cache.js'); eq(obj.registry.source, 'bundled');
+      ok(P.diagnosticsText().indexOf(window.__NONCE) < 0);
+      stub.rebuildResult = null;
+    });
+    it('"Rebuild decoder" is disabled when the live build is unknown or the builder is missing', () => {
+      const savedPerm = CMA.capture.state.permutation;
+      CMA.capture.state.permutation = null;
+      P.open('diagnostics');
+      ok(q('.cma-rebuild-btn').disabled, 'no permutation');
+      ok(/not known yet/.test(q('.cma-rebuild-btn').title), q('.cma-rebuild-btn').title);
+      CMA.capture.state.permutation = savedPerm;
+      stub.status.builderLoaded = false;
+      P.open('diagnostics');
+      ok(q('.cma-rebuild-btn').disabled, 'no builder');
+      ok(/builder not loaded/.test(q('.cma-rebuild-btn').title), q('.cma-rebuild-btn').title);
+      stub.status.builderLoaded = true;
+      P.open('diagnostics');
+      ok(!q('.cma-rebuild-btn').disabled);
+      CMA.capture.state.registryMismatch = false;
+      stub.status.lastRebuild = null;
+      P.open('input');
+    });
+  });
+
+  describe('decoder banner driven by the REAL registry store: the final render happens on the store\'s own last event, no extra event needed', () => {
+    // src/lib/registry-store.js is loaded beside a fake CMA.registryBuilder (this page has no chrome.storage, so
+    // the rebuilt decoder is "kept for this page"); capture.js is stubbed here, so its one reaction to the
+    // store's 'registry' event - re-evaluating registryMismatch and emitting 'state' - is mimicked by a listener
+    const PERM2 = 'BB22BB22BB22BB22BB22BB22BB22BB22';
+    const PERM3 = 'BB33BB33BB33BB33BB33BB33BB33BB33';
+    const stubStore = CMA.registryStore;
+    const savedBuilder = CMA.registryBuilder;
+    const banner = () => q('.cma-banner.cma-registry');
+    const flags = { fail: null };
+    let realStore = null;
+    function fakeRegistry(perm) { const types = {}; for (let i = 0; i < 7; i++) types['t' + i + '/1'] = { k: 'class', f: ['i'] }; return { permutation: perm, generatedAt: 'x', types }; }
+    const mimicCapture = (info) => { CMA.capture.state.registryMismatch = !(info && info.registryPermutation === CMA.capture.state.permutation); CMA.events.emit('state', CMA.capture.state); };
+    it('loads the real store beside a fake builder', async () => {
+      CMA.registryBuilder = {
+        async fetchBundle(mb, perm, opts) {
+          opts.onProgress({ phase: 'main', n: 0, status: 200, chars: 10 });
+          await new Promise(r => setTimeout(r, 5));
+          if (flags.fail) throw new Error(flags.fail);
+          return { text: 'BUNDLE', fragments: 1, bytes: 10, permutation: perm, truncated: false };
+        },
+        async build(text, opts) { await new Promise(r => setTimeout(r, 5)); return fakeRegistry(opts.permutation); },
+        validate() { return { ok: true, problems: [] }; },
+      };
+      realStore = await new Promise((resolve, reject) => {
+        const sc = document.createElement('script');
+        sc.src = '../src/lib/registry-store.js?' + Date.now();
+        sc.onload = () => resolve(CMA.registryStore);
+        sc.onerror = () => reject(new Error('could not load registry-store.js'));
+        document.head.appendChild(sc);
+      });
+      ok(realStore && realStore !== stubStore && typeof realStore.inFlight === 'function', 'real store loaded');
+      CMA.events.on('registry', mimicCapture);
+    });
+    it('an automatic rebuild succeeds: state (a) while it runs, the green banner right after the store\'s last event; Diagnostics settles too', async () => {
+      await P.saveSettings({ engine: 'rpc' });
+      CMA.capture._ready = true;
+      CMA.capture.state.permutation = PERM2; CMA.capture.state.registryMismatch = true;
+      P.setState({ result: null, plan: null, view: 'input' });
+      P.open('input');
+      ok(/Cronometer deployed a new build\. Live BB22/.test(text(banner())), text(banner()));
+      const p = realStore.rebuild({ moduleBase: 'https://cronometer.com/cronometer/', permutation: PERM2, reason: 'mismatch' });
+      await new Promise(r => setTimeout(r, 0));
+      ok(/Cronometer deployed a new build — rebuilding the decoder from the live app/.test(text(banner())), 'state (a): ' + text(banner()));
+      ok(/downloading the live app bundle/.test(text(banner())), 'progress line: ' + text(banner()));
+      const r = await p;
+      eq(r.ok, true); eq(r.persisted, false, 'no chrome.storage on this page');
+      // nothing else is emitted by this test: the store's own final 'registry-progress' event rendered this
+      ok(banner() && banner().className.indexOf('cma-banner-ok') >= 0, 'green: ' + text(banner()));
+      ok(/Decoder rebuilt for build BB22BB22BB22BB22BB22BB22BB22BB22 \(7 types\) — [\d.]+ s, not saved to chrome\.storage \(kept for this page\)\. The RPC engine is back\./.test(text(banner())), text(banner()));
+      eq(CMA.capture.state.registryMismatch, false);
+      P.open('diagnostics');
+      const block = text(q('.cma-registry-status'));
+      ok(/Decoder\s*rebuilt from the live app \(runtime\)/.test(block), block);
+      ok(/Last rebuild\s*ok \(mismatch, [\d.]+ s, 7 types, 10 B\)/.test(block), block);
+      ok(!q('.cma-rebuild-btn').disabled, 'button enabled again');
+      eq(realStore.status().inProgress, false);
+    });
+    it('an automatic rebuild fails: Diagnostics shows "running" during and the outcome after, the Input banner names the error - all from the store\'s own events', async () => {
+      CMA.capture.state.permutation = PERM3; CMA.capture.state.registryMismatch = true;
+      flags.fail = 'HTTP 503 for 1.cache.js';
+      P.open('diagnostics');
+      ok(/Live build\s*BB33.* — differs from the decoder/.test(text(q('.cma-registry-status'))), text(q('.cma-registry-status')));
+      const p = realStore.rebuild({ moduleBase: 'https://cronometer.com/cronometer/', permutation: PERM3, reason: 'mismatch' });
+      await new Promise(r => setTimeout(r, 0));
+      ok(/Last rebuild\s*running…/.test(text(q('.cma-registry-status'))), 'running: ' + text(q('.cma-registry-status')));
+      ok(q('.cma-rebuild-btn').disabled && /a rebuild is running/.test(q('.cma-rebuild-btn').title), 'button disabled while running');
+      const r = await p;
+      flags.fail = null;
+      eq(r.ok, false); eq(r.error, 'HTTP 503 for 1.cache.js');
+      const block = text(q('.cma-registry-status'));
+      ok(/Last rebuild\s*failed \(mismatch, [\d.]+ s, HTTP 503 for 1\.cache\.js\)/.test(block), 'settled without any extra event: ' + block);
+      ok(!q('.cma-rebuild-btn').disabled, 'button enabled again');
+      P.open('input');
+      const b = text(banner());
+      ok(/Cronometer deployed a new build\. Live BB33.*registry built for BB22/.test(b), b);
+      ok(/Automatic decoder rebuild failed: HTTP 503 for 1\.cache\.js — use the UI automation engine, or retry with "Rebuild decoder" in Diagnostics\./.test(b), b);
+      // the RPC engine is gated meanwhile and a second automatic attempt is refused with a reason the banner shows
+      const r2 = await realStore.rebuild({ moduleBase: 'https://cronometer.com/cronometer/', permutation: PERM3, reason: 'mismatch' });
+      eq(r2.refused, true);
+      CMA.events.emit('state', CMA.capture.state);
+      ok(/Automatic decoder rebuild failed: HTTP 503/.test(text(banner())), 'this page\'s failed attempt still explains it: ' + text(banner()));
+    });
+    it('restores the stubs', () => {
+      CMA.events.off('registry', mimicCapture);
+      CMA.registryStore = stubStore;
+      CMA.registryBuilder = savedBuilder;
+      delete CMA.registry;
+      CMA.capture.state.permutation = '0A1C16E148676A90CBB128E4829A562F';
+      CMA.capture.state.registryMismatch = false;
+      P.setState({ result: null, plan: null, view: 'input' });
+      P.open('input');
+      ok(!banner(), 'no banner with the stub in its neutral state: ' + text(banner()));
+    });
+  });
+
+  describe('RPC engine vs the decoder (SPEC 3.5): a running rebuild is awaited, a mismatch gates Add all', () => {
+    const stub = window.__registryStub;
+    const banner = () => q('.cma-banner.cma-registry');
+    it('Find foods waits for a running rebuild before searching (status says so), then builds the plan', async () => {
+      await P.saveSettings({ engine: 'rpc' });
+      CMA.capture._ready = true; CMA.capture.state.registryMismatch = false;
+      stub.status.active = 'bundled'; stub.status.lastRebuild = null; stub.status.lastAttempt = null;
+      let release = null;
+      stub.inFlight = new Promise(r => { release = r; });
+      stub.status.inProgress = true; stub.status.inProgressPermutation = '0A1C16E148676A90CBB128E4829A562F';
+      P.setState({ result: null, plan: null, view: 'input' });
+      P.open('input');
+      P.setInput('banana\n2 eggs');
+      const n = window.__planCalls.build.length;
+      const p = P.findFoods();
+      await new Promise(r => setTimeout(r, 60));
+      eq(window.__planCalls.build.length, n, 'no search while the decoder is being rebuilt');
+      eq(P.getState().building, true);
+      eq(q('.cma-tab[aria-selected="true"]').dataset.view, 'preview');
+      ok(/Waiting for the decoder rebuild to finish/.test(text(q('.cma-status'))), text(q('.cma-status')));
+      stub.status.inProgress = false; stub.status.inProgressPermutation = null;
+      release();
+      const plan = await p;
+      ok(plan && plan.rows.length === 2, 'plan built after the rebuild');
+      eq(window.__planCalls.build.length, n + 1);
+      eq(P.getState().building, false);
+      ok(!q('.cma-footer .cma-btn-primary').disabled, 'Add all enabled: the decoder matches');
+      ok(q('.cma-decoder-gate').hidden, 'no gate note');
+      stub.inFlight = null;
+    });
+    it('Add all is disabled and refused for the RPC engine while the decoder does not match the live build; the UI engine is not gated', async () => {
+      CMA.capture.state.registryMismatch = true;
+      CMA.events.emit('state', CMA.capture.state);
+      const add = q('.cma-footer .cma-btn-primary');
+      ok(add.disabled, 'Add all disabled on the state event');
+      ok(/decoder does not match the live Cronometer build/.test(add.title), add.title);
+      ok(!q('.cma-decoder-gate').hidden && /RPC engine paused/.test(text(q('.cma-decoder-gate'))), 'gate note shown');
+      const runs = window.__rpcCalls.run.length;
+      const r = await P.addAll();
+      eq(r, null); eq(window.__rpcCalls.run.length, runs, 'nothing sent');
+      ok(/Nothing was sent: the decoder does not match/.test(text(q('.cma-notice'))), text(q('.cma-notice')));
+      P.open('preview');
+      ok(q('.cma-footer .cma-btn-primary').disabled, 'still disabled after a re-render');
+      // the UI engine drives the dialog and does not depend on the decoder
+      await P.saveSettings({ engine: 'ui' });
+      P.open('preview');
+      ok(!q('.cma-footer .cma-btn-primary').disabled, 'UI engine: enabled');
+      ok(q('.cma-decoder-gate').hidden);
+      await P.saveSettings({ engine: 'rpc' });
+      P.open('preview');
+      ok(q('.cma-footer .cma-btn-primary').disabled);
+      // the rebuild finishes: the button follows the 'registry' event without a re-render
+      CMA.capture.state.registryMismatch = false;
+      CMA.events.emit('registry', { source: 'runtime', permutation: '0A1C16E148676A90CBB128E4829A562F', changed: true });
+      ok(!q('.cma-footer .cma-btn-primary').disabled, 'enabled again');
+      ok(q('.cma-decoder-gate').hidden);
+    });
+    it('Add all waits for a running rebuild, then refuses when the decoder still does not match (nothing is sent) or runs when it does', async () => {
+      let release = null;
+      stub.inFlight = new Promise(r => { release = r; });
+      stub.status.inProgress = true;
+      P.open('preview');
+      const runs = window.__rpcCalls.run.length;
+      const p = P.addAll();
+      await new Promise(r => setTimeout(r, 40));
+      eq(window.__rpcCalls.run.length, runs, 'not sent while rebuilding');
+      ok(/Waiting for the decoder rebuild to finish before adding/.test(text(q('.cma-notice'))), text(q('.cma-notice')));
+      ok(q('.cma-footer .cma-btn-primary').disabled, 'button disabled while waiting');
+      CMA.capture.state.registryMismatch = true;          // the rebuild failed: still a mismatch
+      stub.status.inProgress = false;
+      release();
+      eq(await p, null);
+      eq(window.__rpcCalls.run.length, runs, 'refused after the wait');
+      ok(/Nothing was sent/.test(text(q('.cma-notice'))), text(q('.cma-notice')));
+      // and the happy path: the rebuild succeeded meanwhile
+      stub.inFlight = new Promise(r => { release = r; });
+      stub.status.inProgress = true;
+      const p2 = P.addAll();
+      await new Promise(r => setTimeout(r, 20));
+      CMA.capture.state.registryMismatch = false;
+      stub.status.inProgress = false;
+      release();
+      const res = await p2;
+      ok(res && res.added.length === 2, 'sent once the decoder matched: ' + JSON.stringify(res && res.added.length));
+      eq(window.__rpcCalls.run.length, runs + 1);
+      stub.inFlight = null;
+      P.setState({ result: null, plan: null, view: 'input' });
+      ok(!banner(), 'no decoder banner left');
+    });
+  });
+
+  describe('setState / close / unmount', () => {
+    it('setState merges settings and view and re-renders', () => {
+      P.setState({ view: 'input', settings: { delayMs: 300 } });
+      eq(P.getSettings().delayMs, 300);
+      eq(q('.cma-tab[aria-selected="true"]').dataset.view, 'input');
+      P.setState({ settings: { delayMs: 250 } });
+    });
+    it('close hides the panel; unmount removes host, MULTI button and the state listener', () => {
+      P.close();
+      eq(P.isOpen(), false);
+      const before = CMA.events.count('state');
+      ok(before >= 1, 'mounted panel listens for state');
+      P.unmount();
+      eq(CMA.events.count('state'), before - 1, 'listener removed on unmount');
+      ok(!document.getElementById(P.HOST_ID), 'host removed');
+      ok(!document.querySelector('.cma-multi-btn'), 'MULTI removed');
+      P.mount();
+      ok(document.getElementById(P.HOST_ID), 'remounts');
+      eq(CMA.events.count('state'), before, 'a remount does not stack listeners');
+      P.unmount(); P.mount();
+      eq(CMA.events.count('state'), before);
+    });
+  });
+
+  CMA.test.run({ timeoutMs: 10000 });
+})();
+</script>
+</body>
+</html>

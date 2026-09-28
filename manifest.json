@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Multi-Add for Cronometer",
+  "description": "Unofficial: add many foods to your Cronometer web diary in one go. Not affiliated with Cronometer.",
+  "version": "0.2.1",
+  "minimum_chrome_version": "111",
+  "permissions": ["storage"],
+  "host_permissions": ["https://cronometer.com/*"],
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "action": {
+    "default_title": "Multi-Add for Cronometer (open cronometer.com/#diary and press Alt+Shift+M)",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://cronometer.com/*"],
+      "js": ["src/hook-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://cronometer.com/*"],
+      "js": [
+        "src/lib/gwt-registry.js",
+        "src/lib/gwt-stream.js",
+        "src/lib/registry-builder.js",
+        "src/lib/registry-store.js",
+        "src/lib/rpc.js",
+        "src/lib/capture.js",
+        "src/lib/parse.js",
+        "src/lib/units.js",
+        "src/lib/plan.js",
+        "src/lib/dom.js",
+        "src/lib/engine-rpc.js",
+        "src/lib/engine-ui.js",
+        "src/ui/panel.css.js",
+        "src/ui/panel.js",
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

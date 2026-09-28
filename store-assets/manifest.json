@@ -1,0 +1,108 @@
+[
+  {
+    "file": "01-input.png",
+    "shot": "input",
+    "capturedAt": "2026-09-28T11:05:31+0100",
+    "blurred": [
+      "#navbarDropdown",
+      ".navbar-account",
+      ".navbar-dropdown-container",
+      ".energy-summary",
+      ".energy-summary-totals",
+      ".energy-summary-totals-container",
+      ".nutrient-targets-container",
+      ".water-tracking-target-bar",
+      "[data-cma-blur] (account name / e-mail text: 1 element(s))"
+    ],
+    "mode": "live",
+    "size": [
+      1280,
+      800
+    ]
+  },
+  {
+    "file": "02-preview.png",
+    "shot": "preview",
+    "capturedAt": "2026-09-28T11:05:34+0100",
+    "blurred": [
+      "#navbarDropdown",
+      ".navbar-account",
+      ".navbar-dropdown-container",
+      ".energy-summary",
+      ".energy-summary-totals",
+      ".energy-summary-totals-container",
+      ".nutrient-targets-container",
+      ".water-tracking-target-bar",
+      "[data-cma-blur] (account name / e-mail text: 1 element(s))"
+    ],
+    "mode": "live",
+    "size": [
+      1280,
+      800
+    ]
+  },
+  {
+    "file": "03-results.png",
+    "shot": "results",
+    "capturedAt": "2026-09-28T11:05:39+0100",
+    "blurred": [
+      "#navbarDropdown",
+      ".navbar-account",
+      ".navbar-dropdown-container",
+      ".energy-summary",
+      ".energy-summary-totals",
+      ".energy-summary-totals-container",
+      ".nutrient-targets-container",
+      ".water-tracking-target-bar",
+      "[data-cma-blur] (account name / e-mail text: 1 element(s))"
+    ],
+    "mode": "live",
+    "size": [
+      1280,
+      800
+    ]
+  },
+  {
+    "file": "04-diary.png",
+    "shot": "diary",
+    "capturedAt": "2026-09-28T11:05:40+0100",
+    "blurred": [
+      "#navbarDropdown",
+      ".navbar-account",
+      ".navbar-dropdown-container",
+      ".energy-summary",
+      ".energy-summary-totals",
+      ".energy-summary-totals-container",
+      ".nutrient-targets-container",
+      ".water-tracking-target-bar",
+      "[data-cma-blur] (account name / e-mail text: 1 element(s))"
+    ],
+    "mode": "live",
+    "size": [
+      1280,
+      800
+    ]
+  },
+  {
+    "file": "05-diagnostics.png",
+    "shot": "diagnostics",
+    "capturedAt": "2026-09-28T11:05:41+0100",
+    "blurred": [
+      "#navbarDropdown",
+      ".navbar-account",
+      ".navbar-dropdown-container",
+      ".energy-summary",
+      ".energy-summary-totals",
+      ".energy-summary-totals-container",
+      ".nutrient-targets-container",
+      ".water-tracking-target-bar",
+      "[data-cma-blur] (account name / e-mail text: 1 element(s))",
+      "diagnostics: account id (11 occurrence(s))"
+    ],
+    "mode": "live",
+    "size": [
+      1280,
+      800
+    ]
+  }
+]

@@ -1,0 +1,171 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>hook</title></head>
+<body>
+<pre id="results"></pre>
+<!-- hook-main.js first, as in the MAIN-world manifest entry. content.js is loaded LATE (dynamically, from a
+     test) to reproduce the document_idle race of SPEC 2.2: XHRs complete before the content script exists. -->
+<script src="lib.js"></script>
+<script src="../src/hook-main.js"></script>
+<script src="../src/lib/gwt-registry.js"></script>
+<script src="../src/lib/gwt-stream.js"></script>
+<script src="../src/lib/rpc.js"></script>
+<script src="../src/lib/capture.js"></script>
+<script>
+(function () {
+  'use strict';
+  const T = CMA.test;
+  const { eq, ok, deepEq } = T;
+  const G = CMA.gwt, C = CMA.capture;
+  const MB = 'https://cronometer.com/cronometer/';
+  const PERM = '0A1C16E148676A90CBB128E4829A562F';
+
+  // Every cma-hook message this page sees, in arrival order (registered before content.js's own listener).
+  const msgs = [];
+  window.addEventListener('message', (ev) => {
+    if (ev.source === window && ev.data && typeof ev.data === 'object' && ev.data.source === 'cma-hook') msgs.push(ev.data);
+  });
+  function waitMsg(pred, label, timeout) {
+    return new Promise((resolve, reject) => {
+      const t0 = Date.now();
+      (function poll() {
+        const m = msgs.find(pred);
+        if (m) return resolve(m);
+        if (Date.now() - t0 > (timeout || 4000)) return reject(new Error('timed out waiting for ' + label));
+        setTimeout(poll, 10);
+      })();
+    });
+  }
+  function xhr(method, url, body, headers) {
+    return new Promise((resolve) => {
+      const x = new XMLHttpRequest();
+      x.open(method, url);
+      Object.keys(headers || {}).forEach((k) => x.setRequestHeader(k, headers[k]));
+      x.addEventListener('loadend', () => resolve(x));
+      x.send(body === undefined ? null : body);
+    });
+  }
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = () => resolve(s);
+      s.onerror = () => reject(new Error('could not load ' + src));
+      document.head.appendChild(s);
+    });
+  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const getFoodBody = new G.Writer(MB, 'POLICY').call('getFood', [G.STRING_SIG, 'I'], ['HOOKNONCE', 464674]);
+  const getDayInfoBody = new G.Writer(MB, 'POLICY').call('getDayInfo', [G.STRING_SIG, G.SIG.DAY, 'I'],
+    ['HOOKNONCE', { $t: G.SIG.DAY, f: [9, 9, 2026] }, 1234567]);
+
+  // Everything capture.handleMessage receives, in arrival order: with the MessageChannel transport the
+  // relayed traffic never appears on the window, so the content script's own inbox is the observation point.
+  const seen = [];
+  function waitSeen(pred, label, timeout) {
+    return new Promise((resolve, reject) => {
+      const t0 = Date.now();
+      (function poll() {
+        const m = seen.find(pred);
+        if (m) return resolve(m);
+        if (Date.now() - t0 > (timeout || 4000)) return reject(new Error('timed out waiting for ' + label));
+        setTimeout(poll, 10);
+      })();
+    });
+  }
+
+  T.describe('hook-main.js: early-traffic buffer and replay (SPEC 2.2)', () => {
+    T.it('before the first ping nothing is posted on the window: early traffic is only buffered', async () => {
+      await xhr('POST', '/cronometer/app', getFoodBody, { 'Content-Type': 'text/x-gwt-rpc; charset=utf-8', 'X-GWT-Permutation': PERM });
+      await xhr('GET', '/api/v3/user/1234567/food-search/string?query=EGG&maxResults=50');
+      await xhr('POST', '/cronometer/app', getDayInfoBody, { 'X-GWT-Permutation': PERM });
+      await xhr('GET', 'lib.js');                                            // not a relayed URL
+      // a third-party SDK on another origin with a Braze-style /api/v3/ path (SPEC 0): never relayed
+      await xhr('POST', 'https://127.0.0.1:9/api/v3/user/424242/data/', '{"e":1}');
+      await sleep(150);                                                       // postMessage deliveries are tasks
+      eq(msgs.length, 0, 'no cma-hook message reached the window (a page script could have read the nonce)');
+      eq(C.state.rpcCount, 0, 'capture saw nothing yet');
+    });
+    T.it('content.js loaded late: its first ping hands over a MessagePort; the buffered traffic is replayed on it and capture rebuilds the session', async () => {
+      C.reset();
+      eq(C.state.hooked, false); eq(C.state.rpcCount, 0);
+      msgs.length = 0;
+      const orig = C.handleMessage;
+      C.handleMessage = function (d) { seen.push(d); return orig(d); };
+      await loadScript('../src/content.js');                                  // pings synchronously while loading
+      const pong = await waitSeen((m) => m.type === 'pong', 'pong');
+      eq(pong.hooked, true); eq(pong.replayed, 3); eq(pong.seq, 3);
+      const replays = seen.filter((m) => m.type === 'xhr');
+      deepEq(replays.map((m) => m.seq), [1, 2, 3], 'replayed in wire order');
+      ok(replays.every((m) => m.replay === true), 'replays are marked');
+      ok(seen.indexOf(replays[2]) < seen.indexOf(pong), 'replays precede the pong');
+      eq(replays.length, 3, 'lib.js and the foreign /api/v3/ URL were not relayed');
+      ok(replays.every((m) => m.url.indexOf('127.0.0.1') < 0), 'no foreign origin in the relay');
+      ok(/\/cronometer\/app$/.test(replays[0].url), replays[0].url);
+      eq(replays[0].method, 'POST'); eq(replays[0].requestBody, getFoodBody);
+      eq(replays[0].requestHeaders['X-GWT-Permutation'], PERM);
+      ok(/\/api\/v3\/user\/1234567\//.test(replays[1].url), replays[1].url); eq(replays[1].method, 'GET'); eq(replays[1].requestBody, null);
+      eq(replays[1].responseText, null, 'REST response bodies are not relayed (capture reads only url/status/headers)');
+      eq(typeof replays[0].responseText, 'string', 'GWT-RPC response bodies are');
+      eq(typeof replays[0].status, 'number'); eq(typeof replays[0].t, 'number'); eq(typeof replays[0].responseHeaders, 'string');
+      eq(msgs.length, 0, 'the replay and the pong travelled over the port, not the window');
+      // capture processed the replayed traffic as if it had been live
+      eq(C.state.hooked, true);
+      eq(C.state.rpcCount, 2); eq(C.state.restCount, 1);
+      eq(C.state.nonce, 'HOOKNONCE'); eq(C.state.nonceSource, 'request');
+      eq(C.state.userId, 1234567);
+      eq(C.state.permutation, PERM); eq(C.state.policyHash, 'POLICY'); eq(C.state.moduleBase, MB);
+      deepEq(C.state.diaryDate, { day: 9, month: 9, year: 2026 }); eq(C.state.diaryDateSource, 'getDayInfo');
+      ok(C.state.log.some((e) => e.kind === 'hook' && /replayed 3/.test(e.note)), 'replay noted in the capture log');
+      eq(JSON.stringify(C.state.log).indexOf('HOOKNONCE'), -1, 'the nonce never reaches the log');
+    });
+    T.it('later requests arrive live over the port exactly once; a port-less ping is answered on the window and replays nothing', async () => {
+      seen.length = 0; msgs.length = 0;
+      const before = C.state.rpcCount;
+      await xhr('POST', '/cronometer/app', getFoodBody, { 'X-GWT-Permutation': PERM });
+      const live = await waitSeen((m) => m.type === 'xhr' && m.seq === 4, 'fourth live message');
+      eq(live.replay, undefined, 'live messages are not marked as replays');
+      eq(C.state.rpcCount, before + 1);
+      eq(msgs.length, 0, 'live traffic never touches the window');
+      window.postMessage({ source: 'cma-content', type: 'ping' }, '/');     // legacy pinger without a port
+      const pong = await waitMsg((m) => m.type === 'pong', 'pong on the window');
+      eq(pong.replayed, 0); eq(pong.seq, 4);
+      eq(msgs.filter((m) => m.type === 'xhr').length, 0, 'no replay after the first ping, nothing else on the window');
+      await sleep(30);
+      eq(C.state.rpcCount, before + 1);
+    });
+    T.it('content.js handles each seq once (a message delivered twice is not double-counted)', async () => {
+      const before = C.state.rpcCount;
+      const live = seen.find((m) => m.type === 'xhr' && m.seq === 4);
+      ok(live, 'have the live seq 4 message');
+      window.postMessage(Object.assign({}, live, { replay: true }), '/');   // a window copy of seq 4 (content.js still listens there)
+      await sleep(60);
+      eq(C.state.rpcCount, before, 'duplicate seq ignored');
+      window.postMessage(Object.assign({}, live, { seq: 4000 }), '/');
+      await sleep(60);
+      eq(C.state.rpcCount, before + 1, 'a new seq is handled');
+      const legacy = Object.assign({}, live);
+      delete legacy.seq;
+      window.postMessage(legacy, '/');
+      await sleep(60);
+      eq(C.state.rpcCount, before + 2, 'messages without a seq are always handled');
+    });
+  });
+
+  T.describe('hook-main.js: hygiene', () => {
+    T.it('installs once, exposes nothing but the non-enumerable guard, never throws on odd input', () => {
+      eq(window.__cmaHookInstalled, true);
+      eq(Object.keys(window).indexOf('__cmaHookInstalled'), -1, 'guard is non-enumerable');
+      eq(typeof window.relay, 'undefined'); eq(typeof window.pending, 'undefined');
+      window.postMessage({ source: 'cma-content' }, '/');
+      window.postMessage('junk', '/');
+      window.postMessage(null, '/');
+      ok(true);
+    });
+  });
+
+  CMA.test.run({ timeoutMs: 8000 });
+})();
+</script>
+</body>
+</html>

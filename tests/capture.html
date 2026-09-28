@@ -1,0 +1,823 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>capture + rpc tests</title></head>
+<body>
+<pre id="results"></pre>
+<div id="dom-fixture" style="display:none"></div>
+<script src="lib.js"></script>
+<script src="../src/lib/gwt-registry.js"></script>
+<script src="../src/lib/gwt-stream.js"></script>
+<!-- no registry-builder.js here (tests/registry-store.html stubs it): the store then refuses rebuilds -->
+<script src="../src/lib/registry-store.js"></script>
+<script src="../src/lib/rpc.js"></script>
+<script src="../src/lib/capture.js"></script>
+<script src="fixtures.js"></script>
+<script src="../src/hook-main.js"></script>
+<script src="../src/content.js"></script>
+<script>
+(function () {
+  'use strict';
+  const T = CMA.test, G = CMA.gwt, FX = CMA.fixtures, S = FX.SIG, C = CMA.capture, R = CMA.rpc, EV = CMA.events;
+  const eq = T.eq, ok = T.ok, deepEq = T.deepEq;
+  const MB = FX.moduleBase;
+  const APP_URL = MB + 'app';
+  const PERM = '0A1C16E148676A90CBB128E4829A562F';
+  const SESSION = { moduleBase: MB, permutation: PERM, policyHash: 'POLICY', nonce: 'NONCE', userId: 1234567 };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function writer(policy) { return new G.Writer(MB, policy || 'POLICY'); }
+  function fixedServing(extra) {
+    return FX.serving(Object.assign({ day: FX.day(4, 3, 2026), order: 65537, grams: 50, foodId: 464674, measureId: 1072101, translationId: 0 }, extra || {}));
+  }
+  /** a hook message for one GWT-RPC exchange */
+  function rpcMsg(body, responseText, extra) {
+    return Object.assign({
+      source: 'cma-hook', type: 'xhr', method: 'POST', url: APP_URL,
+      requestHeaders: { 'Content-Type': 'text/x-gwt-rpc; charset=utf-8', 'X-GWT-Permutation': PERM, 'X-GWT-Module-Base': MB },
+      requestBody: body, status: 200, responseText: responseText === undefined ? FX.voidResponse : responseText,
+      responseHeaders: '', t: Date.now(),
+    }, extra || {});
+  }
+  // ---- fetch stub ------------------------------------------------------------------------------
+  const realFetch = window.fetch;
+  const calls = [];
+  function stubFetch(handler) {
+    calls.length = 0;
+    window.fetch = async function (url, init) {
+      calls.push({ url: String(url), init: init || {} });
+      const out = await handler(String(url), init || {});
+      if (out instanceof Response) return out;
+      if (out instanceof Error) throw out;
+      const o = out || {};
+      return new Response(o.body === undefined ? '' : o.body, { status: o.status || 200, headers: o.headers || {} });
+    };
+  }
+  function restoreFetch() { window.fetch = realFetch; }
+  function lastCall() { return calls[calls.length - 1]; }
+
+  // ================================================================================================
+  T.describe('CMA.events', () => {
+    T.it('on / emit / off / once', () => {
+      const got = [];
+      const off = EV.on('t-ev', (p) => got.push(p));
+      EV.once('t-ev', (p) => got.push('once:' + p));
+      eq(EV.emit('t-ev', 1), 2);
+      eq(EV.emit('t-ev', 2), 1);
+      off();
+      eq(EV.emit('t-ev', 3), 0);
+      deepEq(got, [1, 'once:1', 2]);
+    });
+    T.it('a throwing listener does not stop the others', () => {
+      let n = 0;
+      const o1 = EV.on('t-ev2', () => { throw new Error('boom'); });
+      const o2 = EV.on('t-ev2', () => { n++; });
+      EV.emit('t-ev2');
+      eq(n, 1);
+      o1(); o2();
+    });
+  });
+
+  // ================================================================================================
+  T.describe('capture: session state from hooked traffic (SPEC 2.3)', () => {
+    T.it('(f) ready() before anything was captured lists every missing item', () => {
+      C.reset();
+      const r = C.ready();
+      eq(r.ok, false);
+      deepEq(r.missing, ['hooked', 'nonce', 'userId', 'permutation', 'policyHash', 'moduleBase']);
+      eq(C.state.groupsSource, 'default');
+      eq(C.state.groups.length, 8);
+      eq(C.state.groups.filter((g) => g.enabled).length, 5);
+      eq(C.state.diaryDateSource, 'today');
+      deepEq(C.state.diaryDate, C.today());
+    });
+    T.it('(a) updateDiary request built with the Writer -> nonce, userId, policyHash, moduleBase, permutation', () => {
+      C.reset();
+      let stateEvents = 0;
+      const off = EV.on('state', () => { stateEvents++; });
+      const body = writer().call('updateDiary', [G.STRING_SIG, 'I', 'java.util.List'],
+        ['NONCE', 1234567, { $t: S.SINGLETON, f: [FX.addEntryChange(fixedServing())] }]);
+      eq(body, FX.updateDiaryTemplate);
+      const handled = C.handleMessage(rpcMsg(body, FX.updateDiaryResponse, { responseHeaders: 'content-type: text/x-gwt-rpc\r\nX-Cronometer-Throttle-Version: 3\r\n' }));
+      off();
+      eq(handled, true);
+      eq(stateEvents, 1);
+      eq(C.state.nonce, 'NONCE'); ok(C.state.nonceUpdatedAt > 0); eq(C.state.nonceSource, 'request');
+      eq(C.state.userId, 1234567); eq(C.state.userIdSource, 'method');
+      eq(C.state.policyHash, 'POLICY'); eq(C.state.policyHashSource, 'traffic');
+      eq(C.state.moduleBase, MB);
+      eq(C.state.permutation, PERM);
+      eq(C.state.rpcCount, 1); ok(C.state.lastRpcAt > 0); eq(C.state.lastMethod, 'updateDiary');
+      eq(C.state.throttleVersion, '3');
+      eq(C.state.lastError, null);
+      const e = C.state.log[C.state.log.length - 1];
+      eq(e.kind, 'rpc'); eq(e.method, 'updateDiary'); eq(e.status, 200); eq(e.ok, true);
+      eq(JSON.stringify(C.state.log).indexOf('NONCE'), -1, 'log never contains the nonce');
+      eq(e.requestBody, undefined);
+    });
+    T.it('(b) getDayInfo request -> diaryDate and userId', () => {
+      C.reset();
+      C.handleMessage(rpcMsg(FX.getDayInfoTemplate, FX.dayInfoResponse({ day: FX.day(4, 3, 2026) })));
+      deepEq(C.state.diaryDate, { day: 4, month: 3, year: 2026 });
+      eq(C.state.diaryDateSource, 'getDayInfo');
+      eq(C.state.userId, 1234567);
+      eq(C.state.nonce, 'NONCE');
+      deepEq(C.state.lastGetDayInfo.date, { day: 4, month: 3, year: 2026 });
+      const body2 = writer().call('getDayInfo', [G.STRING_SIG, S.DAY, 'I'], ['NONCE', FX.day(27, 9, 2026), 1234567]);
+      C.handleMessage(rpcMsg(body2));
+      deepEq(C.state.diaryDate, { day: 27, month: 9, year: 2026 });
+    });
+    T.it('nonce follows the most recent String-first-param; getFood\'s int is not taken as userId', () => {
+      C.reset();
+      C.handleMessage(rpcMsg(FX.getDayInfoTemplate));
+      eq(C.state.userId, 1234567);
+      const t1 = C.state.nonceUpdatedAt;
+      const getFood = writer().call('getFood', [G.STRING_SIG, 'I'], ['NONCE2', 464674]);
+      C.handleMessage(rpcMsg(getFood, FX.foodResponse({ id: 464674, name: 'Egg' }), { t: Date.now() + 5 }));
+      eq(C.state.nonce, 'NONCE2');
+      ok(C.state.nonceUpdatedAt > t1);
+      eq(C.state.userId, 1234567, 'foodId must not replace the userId');
+      // a generic (String, I, ...) method gives a low-confidence userId only when none is known
+      C.reset();
+      const generic = writer().call('someNewMethod', [G.STRING_SIG, 'I', 'Z'], ['N', 777, true]);
+      C.handleMessage(rpcMsg(generic));
+      eq(C.state.userId, 777); eq(C.state.userIdSource, 'generic');
+      C.handleMessage(rpcMsg(FX.getDayInfoTemplate));
+      eq(C.state.userId, 1234567, 'a known method overrides the generic guess');
+      C.handleMessage(rpcMsg(writer().call('someNewMethod', [G.STRING_SIG, 'I'], ['N', 999])));
+      eq(C.state.userId, 1234567, 'a generic guess never overrides a known value');
+      // an object parameter before the int stops the generic rule
+      C.reset();
+      C.handleMessage(rpcMsg(writer().call('other', [G.STRING_SIG, 'java.util.List', 'I'], ['N', [], 5])));
+      eq(C.state.userId, null);
+      eq(C.extractUserId(G.parseRequest(FX.getFoodTemplate)), null);
+      deepEq(C.extractUserId(G.parseRequest(FX.removeServingTemplate)), { userId: 1234567, source: 'method' });
+    });
+    T.it('(c) authenticate response -> userId, session key as nonce, groups from the DG map', () => {
+      C.reset();
+      const flags = [true, true, false, true, true];
+      const groups = [0, 1, 2, 3, 4].map((id) => ({ id, name: FX.DEFAULT_GROUPS[id], enabled: flags[id] }));
+      const text = G.encodeResponse(FX.user({ userId: 1234567, session: 'NONCE-X', groups }));
+      // sanity: the fixture User has 42 fields, userId at 19, key at 33 and a HashMap-like map with DG01..DG05
+      const u = G.readResponse(text).value;
+      eq(u.f.length, 42); eq(u.f[19], 1234567); eq(u.f[33], 'NONCE-X');
+      eq(G.findMaps(u, (m) => m.has('DG01')).length, 1);
+      C.handleMessage(rpcMsg(FX.authenticateTemplate, text));
+      eq(C.state.userId, 1234567); eq(C.state.userIdSource, 'authenticate');
+      eq(C.state.nonce, 'NONCE-X', 'session key becomes the nonce when none was captured yet');
+      eq(C.state.nonceSource, 'authenticate');
+      eq(C.state.groupsSource, 'authenticate');
+      // cNh evaluates all eight slots: names/flags absent from the map take the defaults (enabled for ids 0..4)
+      eq(C.state.groups.length, 8);
+      deepEq(C.state.groups.map((g) => g.id), [0, 1, 2, 3, 4, 5, 6, 7]);
+      deepEq(C.state.groups.map((g) => g.name), FX.DEFAULT_GROUPS);
+      deepEq(C.state.groups.map((g) => g.enabled), flags.concat([false, false, false]));
+      eq(C.state.groupsOn, true);
+      eq(C.state.lastMethod, 'authenticate');
+      // the authenticate request has no String first param: nonce untouched by the request side
+      eq(G.parseRequest(FX.authenticateTemplate).nonce, null);
+      // a later request nonce still wins (most recent String-first-param)
+      C.handleMessage(rpcMsg(FX.getDayInfoTemplate, undefined, { t: Date.now() + 10 }));
+      eq(C.state.nonce, 'NONCE');
+      eq(JSON.stringify(C.snapshot()).indexOf('NONCE-X'), -1, 'snapshot never contains a nonce');
+      eq(JSON.stringify(C.state.log).indexOf('NONCE-X'), -1);
+    });
+    T.it('(c2) a reauthenticate //OK rotates the nonce to its STRING result (the request still carries the old key)', () => {
+      C.reset();
+      C.handleMessage(rpcMsg(FX.getDayInfoTemplate));
+      eq(C.state.nonce, 'NONCE');
+      const t0 = C.state.nonceUpdatedAt;
+      // the app: NotLoggedInException -> reauthenticate(oldNonce, userId) -> stores the string result as $c.Q
+      const body = writer().call('reauthenticate', [G.STRING_SIG, 'I'], ['NONCE', 1234567]);
+      C.handleMessage(rpcMsg(body, G.encodeResponse('NEWKEY-0123456789abcdef', { kind: 's' }), { t: Date.now() + 5 }));
+      eq(C.state.nonce, 'NEWKEY-0123456789abcdef'); eq(C.state.nonceSource, 'reauthenticate'); ok(C.state.nonceUpdatedAt > t0);
+      eq(C.state.userId, 1234567);
+      deepEq(C.session().nonce, 'NEWKEY-0123456789abcdef', 'rpc.js now sends the rotated key');
+      eq(C.redact('x NONCE y NEWKEY-0123456789abcdef'), 'x <NONCE> y <NONCE>', 'both the old and the new key are redacted');
+      eq(JSON.stringify(C.state.log).indexOf('NEWKEY'), -1, 'the new key never reaches the log');
+      // an undecodable reauthenticate reply is logged, not fatal; the old nonce stays
+      C.handleMessage(rpcMsg(body, '//OK[garbage', { t: Date.now() + 10 }));
+      eq(C.state.nonce, 'NEWKEY-0123456789abcdef');
+      ok(C.state.log.some((e) => e.kind === 'warn' && /reauthenticate response could not be decoded/.test(e.note)));
+    });
+    T.it('decodeGroups: renamed groups, missing ON flags, DG06..DG08 present', () => {
+      const m = FX.prefsMap([0, 1, 2, 3, 4, 5, 6, 7].map((id) => ({ id, name: id === 4 ? 'Snack' : FX.DEFAULT_GROUPS[id], enabled: id !== 0 && id < 6 })));
+      const g = C.decodeGroups(m);
+      eq(g.length, 8);
+      eq(g[4].name, 'Snack'); eq(g[4].enabled, true); eq(g[0].enabled, false); eq(g[6].enabled, false);
+      // a partially populated map: every slot exists (cNh: default name, ON defaults to 'true' for c<6)
+      const partial = new Map([['DG01', 'Uncategorized'], ['DG02', 'Breakfast'], ['DG05', ''], ['DG_ON', 'true']]);
+      const p = C.decodeGroups(partial);
+      eq(p.length, 8);
+      deepEq(p.slice(0, 5), [{ id: 0, name: 'Uncategorized', enabled: true }, { id: 1, name: 'Breakfast', enabled: true }, { id: 2, name: 'Lunch', enabled: true }, { id: 3, name: 'Dinner', enabled: true }, { id: 4, name: 'Snacks', enabled: true }]);
+      deepEq(p.slice(5).map((g) => g.enabled), [false, false, false]);
+      // a user who renamed Snacks but never touched DG01: Lunch must not disappear; a map without DG01 is still accepted
+      const noDg01 = new Map([['DG05', 'Evening'], ['DG05ON', 'true'], ['DG07ON', 'true']]);
+      const q = C.decodeGroups(noDg01);
+      deepEq(q.filter((g) => g.enabled).map((g) => g.id + ':' + g.name), ['0:Uncategorized', '1:Breakfast', '2:Lunch', '3:Dinner', '4:Evening', '6:Group 7']);
+      eq(C.decodeGroups(new Map([['DG03ON', 'false']]))[2].enabled, false);
+      eq(C.decodeGroups(new Map([['x', 'y']])), null);
+      eq(C.decodeGroups(null), null);
+    });
+    T.it('(d) a /api/v3/user/{id}/ URL message -> userId (and REST counters)', () => {
+      C.reset();
+      C.handleMessage({ source: 'cma-hook', type: 'xhr', method: 'GET', url: 'https://cronometer.com/api/v3/user/1234567/food-search/string?query=EGG&maxResults=50',
+        requestHeaders: { Accept: 'application/json' }, requestBody: null, status: 200, responseText: '[]', responseHeaders: 'x-cronometer-throttle-version: 7\r\n', t: Date.now() });
+      eq(C.state.userId, 1234567); eq(C.state.userIdSource, 'v3-url');
+      eq(C.state.restCount, 1); ok(C.state.lastRestAt > 0); eq(C.state.rpcCount, 0);
+      eq(C.state.throttleVersion, '7');
+      const e = C.state.log[C.state.log.length - 1];
+      eq(e.kind, 'rest'); eq(e.path, '/api/v3/user/1234567/food-search/string', 'pathname only: the query is the food name the user typed');
+      eq(C.userIdFromUrl('/api/v3/user/42/diary-entries'), 42);
+      eq(C.userIdFromUrl('/api/v3/throttle-config'), null);
+    });
+    T.it('(g) traffic from another origin is ignored: no counters, no userId, no session values (SPEC 0)', () => {
+      C.reset();
+      C.setPageOrigin('https://cronometer.com');
+      const braze = 'https://sdk.iad-01.braze.com/api/v3/user/424242/data/';
+      eq(C.handleMessage({ source: 'cma-hook', type: 'xhr', method: 'POST', url: braze, requestHeaders: {}, requestBody: '{"x":1}', status: 200, responseText: '{}', responseHeaders: '', t: Date.now() }), false);
+      eq(C.state.restCount, 0); eq(C.state.userId, null); eq(C.state.ignoredForeign, 1);
+      eq(C.userIdFromUrl(braze), null);
+      eq(C.userIdFromUrl('/api/v3/user/42/diary-entries'), 42, 'relative URLs are ours');
+      // a GWT body on another origin never feeds moduleBase/policy/nonce either
+      eq(C.handleMessage(rpcMsg(FX.getDayInfoTemplate, undefined, { url: 'https://evil.example/cronometer/app' })), false);
+      eq(C.state.nonce, null); eq(C.state.moduleBase, null); eq(C.state.rpcCount, 0);
+      // a same-origin request whose body names a foreign module base does not adopt it
+      const foreign = new G.Writer('https://evil.example/cronometer/', 'POLICY').call('getFood', [G.STRING_SIG, 'I'], ['NONCE', 1]);
+      C.handleMessage(rpcMsg(foreign));
+      eq(C.state.moduleBase, null);
+      ok(C.state.log.some((e) => e.kind === 'warn' && /foreign origin/.test(e.note)), 'warned about the foreign module base');
+      C.handleMessage({ source: 'cma-hook', type: 'gwt', strongName: PERM, moduleBase: 'https://evil.example/cronometer/' });
+      eq(C.state.moduleBase, null);
+      C.handleMessage(rpcMsg(FX.getFoodTemplate));
+      eq(C.state.moduleBase, MB, 'the real module base is taken');
+    });
+    T.it('(h) //OK updateDiary responses are decoded: an ErrorEntryChangeResult marks the rpc event rejected', () => {
+      C.reset();
+      const events = [];
+      const off = EV.on('rpc', (ev) => events.push(ev));
+      C.handleMessage(rpcMsg(FX.updateDiaryTemplate, FX.updateDiaryResponse));
+      C.handleMessage(rpcMsg(FX.updateDiaryTemplate, FX.updateDiaryErrorResponse('bad measure', fixedServing())));
+      off();
+      eq(events.length, 2);
+      eq(events[0].ok, true); eq(events[0].rejected, false);
+      eq(events[1].ok, true); eq(events[1].rejected, true); eq(events[1].rejectMessage, 'bad measure');
+      ok(C.state.log.some((e) => e.kind === 'warn' && /rejected the entry: bad measure/.test(e.note)), 'rejection logged');
+      eq(C.state.log.filter((e) => e.kind === 'rpc').pop().rejected, true);
+    });
+    T.it('(i) a stale registry is visible: undecodable responses/params are logged and registryMismatch is set', () => {
+      C.reset();
+      // a getFood //OK payload naming a type the registry does not know
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, '//OK[1,["com.cronometer.shared.foods.models.FoodV2/123456"],0,7]'));
+      ok(C.state.log.some((e) => e.kind === 'decode' && e.method === 'getFood' && /FoodV2\/123456/.test(e.note)), 'decode failure names the type: ' + JSON.stringify(C.state.log.slice(-2)));
+      // a request whose parameter type is unknown
+      const body = '7|0|7|' + MB + '|POLICY|com.cronometer.shared.rpc.CronometerService|someMethod|java.lang.String/2004016611|com.cronometer.shared.NewParam/999|NONCEX|1|2|3|4|2|5|6|7|6|';
+      C.handleMessage(rpcMsg(body));
+      ok(C.state.log.some((e) => e.kind === 'warn' && e.method === 'someMethod' && /undecodable/.test(e.note)), 'paramError logged: ' + JSON.stringify(C.state.log.slice(-2)));
+      // the live permutation vs the build the registry was generated from
+      C.reset();
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': CMA.registry.permutation } }));
+      eq(C.state.registryMismatch, false);
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' } }));
+      eq(C.state.registryMismatch, true);
+      ok(C.state.log.some((e) => e.kind === 'warn' && /deployed a new build/.test(e.note)));
+      eq(C.snapshot().registryMismatch, true, 'visible in the diagnostics snapshot');
+    });
+    T.it('(e) //EX NotLoggedInException -> lastError session; a later //OK clears it', () => {
+      C.reset();
+      C.handleMessage(rpcMsg(FX.getDayInfoTemplate, FX.notLoggedInResponse));
+      eq(C.state.lastError, 'session');
+      ok(/NotLoggedInException/.test(C.state.lastException.type));
+      eq(C.state.lastException.message, 'authentication failed');
+      eq(C.state.lastException.method, 'getDayInfo');
+      const e = C.state.log[C.state.log.length - 1];
+      eq(e.ok, false); ok(/NotLoggedInException/.test(e.ex));
+      C.handleMessage(rpcMsg(FX.getDayInfoTemplate, FX.notLoggedInEx('Invalid or expired session')));
+      eq(C.state.lastException.message, 'Invalid or expired session');
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, G.encodeException('java.lang.RuntimeException', 'other')));
+      eq(C.state.lastError, 'session', 'another exception type does not reset the session error');
+      eq(C.state.lastException.message, 'other');
+      C.handleMessage(rpcMsg(FX.getDayInfoTemplate, FX.dayInfoResponse({})));
+      eq(C.state.lastError, null);
+    });
+    T.it('(f) ready() is true once everything was seen (hooked via pong)', () => {
+      C.reset();
+      C.handleMessage({ source: 'cma-hook', type: 'pong', hooked: true });
+      eq(C.state.hooked, true);
+      C.handleMessage(rpcMsg(FX.updateDiaryTemplate, FX.updateDiaryResponse));
+      const r = C.ready();
+      eq(r.ok, true); deepEq(r.missing, []);
+      deepEq(C.session(), SESSION);
+    });
+    T.it('gwt message fills permutation / moduleBase only when missing; header always wins later', () => {
+      C.reset();
+      C.handleMessage({ source: 'cma-hook', type: 'gwt', strongName: 'ffffffffffffffffffffffffffffffff', moduleBase: 'https://cronometer.com/cronometer/' });
+      eq(C.state.permutation, 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF'); eq(C.state.permutationSource, 'gwt');
+      eq(C.state.moduleBase, MB);
+      deepEq(C.state.gwt, { strongName: 'ffffffffffffffffffffffffffffffff', moduleBase: MB });
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'x-gwt-permutation': PERM } }));
+      eq(C.state.permutation, PERM, 'case-insensitive header lookup');
+      C.handleMessage({ source: 'cma-hook', type: 'gwt', strongName: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', moduleBase: 'https://other/' });
+      eq(C.state.permutation, PERM); eq(C.state.moduleBase, MB);
+    });
+    T.it('policy hash is inferred from the registry when the permutation matches the analysed bundle', () => {
+      C.reset();
+      C.handleMessage({ source: 'cma-hook', type: 'gwt', strongName: CMA.registry.permutation, moduleBase: MB });
+      eq(C.state.policyHash, CMA.registry.policyHash); eq(C.state.policyHashSource, 'registry');
+      C.reset();
+      C.handleMessage({ source: 'cma-hook', type: 'gwt', strongName: 'ffffffffffffffffffffffffffffffff', moduleBase: MB });
+      eq(C.state.policyHash, null);
+      C.handleMessage(rpcMsg(FX.getFoodTemplate));
+      eq(C.state.policyHash, 'POLICY'); eq(C.state.policyHashSource, 'traffic');
+    });
+    T.it('pro service requests are counted but never feed policy/nonce; other URLs are ignored', () => {
+      C.reset();
+      const proBody = new G.Writer(MB, 'PROPOLICY', { service: 'com.cronometer.shared.rpc.ProService' }).call('x', [G.STRING_SIG], ['PRONONCE']);
+      // (no permutation header here: with one, the registry inference would legitimately fill the policy hash)
+      eq(C.handleMessage(rpcMsg(proBody, undefined, { url: MB + 'pro', requestHeaders: {} })), true);
+      eq(C.state.rpcCount, 1); eq(C.state.policyHash, null); eq(C.state.nonce, null); eq(C.state.moduleBase, null);
+      eq(C.handleMessage(rpcMsg('x', undefined, { url: 'https://cronometer.com/other' })), false);
+      eq(C.handleMessage({ source: 'other', type: 'xhr', url: APP_URL }), false);
+      eq(C.state.rpcCount, 1);
+    });
+    T.it('never throws on garbage and logs unparseable bodies', () => {
+      [null, undefined, 1, 'x', {}, { type: 'xhr' }, { type: 'nope' }, { type: 'xhr', url: APP_URL, requestBody: 7 }].forEach((d) => { C.handleMessage(d); });
+      C.reset();
+      C.handleMessage(rpcMsg('7|0|3|a|b|c|9|9|9|', 'garbage', { status: 500 }));
+      eq(C.state.rpcCount, 1);
+      ok(C.state.log.some((e) => e.kind === 'warn' && /could not be parsed/.test(e.note)));
+      const last = C.state.log[C.state.log.length - 1];
+      eq(last.status, 500); eq(last.ok, false); eq(last.method, null);
+    });
+    T.it('log is a redacted ring buffer of at most 200 entries', () => {
+      C.reset();
+      for (let i = 0; i < 230; i++) C.handleMessage(rpcMsg(FX.getFoodTemplate));
+      eq(C.state.log.length, C.LOG_MAX);
+      eq(C.state.rpcCount, 230);
+      eq(C.redact('body with NONCE inside'), 'body with <NONCE> inside');
+      const e = C.log('info', { note: 'nonce=NONCE', nested: { url: 'x?NONCE' }, requestBody: 'secret NONCE' });
+      eq(e.note, 'nonce=<NONCE>'); eq(e.nested.url, 'x?<NONCE>'); eq(e.requestBody, undefined);
+    });
+    T.it('throttle version changes are timestamped', () => {
+      C.reset();
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { responseHeaders: 'X-Cronometer-Throttle-Version: 1\r\n' }));
+      eq(C.state.throttleVersion, '1'); eq(C.state.throttleVersionChangedAt, null);
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { responseHeaders: 'x-cronometer-throttle-version: 2\r\ncontent-length: 3' }));
+      eq(C.state.throttleVersion, '2'); ok(C.state.throttleVersionChangedAt > 0);
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { responseHeaders: '' }));
+      eq(C.state.throttleVersion, '2');
+    });
+    T.it('waitFor resolves on a matching rpc event and times out otherwise', async () => {
+      C.reset();
+      const p = C.waitFor((ev) => ev.method === 'getDayInfo' && ev.date && ev.date.day === 4, { timeout: 1000 });
+      C.handleMessage(rpcMsg(FX.getFoodTemplate));
+      C.handleMessage(rpcMsg(FX.getDayInfoTemplate));
+      const ev = await p;
+      eq(ev.method, 'getDayInfo'); deepEq(ev.date, { day: 4, month: 3, year: 2026 }); eq(ev.ok, true);
+      const err = await T.throws(() => C.waitFor(() => false, { timeout: 30, label: 'nothing' }), /Timed out/);
+      eq(err.timeout, true);
+    });
+  });
+
+  // ================================================================================================
+  T.describe('capture: runtime registry hooks (SPEC 3.5)', () => {
+    const RS = CMA.registryStore;
+    const FOREIGN = 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF';
+    T.it('the permutation header activates the registry store synchronously (before the message is decoded) and records the source', () => {
+      C.reset();
+      const seen = [];
+      const orig = RS.activate;
+      // handleRpc sets lastMethod when it parses the body and decodes the response after that: at activation
+      // time neither has happened yet, so the reply is decoded with the registry chosen for its own build
+      RS.activate = function (p) { seen.push({ perm: p, rpcCount: C.state.rpcCount, lastMethod: C.state.lastMethod, logKinds: C.state.log.map((e) => e.kind) }); return orig.call(RS, p); };
+      try {
+        C.handleMessage(rpcMsg(FX.getFoodTemplate, FX.foodResponse({ id: 1, name: 'Egg' })));
+        eq(seen.length, 1); eq(seen[0].perm, PERM);
+        eq(seen[0].rpcCount, 1, 'called inside handleRpc');
+        eq(seen[0].lastMethod, null, 'before the body was parsed');
+        ok(seen[0].logKinds.indexOf('rpc') < 0 && seen[0].logKinds.indexOf('decode') < 0, 'before the response was decoded / logged');
+        eq(C.state.lastMethod, 'getFood');
+        eq(C.state.registrySource, 'bundled'); eq(C.state.registryMismatch, false);
+        eq(RS.status().activePermutation, PERM); eq(RS.status().active, 'bundled');
+        C.handleMessage(rpcMsg(FX.getFoodTemplate));
+        eq(seen.length, 1, 'the same permutation is not re-activated');
+      } finally { RS.activate = orig; }
+    });
+    T.it('an unknown permutation with a known module base asks the store for ONE rebuild per page load; reset() re-arms it; the store refuses without a builder', async () => {
+      C.reset();
+      const calls = [];
+      const orig = RS.rebuild;
+      RS.rebuild = function (o) { calls.push(o); return Promise.resolve({ ok: false, error: 'stub says no' }); };
+      try {
+        C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': FOREIGN } }));
+        eq(C.state.registryMismatch, true); eq(C.state.moduleBase, MB);
+        C.handleMessage(rpcMsg(FX.getDayInfoTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': FOREIGN } }));
+        await sleep(5);
+        eq(calls.length, 1, 'exactly one rebuild request');
+        deepEq(calls[0], { moduleBase: MB, permutation: FOREIGN, reason: 'mismatch' });
+        ok(C.state.log.some((e) => e.kind === 'registry' && /no matching decoder: rebuilding/.test(e.note)), 'trigger logged');
+        ok(C.state.log.some((e) => e.kind === 'registry' && /automatic rebuild failed: stub says no/.test(e.note)), 'outcome logged');
+        C.reset();
+        C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': FOREIGN } }));
+        await sleep(5);
+        eq(calls.length, 2, 'a fresh page (reset) triggers again');
+      } finally { RS.rebuild = orig; }
+      // the real store on this page has no CMA.registryBuilder: the trigger runs, the store refuses, capture logs it
+      C.reset();
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': FOREIGN } }));
+      await sleep(5);
+      ok(C.state.log.some((e) => e.kind === 'registry' && /automatic rebuild failed: registry builder not loaded/.test(e.note)), JSON.stringify(C.state.log.filter((e) => e.kind === 'registry')));
+      eq(RS.status().lastRebuild, null, 'a refusal is not an attempt');
+      eq(C.state.registryMismatch, true);
+      // the bundled permutation needs no rebuild
+      C.reset();
+      C.handleMessage(rpcMsg(FX.getFoodTemplate));
+      await sleep(5);
+      ok(!C.state.log.some((e) => e.kind === 'registry' && /rebuilding/.test(e.note)));
+    });
+    T.it('the "registry" event re-evaluates the mismatch against the registry now installed and emits state', () => {
+      C.reset();
+      C.handleMessage(rpcMsg(FX.getFoodTemplate, undefined, { requestHeaders: { 'X-GWT-Permutation': FOREIGN } }));
+      eq(C.state.registryMismatch, true);
+      const real = CMA.registry;
+      let states = 0;
+      const off = EV.on('state', () => { states++; });
+      try {
+        CMA.registry = Object.assign({}, real, { permutation: FOREIGN, source: 'runtime' });
+        EV.emit('registry', { source: 'runtime', permutation: FOREIGN, changed: true });
+        eq(C.state.registryMismatch, false); eq(C.state.registrySource, 'runtime'); eq(states, 1);
+        ok(C.state.log.some((e) => e.kind === 'registry' && /decoder now matches live build FFFF/.test(e.note)));
+        CMA.registry = real;
+        EV.emit('registry', { source: 'bundled', changed: true });
+        eq(C.state.registryMismatch, true); eq(C.state.registrySource, 'bundled'); eq(states, 2);
+        ok(C.state.log.some((e) => e.kind === 'warn' && /no longer matches/.test(e.note)));
+      } finally { CMA.registry = real; off(); }
+      eq(C.snapshot().registrySource, 'bundled');
+      eq(JSON.stringify(C.snapshot()).indexOf('NONCE'), -1);
+    });
+  });
+
+  // ================================================================================================
+  T.describe('capture: DOM fallbacks (SPEC 2.1 / 2.3)', () => {
+    const host = document.getElementById('dom-fixture');
+    T.it('permutation + module base from the <script ...cache.js> tag', () => {
+      C.reset();
+      host.innerHTML = '';
+      const s = document.createElement('script');
+      s.type = 'text/plain';                                     // never fetched/executed
+      s.setAttribute('src', 'https://cronometer.com/cronometer/' + PERM + '.cache.js');
+      host.appendChild(s);
+      const out = C.probeDom(document);
+      eq(out.permutation, PERM); eq(out.moduleBase, MB); eq(out.changed, true);
+      eq(C.state.permutation, PERM); eq(C.state.permutationSource, 'dom'); eq(C.state.moduleBase, MB);
+      eq(C.state.policyHash, CMA.registry.permutation === PERM ? CMA.registry.policyHash : null);
+      host.innerHTML = '';
+    });
+    T.it('groups from .diary-group-title texts (only while no authenticate was seen)', () => {
+      C.reset();
+      host.innerHTML = '<div class="diary-group-title">Breakfast</div><div class="diary-group-title"> Lunch \n macros</div>'
+        + '<div class="diary-group-title">Dinner</div><div class="diary-group-title">Second breakfast</div><div class="diary-group-title">Breakfast</div>';
+      const out = C.probeDom(document);
+      eq(C.state.groupsSource, 'dom');
+      eq(out.groups.length, 8);
+      deepEq(C.state.groups.filter((g) => g.enabled).map((g) => g.id + ':' + g.name), ['1:Breakfast', '2:Lunch', '3:Dinner', '4:Second breakfast']);
+      eq(C.state.groups[0].enabled, false); eq(C.state.groups[5].enabled, false);
+      deepEq(C.groupsFromTitles(['Uncategorized', 'Snacks', 'Custom']).filter((g) => g.enabled).map((g) => g.id), [0, 1, 4]);
+      // authenticate-derived groups are never replaced by the DOM
+      C.handleMessage(rpcMsg(FX.authenticateTemplate, FX.authenticateResponse({ userId: 1, session: 'K' })));
+      eq(C.state.groupsSource, 'authenticate');
+      C.probeDom(document);
+      eq(C.state.groupsSource, 'authenticate');
+      eq(C.state.groups.length, 8);
+      host.innerHTML = '';
+    });
+    T.it('probeDom is harmless without matching elements', () => {
+      C.reset();
+      const out = C.probeDom(document);
+      eq(out.changed, false); eq(C.state.permutation, null); eq(C.state.groupsSource, 'default');
+    });
+  });
+
+  // ================================================================================================
+  T.describe('rpc: GWT-RPC client against a stubbed fetch (SPEC 4)', () => {
+    T.it('CMA.errors classes and isNetwork', () => {
+      const s = new CMA.errors.Session('x', { status: 401 });
+      eq(s.kind, 'session'); eq(s.status, 401); ok(s instanceof Error); eq(CMA.errors.isNetwork(s), false);
+      const th = new CMA.errors.Throttled(); eq(th.kind, 'throttled'); eq(CMA.errors.isNetwork(th), false);
+      const n = new CMA.errors.Network('Failed to fetch'); eq(n.kind, 'network'); eq(CMA.errors.isNetwork(n), true);
+      eq(CMA.errors.isNetwork(new TypeError('Failed to fetch')), true);
+      eq(CMA.errors.isNetwork(new Error('plain')), false);
+    });
+    T.it('updateDiaryAdd sends the byte-exact SPEC 4 body and parses the real fixture response', async () => {
+      stubFetch(() => ({ body: FX.updateDiaryResponse, headers: { 'Content-Type': 'text/x-gwt-rpc' } }));
+      try {
+        const out = await R.updateDiaryAdd(SESSION, fixedServing());
+        eq(calls.length, 1);
+        const c = lastCall();
+        eq(c.url, APP_URL);
+        eq(c.init.method, 'POST');
+        eq(c.init.credentials, 'same-origin');
+        eq(c.init.headers['Content-Type'], 'text/x-gwt-rpc; charset=utf-8');
+        eq(c.init.headers['X-GWT-Permutation'], PERM);
+        eq(c.init.headers['X-GWT-Module-Base'], MB);
+        eq(c.init.body, FX.updateDiaryTemplate);
+        eq(out.servingId, 'D80lp$');
+        eq(out.serving.$t, S.SERVING);
+        eq(out.serving.f[G.F.SERVING.FOOD], 464674); eq(out.serving.f[G.F.SERVING.MEASURE], 1072101);
+        eq(out.serving.f[G.F.SERVING.ORDER], 65541); eq(out.serving.f[G.F.SERVING.GRAMS], 50);
+        eq(out.results.length, 1);
+        eq(G.decodeLong(out.servingId), 4241644158);
+      } finally { restoreFetch(); }
+    });
+    T.it('updateDiaryAdd accepts a plain serving description and puts userId 0 in the Serving', async () => {
+      stubFetch(() => ({ body: FX.updateDiaryOkResponse([fixedServing({ id: 'D80lp$' })]) }));
+      try {
+        const out = await R.updateDiaryAdd(SESSION, { day: { day: 4, month: 3, year: 2026 }, order: 65537, grams: 50, foodId: 464674, measureId: 1072101 });
+        eq(lastCall().init.body, FX.updateDiaryTemplate);
+        eq(out.servingId, 'D80lp$');
+      } finally { restoreFetch(); }
+    });
+    T.it('updateDiaryAdd surfaces an ErrorEntryChangeResult as an Error with the server message', async () => {
+      stubFetch(() => ({ body: FX.updateDiaryErrorResponse('bad measure', fixedServing()) }));
+      try {
+        const e = await T.throws(() => R.updateDiaryAdd(SESSION, fixedServing()), /bad measure/);
+        eq(e.kind, 'rejected'); eq(e.serverMessage, 'bad measure'); eq(e.entry.$t, S.SERVING);
+        eq(CMA.errors.isNetwork(e), false);
+      } finally { restoreFetch(); }
+    });
+    T.it('//EX NotLoggedInException -> CMA.errors.Session; other //EX -> plain Error with kind rpc', async () => {
+      stubFetch(() => ({ body: FX.notLoggedInResponse }));
+      try {
+        const e = await T.throws(() => R.updateDiaryAdd(SESSION, fixedServing()), /authentication failed/);
+        eq(e.kind, 'session'); ok(e instanceof CMA.errors.Session);
+      } finally { restoreFetch(); }
+      stubFetch(() => ({ body: G.encodeException('java.lang.IllegalArgumentException', 'nope') }));
+      try {
+        const e = await T.throws(() => R.getFood(SESSION, 5), /IllegalArgumentException: nope/);
+        eq(e.kind, 'rpc'); eq(e.method, 'getFood'); eq(CMA.errors.isNetwork(e), false);
+      } finally { restoreFetch(); }
+    });
+    T.it('an undecodable //OK is kind decode with .applied (the server executed the call); an undecodable //EX is classified from its raw text', async () => {
+      // //OK naming a type the registry does not know: updateDiary DID add the entry, only the reply is unreadable
+      stubFetch(() => ({ body: '//OK[1,["com.cronometer.shared.entries.changes.AddEntryChangeResultV2/123456"],0,7]' }));
+      try {
+        const e = await T.throws(() => R.updateDiaryAdd(SESSION, fixedServing()), /cannot decode the updateDiary response/);
+        eq(e.kind, 'decode'); eq(e.applied, true); eq(CMA.errors.isNetwork(e), false);
+      } finally { restoreFetch(); }
+      // //EX whose exception class CRC changed: still a session loss / a stale registry, never a bare 'decode'
+      stubFetch(() => ({ body: '//EX[2,1,["com.cronometer.shared.user.exceptions.NotLoggedInException/999999","expired"],0,7]' }));
+      try { const e = await T.throws(() => R.getFood(SESSION, 5), /not logged in/i); eq(e.kind, 'session'); eq(e.applied, undefined); } finally { restoreFetch(); }
+      stubFetch(() => ({ body: '//EX[2,1,["com.google.gwt.user.client.rpc.IncompatibleRemoteServiceException/111","Invalid type signature for x"],0,7]' }));
+      try { const e = await T.throws(() => R.getFood(SESSION, 5), /registry is out of date/); eq(e.kind, 'incompatible'); } finally { restoreFetch(); }
+      stubFetch(() => ({ body: '//EX[2,1,["com.example.SomethingElse/1","x"],0,7]' }));
+      try { const e = await T.throws(() => R.getFood(SESSION, 5), /cannot decode/); eq(e.kind, 'decode'); eq(e.applied, false); } finally { restoreFetch(); }
+    });
+    T.it('servingValue validates a prebuilt Serving value too (NaN grams / bad ids never reach the Writer)', async () => {
+      const bad = (patch) => { const s = fixedServing(); Object.assign(s.f, patch); return s; };
+      await T.throws(() => R.servingValue(bad({ 7: NaN })), /grams/);
+      await T.throws(() => R.servingValue(bad({ 7: -1 })), /grams/);
+      await T.throws(() => R.servingValue(bad({ 8: 0 })), /foodId/);
+      await T.throws(() => R.servingValue(bad({ 10: 1.5 })), /measureId/);
+      await T.throws(() => R.servingValue(bad({ 4: 'x' })), /order/);
+      await T.throws(() => R.servingValue(bad({ 0: null })), /day/);
+      eq(R.servingValue(fixedServing()).f[7], 50);
+    });
+    T.it('HTTP 429 -> Throttled (status 429, retryable); 401 -> Session; 500 with body -> plain Error; empty 503 -> Network', async () => {
+      stubFetch(() => ({ status: 429, body: 'slow down' }));
+      try {
+        const e = await T.throws(() => R.getFood(SESSION, 5), /429/);
+        eq(e.kind, 'throttled'); eq(e.status, 429); eq(e.retryable, true);
+      } finally { restoreFetch(); }
+      stubFetch(() => ({ status: 401, body: '' }));
+      try { const e = await T.throws(() => R.getFood(SESSION, 5), /401/); eq(e.kind, 'session'); } finally { restoreFetch(); }
+      stubFetch(() => ({ status: 500, body: 'The call failed on the server; see server log for details' }));
+      try {
+        const e = await T.throws(() => R.getFood(SESSION, 5), /HTTP 500 .*call failed/);
+        eq(e.kind, 'http'); eq(e.status, 500); eq(CMA.errors.isNetwork(e), false);
+      } finally { restoreFetch(); }
+      stubFetch(() => ({ status: 503, body: '' }));
+      try { const e = await T.throws(() => R.getFood(SESSION, 5), /503/); eq(e.kind, 'network'); eq(CMA.errors.isNetwork(e), true); } finally { restoreFetch(); }
+      stubFetch(() => ({ status: 200, body: '<!doctype html><html><body>Please login</body></html>' }));
+      try { const e = await T.throws(() => R.getFood(SESSION, 5), /page instead/); eq(e.kind, 'session'); } finally { restoreFetch(); }
+    });
+    T.it('transport failures and timeouts -> CMA.errors.Network', async () => {
+      stubFetch(() => new TypeError('Failed to fetch'));
+      try {
+        const e = await T.throws(() => R.getFood(SESSION, 5), /Failed to fetch/);
+        eq(e.kind, 'network'); ok(CMA.errors.isNetwork(e));
+      } finally { restoreFetch(); }
+      stubFetch((url, init) => new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => { const a = new Error('aborted'); a.name = 'AbortError'; reject(a); });
+      }));
+      try {
+        const e = await T.throws(() => R.getFood(SESSION, 5, { timeoutMs: 20 }), /timed out/);
+        eq(e.kind, 'network'); eq(e.timeout, true);
+      } finally { restoreFetch(); }
+    });
+    T.it('session validation', async () => {
+      await T.throws(() => R.getFood(Object.assign({}, SESSION, { nonce: null }), 5), /nonce/).then((e) => eq(e.kind, 'session'));
+      await T.throws(() => R.getFood(Object.assign({}, SESSION, { policyHash: '' }), 5), /policyHash/);
+      await T.throws(() => R.getFood(Object.assign({}, SESSION, { moduleBase: 'cronometer' }), 5), /moduleBase/);
+      await T.throws(() => R.getFood(Object.assign({}, SESSION, { permutation: null }), 5), /permutation/);
+      await T.throws(() => R.getDayInfo(Object.assign({}, SESSION, { userId: 0 }), { day: 1, month: 1, year: 2026 }), /userId/);
+      await T.throws(() => R.getFood(SESSION, 'x'), /foodId/);
+      await T.throws(() => R.getDayInfo(SESSION, { day: 1, month: 13, year: 2026 }), /month/);
+    });
+    T.it('removeServing body equality (string id verbatim, numeric id encoded) and VOID response', async () => {
+      stubFetch(() => ({ body: FX.voidResponse }));
+      try {
+        eq(await R.removeServing(SESSION, 'D80lp$'), true);
+        eq(lastCall().init.body, FX.removeServingTemplate);
+        eq(await R.removeServing(SESSION, 4241644158), true);
+        eq(lastCall().init.body, FX.removeServingTemplate);
+        await T.throws(() => R.removeServing(SESSION, 'not base64!'), /base64/);
+        eq(calls.length, 2);
+      } finally { restoreFetch(); }
+    });
+    T.it('getDayInfo body equality with a plain {day, month, year}; servingsOf scans both lists', async () => {
+      const a = FX.serving({ order: (1 << 16) | 1, foodId: 1, id: 'D80lp$' });
+      const b = FX.serving({ order: (1 << 16) | 2, foodId: 2, id: 'D9zN$G' });
+      const c = FX.serving({ order: (3 << 16) | 7, foodId: 3, id: 5 });
+      stubFetch(() => ({ body: FX.dayInfoResponse({ day: FX.day(4, 3, 2026), list1: [a, { $t: S.DAY, f: [1, 1, 2026] }, b], list2: [c, null], f: 'note' }) }));
+      try {
+        const info = await R.getDayInfo(SESSION, { day: 4, month: 3, year: 2026 });
+        eq(lastCall().init.body, FX.getDayInfoTemplate);
+        eq(info.$t, S.DAYINFO);
+        const servings = R.servingsOf(info);
+        eq(servings.length, 3);
+        deepEq(servings.map((s) => s.f[G.F.SERVING.FOOD]), [1, 2, 3]);
+        eq(servings[2].f[G.F.SERVING.ORDER] >> 16, 3);
+        deepEq(R.servingsOf(null), []);
+        deepEq(R.servingsOf({ $t: S.DAYINFO, f: [false, null, null, null, false, null] }), []);
+        const info2 = await R.getDayInfo(SESSION, FX.day(4, 3, 2026));
+        eq(lastCall().init.body, FX.getDayInfoTemplate);
+        eq(info2.$t, S.DAYINFO);
+      } finally { restoreFetch(); }
+    });
+    T.it('getFood body equality; measuresOf reads Measure fields and the Measure$Type ordinal', async () => {
+      const food = FX.food({ id: 464674, name: 'Chicken breast', defaultMeasureId: 5, measures: [
+        FX.measure({ foodId: 464674, id: 1072101, name: 'g', type: 0, grams: 1 }),
+        FX.measure({ foodId: 464674, id: 5, name: 'cup, diced', type: 1, grams: 140 }),
+        FX.measure({ foodId: 464674, id: 6, name: 'breast', type: 2, grams: 172.5 }),
+        FX.measure({ foodId: 464674, id: 7, name: 'full recipe', type: 3, grams: 0 }),
+        FX.measure({ foodId: 464674, id: 8, name: 'untyped', type: null, grams: 2 }),
+        FX.measure({ foodId: 464674, id: 9, name: 'cup', type: 1, grams: 70, a: 0.5, f: { d: 120 } }),   // '1/2 cup  — 120 ml' in the dialog
+        FX.measure({ foodId: 464674, id: 10, name: 'scoop', type: 2, grams: 30, hidden: true }),         // Measure.f[3]: 'Hidden'
+      ] });
+      stubFetch(() => ({ body: FX.foodResponse ? G.encodeResponse(food) : '' }));
+      try {
+        const f = await R.getFood(SESSION, 464674);
+        eq(lastCall().init.body, FX.getFoodTemplate);
+        eq(R.foodName(f), 'Chicken breast'); eq(R.foodId(f), 464674); eq(R.defaultMeasureIdOf(f), 5);
+        const ms = R.measuresOf(f);
+        eq(ms.length, 7);
+        deepEq(ms[0], { id: 1072101, name: 'g', grams: 1, type: 'Weight', typeOrdinal: 0, foodId: 464674, isDefault: false, amount: 1, ml: null, hidden: false });
+        deepEq(ms[1], { id: 5, name: 'cup, diced', grams: 140, type: 'Volume', typeOrdinal: 1, foodId: 464674, isDefault: true, amount: 1, ml: null, hidden: false });
+        eq(ms[2].type, 'Atomic'); eq(ms[3].type, 'Recipe'); eq(ms[3].grams, 0); eq(ms[4].type, null); eq(ms[4].typeOrdinal, null);
+        eq(ms[5].amount, 0.5, 'Measure.a'); eq(ms[5].ml, 120, 'Measure.f (boxed Double)');
+        eq(ms[6].hidden, true, 'Measure.f[3] (Hidden)'); eq(ms[5].hidden, false);
+        deepEq(R.measuresOf(null), []);
+        deepEq(R.measuresOf({ $t: S.FOOD, f: [] }), []);
+        eq(R.measureTypeName(2), 'Atomic'); eq(R.measureTypeName('Weight'), 'Weight'); eq(R.measureTypeName(null), null);
+      } finally { restoreFetch(); }
+      stubFetch(() => ({ body: G.encodeResponse(null) }));
+      try { const e = await T.throws(() => R.getFood(SESSION, 1), /no food/); eq(e.kind, 'notfound'); } finally { restoreFetch(); }
+    });
+    T.it('searchFoods: exact URL, headers, hit mapping, retired filtering, 401 and 429 handling', async () => {
+      const hits = [
+        { name: 'Chicken Breast, Roasted', id: 464674, score: 915, source: 'NCCDB', measureId: 1072101, measureDisplayName: '1 breast - 172g', translationId: 0, type: 'FOOD', retired: false },
+        { name: 'Old Chicken', id: 1, score: 1, source: 'CRDB', measureId: 2, measureDisplayName: 'x', retired: true },
+        { name: 'Poulet', id: '7', score: '3', measureId: '9', translationId: '409412', type: 'RECIPE' },
+        { bogus: true },
+      ];
+      stubFetch(() => ({ body: JSON.stringify(hits), headers: { 'Content-Type': 'application/json' } }));
+      try {
+        const out = await R.searchFoods(SESSION, 'chicken breast');
+        const c = lastCall();
+        // byte-identical to the app's request: `o2k` turns %20 into '+', and `SIf` sends no Accept header on a GET
+        eq(c.url, 'https://cronometer.com/api/v3/user/1234567/food-search/string?query=CHICKEN+BREAST&maxResults=50&sources=All&categoryId=0&selectedTab=ALL&type=All');
+        eq(c.init.method, 'GET'); eq(c.init.credentials, 'same-origin'); eq(c.init.headers, undefined);
+        eq(R.encodeQueryValue('A&B C/D+E'), 'A%26B+C%2FD%2BE');
+        eq(out.length, 2);
+        deepEq(out[0], { id: 464674, name: 'Chicken Breast, Roasted', measureId: 1072101, measureDisplayName: '1 breast - 172g', score: 915, source: 'NCCDB', type: 'FOOD', translationId: 0, retired: false, displayString: null });
+        deepEq(out[1], { id: 7, name: 'Poulet', measureId: 9, measureDisplayName: '', score: 3, source: null, type: 'RECIPE', translationId: 409412, retired: false, displayString: null });
+        const all = await R.searchFoods(SESSION, ' Egg ', { maxResults: 10, includeRetired: true });
+        eq(all.length, 3);
+        ok(lastCall().url.indexOf('query=EGG&maxResults=10&') > 0, lastCall().url);
+        deepEq(await R.searchFoods(SESSION, '   '), []);
+        eq(calls.length, 2);
+      } finally { restoreFetch(); }
+      stubFetch(() => ({ body: JSON.stringify({ foods: hits.slice(0, 1) }) }));
+      try { eq((await R.searchFoods(SESSION, 'x')).length, 1); } finally { restoreFetch(); }
+      stubFetch(() => ({ status: 401, body: '{"code":401,"message":"Unauthorized"}' }));
+      try { const e = await T.throws(() => R.searchFoods(SESSION, 'egg'), /401/); eq(e.kind, 'session'); } finally { restoreFetch(); }
+      stubFetch(() => ({ status: 429, body: '' }));
+      try { const e = await T.throws(() => R.searchFoods(SESSION, 'egg'), /429/); eq(e.kind, 'throttled'); eq(e.status, 429); eq(e.retryable, true); } finally { restoreFetch(); }
+      stubFetch(() => ({ status: 400, body: '{"code":400,"message":"Bad Request: query too long"}' }));
+      try { const e = await T.throws(() => R.searchFoods(SESSION, 'egg'), /query too long/); eq(e.status, 400); eq(e.kind, 'http'); } finally { restoreFetch(); }
+      stubFetch(() => ({ status: 200, body: 'not json' }));
+      try { await T.throws(() => R.searchFoods(SESSION, 'egg'), /invalid JSON/); } finally { restoreFetch(); }
+      await T.throws(() => R.searchFoods({ moduleBase: MB }, 'egg'), /userId/);
+    });
+    T.it('a changed X-Cronometer-Throttle-Version backs off once before the next request', async () => {
+      R.throttle.version = null; R.throttle.pending = false; R.throttle.backoffs = 0;
+      const savedBackoff = R.throttle.backoffMs;
+      R.throttle.backoffMs = 20;
+      C.reset();
+      let version = '1';
+      stubFetch(() => ({ body: FX.voidResponse, headers: { 'X-Cronometer-Throttle-Version': version } }));
+      try {
+        const events = [];
+        const off = EV.on('backoff', (e) => events.push(e));
+        await R.removeServing(SESSION, 'D80lp$');
+        eq(R.throttle.version, '1'); eq(R.throttle.pending, false);
+        version = '2';
+        await R.removeServing(SESSION, 'D80lp$');          // the call that carried the change still succeeds
+        eq(R.throttle.version, '2'); eq(R.throttle.pending, true); ok(R.throttle.changedAt > 0);
+        const t0 = Date.now();
+        await R.removeServing(SESSION, 'D80lp$', undefined);
+        off();
+        eq(R.throttle.pending, false);
+        eq(R.throttle.backoffs, 1);
+        eq(events.length, 1); eq(events[0].ms, R.throttle.backoffMs);
+        ok(Date.now() - t0 >= 0);
+        // throttleMode 'throw' raises a retryable Throttled instead of waiting
+        version = '3';
+        await R.removeServing(SESSION, 'D80lp$');
+        eq(R.throttle.pending, true);
+        const e = await T.throws(() => R.getFood(SESSION, 5, { throttleMode: 'throw' }), /Throttle-Version changed/);
+        eq(e.kind, 'throttled'); eq(e.retryable, true); eq(R.throttle.pending, false);
+        eq(calls.length, 4, 'the throwing call never reached fetch');
+      } finally { restoreFetch(); R.throttle.pending = false; R.throttle.backoffMs = savedBackoff; }
+    });
+    T.it('call() honours the response reader kind and records stats / capture log entries', async () => {
+      C.reset();
+      stubFetch(() => ({ body: G.encodeResponse('newkey', { kind: 's' }) }));
+      try {
+        const r = await R.call(SESSION, 'reauthenticate', [G.STRING_SIG, 'I'], ['NONCE', 1234567], { kind: 's' });
+        eq(r.ok, true); eq(r.value, 'newkey');
+        eq(R.stats.lastMethod, 'reauthenticate'); eq(R.stats.lastStatus, 200);
+        const e = C.state.log[C.state.log.length - 1];
+        eq(e.kind, 'rpc-out'); eq(e.method, 'reauthenticate'); eq(e.status, 200); eq(e.ok, true);
+      } finally { restoreFetch(); }
+    });
+  });
+
+  // ================================================================================================
+  T.describe('hook-main.js + content.js in this page (integration)', () => {
+    T.it('the hook answers a ping and content.js records hooked=true', async () => {
+      C.reset();
+      eq(C.state.hooked, false);
+      window.postMessage({ source: 'cma-content', type: 'ping' }, '/');
+      await sleep(80);
+      eq(C.state.hooked, true);
+      ok(C.state.log.some((e) => e.kind === 'hook'));
+    });
+    T.it('a real XMLHttpRequest to /cronometer/app is relayed with headers, body and status', async () => {
+      C.reset();
+      const body = writer().call('getDayInfo', [G.STRING_SIG, S.DAY, 'I'], ['XHRNONCE', FX.day(9, 9, 2026), 1234567]);
+      const done = C.waitFor((ev) => ev.method === 'getDayInfo', { timeout: 4000, label: 'relayed getDayInfo' });
+      const x = new XMLHttpRequest();
+      x.open('POST', '/cronometer/app');
+      x.setRequestHeader('Content-Type', 'text/x-gwt-rpc; charset=utf-8');
+      x.setRequestHeader('X-GWT-Permutation', PERM);
+      x.send(body);
+      const ev = await done;
+      eq(ev.method, 'getDayInfo');
+      eq(C.state.nonce, 'XHRNONCE');
+      eq(C.state.userId, 1234567);
+      eq(C.state.permutation, PERM);
+      eq(C.state.policyHash, 'POLICY');
+      eq(C.state.moduleBase, MB);
+      deepEq(C.state.diaryDate, { day: 9, month: 9, year: 2026 });
+      eq(C.state.rpcCount, 1);
+      const e = C.state.log.filter((l) => l.kind === 'rpc').pop();
+      eq(e.method, 'getDayInfo');
+      eq(typeof e.status, 'number');
+    });
+    T.it('requests to other URLs are not relayed and non-string bodies relay as null', async () => {
+      C.reset();
+      const x = new XMLHttpRequest();
+      x.open('GET', 'lib.js');
+      await new Promise((resolve) => { x.addEventListener('loadend', resolve); x.send(); });
+      await sleep(50);
+      eq(C.state.rpcCount, 0); eq(C.state.restCount, 0);
+      const got = C.waitFor((ev) => ev.type === 'rest', { timeout: 4000 });
+      const y = new XMLHttpRequest();
+      y.open('POST', '/api/v3/user/424242/photo/upload');
+      y.send(new Blob(['x']));
+      const ev = await got;
+      ok(/\/api\/v3\/user\/424242\/photo\/upload$/.test(ev.path), ev.path);   // file: URLs keep the drive prefix
+      eq(C.state.userId, 424242);
+      eq(C.state.log.filter((l) => l.kind === 'rest').length, 1);
+    });
+    T.it('the hook is idempotent and never exposes helpers on window', () => {
+      eq(window.__cmaHookInstalled, true);
+      eq(typeof window.cm, 'undefined');
+      eq(typeof XMLHttpRequest.prototype.open, 'function');
+    });
+  });
+
+  CMA.test.run({ timeoutMs: 8000 });
+})();
+</script>
+</body>
+</html>
