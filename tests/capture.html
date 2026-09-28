@@ -21,7 +21,10 @@
   const eq = T.eq, ok = T.ok, deepEq = T.deepEq;
   const MB = FX.moduleBase;
   const APP_URL = MB + 'app';
-  const PERM = '0A1C16E148676A90CBB128E4829A562F';
+  // The build the bundled decoder (src/lib/gwt-registry.js) was generated from: the tests that expect the
+  // bundled registry to match the live build use it, so they keep passing after the registry is regenerated for a
+  // new Cronometer build (README 'Maintenance after a Cronometer deploy').
+  const PERM = String(CMA.registry.permutation).toUpperCase();
   const SESSION = { moduleBase: MB, permutation: PERM, policyHash: 'POLICY', nonce: 'NONCE', userId: 1234567 };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   function writer(policy) { return new G.Writer(MB, policy || 'POLICY'); }

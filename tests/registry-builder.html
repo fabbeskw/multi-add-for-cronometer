@@ -11,7 +11,9 @@
   'use strict';
   const T = CMA.test, RB = CMA.registryBuilder, REG = CMA.registry;
   const eq = T.eq, ok = T.ok, deepEq = T.deepEq;
-  const PERM = '0A1C16E148676A90CBB128E4829A562F';
+  // The build tools/bundle/all.js and the bundled registry come from (they are regenerated together after a
+  // Cronometer deploy: python tools/fetch_bundle.py && python tools/gen_registry.py tools/bundle/all.js).
+  const PERM = String(REG.permutation).toUpperCase();
   const MB = 'https://cronometer.com/cronometer/';
   const timing = { buildMs: null, calibrationMs: null, phases: [], clock: 'performance.now()' };
 
@@ -343,7 +345,9 @@
       }
       let built = null, warnings = [], progress = [];
       T.it('build() finishes and reports progress', async () => {
-        eq(text.length, 5722089, 'bundle size of build ' + PERM);
+        ok(text.length > 1000000, 'bundle size of build ' + PERM + ': ' + text.length);
+        const sn = /\$strongName\s*=\s*'([0-9A-F]{32})'/.exec(text.slice(0, 200000));
+        ok(!sn || sn[1] === PERM, 'tools/bundle/all.js is build ' + (sn && sn[1]) + ' but the bundled registry is ' + PERM + ': regenerate both');
         // clock calibration: a fixed busy loop (~300 ms of real CPU on this machine) proves the clock the
         // build time is measured with counts real time even under the runner's --virtual-time-budget
         const c0 = performance.now();
@@ -424,7 +428,7 @@
         const head = text.slice(0, 200000);   // enough for $strongName, not for a table: expect a clear error
         let warned = [];
         await T.throws(() => RB.build(head, { permutation: 'F'.repeat(32), onWarning: (w) => warned.push(w) }), /cannot locate|no serializer table/);
-        ok(warned.some((w) => /declares \$strongName 0A1C16E148676A90CBB128E4829A562F but the caller expected FFFFFFFF/.test(w)), warned.join(' | '));
+        ok(warned.some((w) => w.indexOf('declares $strongName ' + PERM + ' but the caller expected FFFFFFFF') >= 0), warned.join(' | '));
         await T.throws(() => RB.build('', {}), /needs the bundle text/);
         await T.throws(() => RB.build('function a(){}', {}), /cannot locate the serialization stream reader/);
       });

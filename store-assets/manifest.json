@@ -2,7 +2,10 @@
   {
     "file": "01-input.png",
     "shot": "input",
-    "capturedAt": "2026-09-28T11:05:31+0100",
+    "set": "store",
+    "data": "sample list on an empty day of the diary (2026-10-05, +7 days)",
+    "diaryDay": "2026-10-05",
+    "capturedAt": "2026-09-28T17:11:34Z",
     "blurred": [
       "#navbarDropdown",
       ".navbar-account",
@@ -11,19 +14,27 @@
       ".energy-summary-totals",
       ".energy-summary-totals-container",
       ".nutrient-targets-container",
+      ".water-tracking",
       ".water-tracking-target-bar",
-      "[data-cma-blur] (account name / e-mail text: 1 element(s))"
+      ".daily-target-editor-title ~ *",
+      "[data-cma-blur] (account name / e-mail text: 2 element(s))"
     ],
     "mode": "live",
     "size": [
       1280,
       800
-    ]
+    ],
+    "extensionVersion": "0.3.1",
+    "chrome": "Chrome/150.0.7871.115",
+    "undo": "Undo: 4 removed, 0 failed"
   },
   {
     "file": "02-preview.png",
     "shot": "preview",
-    "capturedAt": "2026-09-28T11:05:34+0100",
+    "set": "store",
+    "data": "sample list on an empty day of the diary (2026-10-05, +7 days)",
+    "diaryDay": "2026-10-05",
+    "capturedAt": "2026-09-28T17:11:37Z",
     "blurred": [
       "#navbarDropdown",
       ".navbar-account",
@@ -32,40 +43,27 @@
       ".energy-summary-totals",
       ".energy-summary-totals-container",
       ".nutrient-targets-container",
+      ".water-tracking",
       ".water-tracking-target-bar",
-      "[data-cma-blur] (account name / e-mail text: 1 element(s))"
+      ".daily-target-editor-title ~ *",
+      "[data-cma-blur] (account name / e-mail text: 2 element(s))"
     ],
     "mode": "live",
     "size": [
       1280,
       800
-    ]
-  },
-  {
-    "file": "03-results.png",
-    "shot": "results",
-    "capturedAt": "2026-09-28T11:05:39+0100",
-    "blurred": [
-      "#navbarDropdown",
-      ".navbar-account",
-      ".navbar-dropdown-container",
-      ".energy-summary",
-      ".energy-summary-totals",
-      ".energy-summary-totals-container",
-      ".nutrient-targets-container",
-      ".water-tracking-target-bar",
-      "[data-cma-blur] (account name / e-mail text: 1 element(s))"
     ],
-    "mode": "live",
-    "size": [
-      1280,
-      800
-    ]
+    "extensionVersion": "0.3.1",
+    "chrome": "Chrome/150.0.7871.115",
+    "undo": "Undo: 4 removed, 0 failed"
   },
   {
-    "file": "04-diary.png",
+    "file": "03-diary.png",
     "shot": "diary",
-    "capturedAt": "2026-09-28T11:05:40+0100",
+    "set": "store",
+    "data": "sample list on an empty day of the diary (2026-10-05, +7 days)",
+    "diaryDay": "2026-10-05",
+    "capturedAt": "2026-09-28T17:11:44Z",
     "blurred": [
       "#navbarDropdown",
       ".navbar-account",
@@ -74,19 +72,27 @@
       ".energy-summary-totals",
       ".energy-summary-totals-container",
       ".nutrient-targets-container",
+      ".water-tracking",
       ".water-tracking-target-bar",
-      "[data-cma-blur] (account name / e-mail text: 1 element(s))"
+      ".daily-target-editor-title ~ *",
+      "[data-cma-blur] (account name / e-mail text: 2 element(s))"
     ],
     "mode": "live",
     "size": [
       1280,
       800
-    ]
+    ],
+    "extensionVersion": "0.3.1",
+    "chrome": "Chrome/150.0.7871.115",
+    "undo": "Undo: 4 removed, 0 failed"
   },
   {
-    "file": "05-diagnostics.png",
-    "shot": "diagnostics",
-    "capturedAt": "2026-09-28T11:05:41+0100",
+    "file": "04-tdee-overview.png",
+    "shot": "tdee-overview",
+    "set": "store",
+    "data": "synthetic demo",
+    "diaryDay": "2026-10-05",
+    "capturedAt": "2026-09-28T17:11:46Z",
     "blurred": [
       "#navbarDropdown",
       ".navbar-account",
@@ -95,14 +101,47 @@
       ".energy-summary-totals",
       ".energy-summary-totals-container",
       ".nutrient-targets-container",
+      ".water-tracking",
       ".water-tracking-target-bar",
-      "[data-cma-blur] (account name / e-mail text: 1 element(s))",
-      "diagnostics: account id (11 occurrence(s))"
+      ".daily-target-editor-title ~ *",
+      "[data-cma-blur] (account name / e-mail text: 2 element(s))"
     ],
     "mode": "live",
     "size": [
       1280,
       800
-    ]
+    ],
+    "extensionVersion": "0.3.1",
+    "chrome": "Chrome/150.0.7871.115",
+    "undo": "Undo: 4 removed, 0 failed"
+  },
+  {
+    "file": "05-tdee-checkin.png",
+    "shot": "tdee-checkin",
+    "set": "store",
+    "data": "synthetic demo",
+    "diaryDay": "2026-10-05",
+    "capturedAt": "2026-09-28T17:11:49Z",
+    "blurred": [
+      "#navbarDropdown",
+      ".navbar-account",
+      ".navbar-dropdown-container",
+      ".energy-summary",
+      ".energy-summary-totals",
+      ".energy-summary-totals-container",
+      ".nutrient-targets-container",
+      ".water-tracking",
+      ".water-tracking-target-bar",
+      ".daily-target-editor-title ~ *",
+      "[data-cma-blur] (account name / e-mail text: 2 element(s))"
+    ],
+    "mode": "live",
+    "size": [
+      1280,
+      800
+    ],
+    "extensionVersion": "0.3.1",
+    "chrome": "Chrome/150.0.7871.115",
+    "undo": "Undo: 4 removed, 0 failed"
   }
 ]
