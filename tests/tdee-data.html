@@ -1208,6 +1208,29 @@
       await switchTo(UID_B);
       eq(D.status().enabled, true); eq(D.getSettings().sex, 'male');
     });
+    T.it("A's Delete still on its way when the tab switches to B: only A's keys go, B's records load and stay intact", async () => {
+      await setUpA();
+      await switchTo(UID_B);
+      await D.enable(); await waitIdle();
+      await D.saveSettings({ sex: 'male' });
+      await D.recordCheckin({ date: '2026-09-28', accepted: true, targetKcal: 1800 });
+      await switchTo(UID);
+      const b0 = snap(UID_B);
+      const p = D.disable({ forget: true });            // its removal is still on its way ...
+      fakeCap.state.userId = UID_B;                      // ... when the tab switches to B
+      EV.emit('state', fakeCap.state);
+      await p;
+      for (let i = 0; i < 500 && !D.status().ready; i++) await ticks(1);
+      await waitIdle();
+      deepEq(keysOf(UID), [], "A's keys removed");
+      eq(snap(UID_B), b0, "B's keys untouched");
+      ok(D.status().ready, 'B loaded');
+      eq(D.status().enabled, true, "B's consent is still known (A's Delete did not drop B's memory copy)");
+      eq(D.getSettings().sex, 'male'); eq(D.checkins().length, 1); ok(D.dayList().length > 20);
+      await D.setOverride('2026-09-05', true);
+      eq(store[kA('cmaTdeeSettings', UID_B)].sex, 'male', "a later write of B keeps B's settings");
+      eq(store[kA('cmaTdeeCheckins', UID_B)].checkins.length, 1);
+    });
     T.it("legacy migration: A's un-suffixed records move to A's keys when A loads; the legacy keys go only after the copy", async () => {
       await setUpA();
       toLegacy(UID);

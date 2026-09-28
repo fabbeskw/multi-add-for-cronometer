@@ -1494,7 +1494,9 @@ window.CMA = window.CMA || {};
       // keys (keyed or legacy) are never touched. The removal comes back as this tab's own change - for the keys that
       // exist (Chrome reports no change for a key that was not there, and a stale expectation would hide another
       // tab's next write to it)
-      const mine = keysFor(mem.userId);
+      const uid = mem.userId;
+      const wasLoaded = mem.loaded;
+      const mine = keysFor(uid);
       const all = mine.concat(ownLegacyKeys());
       const present = mine.filter(function (k) { return known[k] !== 'null'; });
       present.forEach(function (k) { expectEcho(k, 'null'); });
@@ -1510,10 +1512,9 @@ window.CMA = window.CMA || {};
         }
       }
       if (removed) all.forEach(function (k) { const p = parseKey(k); if (p.uid === null) noteLegacy(k, null); });
-      const uid = mem.userId;
-      const wasLoaded = mem.loaded;
-      resetMemory(uid);
-      mem.loaded = wasLoaded || !!uid;
+      // the memory copy dropped is the DELETED account's: an account switch during the removal loads the other
+      // account's records, which this must never reset
+      if (mem.userId === uid) { resetMemory(uid); mem.loaded = wasLoaded || !!uid; }
       log('TDEE data deleted');
     } else if (forget) {
       resetMemory(null);                              // no account known: nothing of anyone's is removed

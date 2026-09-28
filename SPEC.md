@@ -1269,7 +1269,8 @@ status() → {enabled, syncing, phase ('idle'|'first-day'|'prefs'|'biometrics'|'
 enable() → Promise<status>        the user's consent for THIS account (stored in cmaTdeeSync:<userId>), then a full sync
 disable({forget}) → Promise<status>   stops syncing; forget:true (Delete TDEE data) removes THIS account's
                                   cmaTdee*:<userId> keys (and its own legacy records, if still there) and the memory
-                                  copy - never another account's keys, keyed or legacy
+                                  copy - never another account's keys, keyed or legacy (nor, after an
+                                  account switch during the removal, the new account's memory copy)
 sync({full, force}) → Promise<status>   single flight (12.4)
 dayList() → [{date, intakeKcal, weightKg, burnedKcal, burnedParts {bmr, activity, exercise, tef}|null, complete,
             loggedFood, excluded, excludedReason 'user'|'partial'|'incomplete'|null, partialSuspect,
@@ -1795,7 +1796,7 @@ change to rpc.js / tdee-data.js plus a ROW_LAYOUT_VERSION bump.
   lead updates them after merging.
 * Tests: tests/tdee-data.html *per-account storage* (accounts A and B over one fake storage: A's settings, check-in,
   override and days intact after B enabled and synced in the same tab; each account's Delete leaves the other's keys
-  untouched; legacy migration, another account's legacy left alone, a keyed slot never overwritten, a failed copy
+  untouched, also when the tab switches to B while A's Delete is still on its way; legacy migration, another account's legacy left alone, a keyed slot never overwritten, a failed copy
   keeping the legacy value; otherAccountsStored as a count only) and *other tabs* (a third tab of another account
   enabling, syncing, saving, disabling and deleting never affects the first; two tabs of one account migrating at
   once); the existing same-account two-tab tests run on the keyed names.
