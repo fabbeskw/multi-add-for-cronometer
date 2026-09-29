@@ -6,10 +6,10 @@ the store shows them verbatim. [SUBMISSION-CHECKLIST.md](SUBMISSION-CHECKLIST.md
 says which block goes into which dashboard field and which steps only the account owner can do.
 
 * Package: `python tools/build_zip.py` → `dist/multi-add-for-cronometer-<version>.zip` (the version is the one in
-  `manifest.json`; this listing is written for **0.3.1**). Name, summary, version, icons and permissions come from
+  `manifest.json`; this listing is written for **0.3.2**). Name, summary, version, icons and permissions come from
   the manifest in the zip and cannot be edited in the dashboard: changing them needs a version bump and a new zip.
 * Repository-derived URLs are already filled in (`python tools/set_repo_url.py https://github.com/fabbeskw/multi-add-for-cronometer --check`
-  exits 0). `<item id>` is only known after the review.
+  exits 0). The item id is `eggnohhalgffodifhpdpedeofilfffhd` (approved and published, Unlisted, 2026-09-29).
 * Character counts in brackets were measured on the text inside the block. The store documents 132 characters for
   the summary; the limits of the *single purpose*, *permission justification* and *test instructions* fields are
   not documented (about 1,000 characters is commonly reported), so every block for those fields is kept under 1,000.
@@ -67,6 +67,7 @@ WHAT THE LIST UNDERSTANDS
 - grams, kg, oz, lb, ml, l, cups, tbsp, tsp, slices, pieces, servings, large / medium / small and each food's own measures
 - fractions and decimal commas (1 1/2 cups, ½ cup, 1,5 cups)
 - multipliers (2 x 100g yoghurt, eggs x2)
+- calories (300cal almonds, almonds 300 kcal, 1250kJ almonds): as much of the food as has that many calories, worked out from the food's own calorie figure
 - group headers (## Dinner, Dinner:) and per-line tags (@lunch)
 - two foods on one line (oats 40 g, milk 200 ml); blank lines and comments are ignored
 
@@ -136,7 +137,10 @@ the capture date and what was blurred are recorded in `store-assets/manifest.jso
 explained in `store-assets/README.md`; `python tools/screenshots.py` renders the set from the real extension. Before
 uploading, open every PNG and check that no name, e-mail, account number or real health figure is visible. The
 store's rule is that screenshots "demonstrate the actual user experience" of the current version: all five show the
-real panel of 0.3.1, and the TDEE shots use demo data because the tab shows health data.
+real panel, and the TDEE shots use demo data because the tab shows health data. The set was captured live with 0.3.1
+on 28 September 2026 (`store-assets/manifest.json`) and is reused for 0.3.2, which changes none of these five views
+(the cheat-sheet in shot 1 is collapsed, and the preview footer names no search scope while *Search only my custom
+foods* is off).
 
 ### Additional fields
 
@@ -287,8 +291,7 @@ trader / non-trader declaration, Submit) and the field-by-field order are in
   pending for more than three weeks.
 * **After approval** the item publishes automatically unless deferred publishing was chosen; a deferred approval
   must be published within **30 days** or it goes back to draft.
-* **Item page** after publication: `https://chromewebstore.google.com/detail/<item id>`. Put it in the README
-  *Install* section (replace `<Chrome Web Store URL>` and drop *coming soon*).
+* **Item page**: <https://chromewebstore.google.com/detail/multi-add-for-cronometer/eggnohhalgffodifhpdpedeofilfffhd> (in the README *Install* section since 0.3.2).
 
 ### Publishing an update
 

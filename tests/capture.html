@@ -712,6 +712,43 @@
       stubFetch(() => ({ body: G.encodeResponse(null) }));
       try { const e = await T.throws(() => R.getFood(SESSION, 1), /no food/); eq(e.kind, 'notfound'); } finally { restoreFetch(); }
     });
+    T.it('energyKcalOf reads nutrient 208 from a getFood reply decoded by gwt-stream (0.3.2); foodTypeOf reads FoodType', async () => {
+      const food = FX.food({ id: 7, name: 'Almonds', defaultMeasureId: 3, type: 2,
+        measures: [FX.measure({ foodId: 7, id: 3, name: 'oz', type: 0, grams: 28.3495 })], nutrients: { 203: 21.15, 208: 579, 268: 2423 } });
+      stubFetch(() => ({ body: G.encodeResponse(food) }));
+      try {
+        const f = await R.getFood(SESSION, 7);
+        ok(f.f[G.F.FOOD.NUTRIENTS].f[G.F.NUTRIENT_MAP.MAP] instanceof Map, 'decoded, not the fixture graph');
+        eq(R.energyKcalOf(f), 579, 'nutrient 208, never 268 (kJ)');
+        eq(R.foodTypeOf(f), 'MEAL');
+        eq(calls.length, 1, 'no request beyond getFood');
+      } finally { restoreFetch(); }
+    });
+    T.it('energyKcalOf: ALL / null filter, a PRIMARY filter excluding a non-PRIMARY 208, missing, 0, NaN, not a Food', () => {
+      const E = (o) => R.energyKcalOf(FX.food(Object.assign({ id: 1 }, o)));
+      eq(E({ nutrients: { 208: 579 }, nutrientFilter: 0 }), 579, 'ALL');
+      eq(E({ nutrients: { 208: 579 } }), 579, 'null filter = ALL');
+      eq(E({ nutrients: { 208: { amount: 579, type: 2 } }, nutrientFilter: 0 }), 579, 'ALL counts a CALCULATED value');
+      eq(E({ nutrients: { 208: { amount: 579, type: 2 } }, nutrientFilter: 1 }), null, 'PRIMARY filter drops a CALCULATED 208');
+      eq(E({ nutrients: { 208: { amount: 579, type: null } }, nutrientFilter: 1 }), null, 'PRIMARY filter drops an untyped 208');
+      eq(E({ nutrients: { 208: { amount: 579, type: 0 } }, nutrientFilter: 1 }), 579, 'PRIMARY filter keeps a PRIMARY 208');
+      eq(E({ nutrients: { 203: 21 } }), null, 'missing 208');
+      eq(E({ nutrients: { 268: 2423 } }), null, 'kJ (268) is never read');
+      eq(E({}), null, 'no NutrientMap');
+      eq(E({ nutrients: { 208: 0 } }), 0, '0 stays 0 (the caller refuses it)');
+      const nan = FX.food({ id: 1, nutrients: { 208: 1 } });
+      const m = nan.f[G.F.FOOD.NUTRIENTS].f[G.F.NUTRIENT_MAP.MAP];
+      for (const v of m.values()) v.f[G.F.NUTRIENT.AMOUNT] = NaN;
+      eq(R.energyKcalOf(nan), null, 'NaN');
+      // the fixture graph (keys {i: 208}), a plain number-keyed Map and a plain object all work
+      eq(R.energyKcalOf(FX.food({ id: 1, nutrients: { 208: 52 } })), 52, '{i: n} keys');
+      const plain = FX.food({ id: 1 });
+      plain.f[G.F.FOOD.NUTRIENTS] = { $t: S.NUTRIENT_MAP, f: [null, { 208: FX.nutrient(88, 208, 0) }] };
+      eq(R.energyKcalOf(plain), 88, 'plain object map');
+      eq(R.energyKcalOf(null), null); eq(R.energyKcalOf({ $t: S.MEASURE, f: [] }), null, 'not a Food');
+      eq(R.energyKcalOf({ $t: S.FOOD, f: [] }), null, 'a Food without field 12');
+      eq(R.foodTypeOf(FX.food({ id: 1, type: 1 })), 'RECIPE'); eq(R.foodTypeOf(FX.food({ id: 1 })), null); eq(R.foodTypeOf(null), null);
+    });
     T.it('searchFoods: exact URL, headers, hit mapping, retired filtering, 401 and 429 handling', async () => {
       const hits = [
         { name: 'Chicken Breast, Roasted', id: 464674, score: 915, source: 'NCCDB', measureId: 1072101, measureDisplayName: '1 breast - 172g', translationId: 0, type: 'FOOD', retired: false },
@@ -723,7 +760,8 @@
       try {
         const out = await R.searchFoods(SESSION, 'chicken breast');
         const c = lastCall();
-        // byte-identical to the app's request: `o2k` turns %20 into '+', and `SIf` sends no Accept header on a GET
+        // byte-identical to the app's request (the Add Food dialog's All tab): `B3k` turns %20 into '+', and `PJf`
+        // sends no Accept header on a GET (build FB395E8B)
         eq(c.url, 'https://cronometer.com/api/v3/user/1234567/food-search/string?query=CHICKEN+BREAST&maxResults=50&sources=All&categoryId=0&selectedTab=ALL&type=All');
         eq(c.init.method, 'GET'); eq(c.init.credentials, 'same-origin'); eq(c.init.headers, undefined);
         eq(R.encodeQueryValue('A&B C/D+E'), 'A%26B+C%2FD%2BE');
@@ -747,6 +785,49 @@
       stubFetch(() => ({ status: 200, body: 'not json' }));
       try { await T.throws(() => R.searchFoods(SESSION, 'egg'), /invalid JSON/); } finally { restoreFetch(); }
       await T.throws(() => R.searchFoods({ moduleBase: MB }, 'egg'), /userId/);
+    });
+    T.it('searchFoods customOnly (0.3.2): the Custom tab URL (only selectedTab differs), a defensive source filter that keeps a null source, the drop count logged without names', async () => {
+      const ALL = 'https://cronometer.com/api/v3/user/1234567/food-search/string?query=MOZZARELLA+CHEESE&maxResults=50&sources=All&categoryId=0&selectedTab=ALL&type=All';
+      eq(R.searchUrl(SESSION, 'mozzarella cheese', 50), ALL, 'default URL unchanged');
+      eq(R.searchUrl(SESSION, 'mozzarella cheese', 50, false), ALL);
+      eq(R.searchUrl(SESSION, 'mozzarella cheese', 50, 'yes'), ALL, 'only an explicit true');
+      eq(R.searchUrl(SESSION, 'mozzarella cheese', 50, true), ALL.replace('selectedTab=ALL', 'selectedTab=CUSTOM'));
+      const hits = [
+        { name: 'Mozzarella Cheese, Whole Milk', id: 11, score: 900, source: 'NCCDB', measureId: 1, measureDisplayName: '1 oz - 28g', type: 'FOOD' },
+        { name: 'Grandmas Mozzarella Bake', id: 12, score: 800, source: 'Custom', measureId: 2, measureDisplayName: '1 serving - 250g', type: 'RECIPE' },
+        { name: 'Mozzarella Sticks Homemade', id: 13, score: 700, measureId: 3, type: 'FOOD' },                        // no source
+        { name: 'Mozzarella, Shredded', id: 14, score: 600, source: 'FDCBranded', measureId: 4, type: 'FOOD' },
+        { name: 'My Mozzarella Salad', id: 15, score: 500, source: 'Custom', measureId: 5, type: 'MEAL' },
+        { name: 'Old Custom Mozzarella', id: 16, score: 400, source: 'Custom', measureId: 6, type: 'FOOD', retired: true },
+      ];
+      stubFetch(() => ({ body: JSON.stringify(hits) }));
+      try {
+        C.reset();
+        const out = await R.searchFoods(SESSION, 'mozzarella cheese', { customOnly: true });
+        eq(lastCall().url, ALL.replace('selectedTab=ALL', 'selectedTab=CUSTOM'));
+        eq(lastCall().init.headers, undefined);
+        deepEq(out.map((h) => [h.id, h.source, h.type]), [[12, 'Custom', 'RECIPE'], [13, null, 'FOOD'], [15, 'Custom', 'MEAL']]);
+        const warn = C.state.log.filter((e) => e.kind === 'warn');
+        eq(warn.length, 1, 'one note per search');
+        eq(warn[0].dropped, 2); eq(warn[0].path, '/food-search/string');
+        ok(/dropped 2 hit\(s\)/.test(warn[0].note), warn[0].note);
+        const rest = C.state.log.filter((e) => e.kind === 'rest-out').pop();
+        eq(rest.customOnly, true); eq(rest.queryLength, 'mozzarella cheese'.length);
+        ok(!/mozzarella/i.test(JSON.stringify(C.state.log)), 'no query or food name in the capture log: ' + JSON.stringify(C.state.log));
+        // nothing dropped → no note; without customOnly every (non-retired) hit is returned and nothing is noted
+        C.reset();
+        eq((await R.searchFoods(SESSION, 'x', { customOnly: true, includeRetired: true })).length, 4, 'a retired custom item stays with includeRetired');
+        C.reset();
+        const plain = await R.searchFoods(SESSION, 'mozzarella cheese');
+        eq(lastCall().url, ALL, 'default request byte-identical');
+        eq(plain.length, 5);
+        eq(C.state.log.filter((e) => e.kind === 'warn').length, 0);
+        eq(C.state.log.filter((e) => e.kind === 'rest-out').pop().customOnly, undefined, 'the default log line is unchanged');
+        stubFetch(() => ({ body: JSON.stringify(hits.filter((h) => h.source === 'Custom' || h.source == null)) }));
+        C.reset();
+        eq((await R.searchFoods(SESSION, 'mozzarella', { customOnly: true })).length, 3);
+        eq(C.state.log.filter((e) => e.kind === 'warn').length, 0, 'a scoped answer drops nothing');
+      } finally { restoreFetch(); }
     });
     T.it('a changed X-Cronometer-Throttle-Version backs off once before the next request', async () => {
       R.throttle.version = null; R.throttle.pending = false; R.throttle.backoffs = 0;

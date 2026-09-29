@@ -11,6 +11,8 @@
  *
  *   plan  : array of rows, or {rows:[...]} (SPEC §6 row shape):
  *           row.hit.name (fallback row.item.name)   → search query + result-row match (row.hit.source disambiguates)
+ *           row.customOnly                          → only 'Custom Food' / 'Custom Recipe' / 'Custom Meal' result rows
+ *                                                       are accepted (the dialog's tabs are never clicked)
  *           row.pick.measure {name, grams, amount, ml, type} → measure dropdown item (label grammar below)
  *           row.pick.quantity / row.pick.grams        → amount box (grams keep the total right when the
  *                                                       requested measure is not offered and row.measures is known)
@@ -246,6 +248,8 @@ window.CMA = window.CMA || {};
     if (src === 'usdaweb') return cell === 'upc';                                 // U9i: ordinal 10 → 'UPC'
     return cell.indexOf(src) >= 0 || src.indexOf(cell) >= 0;
   }
+  /** What a custom-only row's result must come from: sourceMatches(cell, CUSTOM_SOURCE) is true only for 'Custom …'. */
+  const CUSTOM_SOURCE = Object.freeze({ source: 'Custom' });
 
   function dialogs(doc) { return D().qa(S.DIALOG, doc); }
   function dialogTitle(dlg) { return D().textOf(dlg.querySelector(S.DIALOG_TITLE)); }
@@ -432,20 +436,27 @@ window.CMA = window.CMA || {};
      * Pick the result row for the plan's hit: cell 0 must match the name (exact → case-insensitive →
      * startsWith); among several equally named rows the one whose source cell (cell 1) agrees with
      * row.hit.source wins. No name match: only a single-row result is accepted; otherwise the row fails —
-     * the first row may be a different food with different measures or nutrition.
+     * the first row may be a different food with different measures or nutrition. A custom-only row
+     * (row.customOnly, 0.3.2) considers only the rows whose source cell names a custom item; the dialog's Custom
+     * tab is never clicked, because the app remembers the last selected tab for the user's next manual search.
      */
     function pickRow(trs, row) {
       const cellText = (tr, i) => dom.textOf(tr.cells && tr.cells[i] ? tr.cells[i] : tr.querySelectorAll('td')[i]);
       const name = rowName(row);
       const want = norm(name);
       const wantCi = want.toLowerCase();
+      const customOnly = !!(row && row.customOnly === true);
+      const pool = customOnly ? trs.filter((tr) => sourceMatches(cellText(tr, 1), CUSTOM_SOURCE) === true) : trs;
+      if (customOnly && !pool.length) {
+        throw new Error('no custom food row matches "' + want + '" (' + trs.length + ' result row(s), none of them a custom food, recipe or meal)');
+      }
       const tiers = [
         ['exact', (t) => t === want],
         ['case-insensitive', (t) => t.toLowerCase() === wantCi],
         ['startsWith', (t) => t.toLowerCase().startsWith(wantCi)],
       ];
       for (const [how, test] of tiers) {
-        const matches = trs.filter((tr) => test(cellText(tr, 0)));
+        const matches = pool.filter((tr) => test(cellText(tr, 0)));
         if (!matches.length) continue;
         let tr = matches[0];
         let note = how;
@@ -458,9 +469,9 @@ window.CMA = window.CMA || {};
         }
         return { tr, how: note, text: cellText(tr, 0), warn: matches.length > 1 && note.indexOf('first of') >= 0 };
       }
-      if (trs.length === 1) return { tr: trs[0], how: 'only result', text: cellText(trs[0], 0), warn: true };
-      const names = trs.slice(0, 5).map((tr) => '"' + cellText(tr, 0) + '"').join(', ');
-      throw new Error('no result row matches "' + want + '" (' + trs.length + ' rows: ' + names + (trs.length > 5 ? ', …' : '') + ')');
+      if (pool.length === 1) return { tr: pool[0], how: customOnly ? 'only custom result' : 'only result', text: cellText(pool[0], 0), warn: true };
+      const names = pool.slice(0, 5).map((tr) => '"' + cellText(tr, 0) + '"').join(', ');
+      throw new Error((customOnly ? 'no custom food row matches "' : 'no result row matches "') + want + '" (' + pool.length + (customOnly ? ' custom' : '') + ' rows: ' + names + (pool.length > 5 ? ', …' : '') + ')');
     }
 
     async function selectRow(dlg, tr) {
@@ -587,6 +598,8 @@ window.CMA = window.CMA || {};
       const input = sel && sel.querySelector(S.AMOUNT_INPUT);
       if (!input) throw new Error('amount input missing');
       const text = formatQuantity(quantity);
+      // A tiny amount rounds to '0' at 3 decimals (0.0004 × a 'full recipe'): never type it, the app would log it as is
+      if (!(Number(text) > 0)) throw new Error('amount ' + quantity + ' becomes "' + text + '" in the amount box (3 decimals); pick a smaller unit');
       // Measure FIRST, then amount: changing the measure can auto-flip 1↔100 (recipe §5).
       dom.setNativeValue(input, text, { change: true, keyup: true });
       if (input.value !== text) throw new Error('amount box rejected "' + text + '" (now "' + input.value + '")');
@@ -699,7 +712,7 @@ window.CMA = window.CMA || {};
           report('row', 'skipped: ' + msg, 'error');
           continue;
         }
-        report('row', 'start: ' + name + ' × ' + quantity + (measureName ? ' ' + measureName : '') + (groupName ? ' → ' + groupName : ''));
+        report('row', 'start: ' + name + ' × ' + quantity + (measureName ? ' ' + measureName : '') + (groupName ? ' → ' + groupName : '') + (row.customOnly === true ? ' (custom foods only)' : ''));
         // Every silent fallback of this row (group kept, measure converted, ambiguous result row, meal defaults…)
         // is collected here and reported with the outcome, so the panel never shows a plain green 'added' for it.
         const warnings = [];

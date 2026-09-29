@@ -1,6 +1,6 @@
 /* Multi-Add for Cronometer — input line parser (SPEC §5).
  *
- * CMA.parse.lines(text) → [{raw, line, name, qty, unit, group, groupFallback?, part?, error?}]
+ * CMA.parse.lines(text) → [{raw, line, name, qty, unit, group, groupFallback?, part?, customOnly?, error?}]
  *
  * Plain ES2020 classic script; attaches to window.CMA.parse. No DOM, no network.
  * Also owns the unit synonym table (CMA.parse.normalizeUnit) because "is this
@@ -16,6 +16,17 @@
  *  - Multipliers: `2 x 100g yoghurt`, `yoghurt 2 x 100g`, `vitamin c 500mg x2` → 200 g / 200 g / 1000 mg.
  *  - Two foods on one line separated by `,` / `;` and each carrying a quantity+unit (`oats 40 g, milk 200 ml`)
  *    are split into two items with the same `line` and `raw` (and `part` 0, 1, …).
+ *  - Search-scope flags (0.3.2): `/custom` (alias `/c`) searches only the user's own custom foods / recipes / meals,
+ *    `/all` everything; a whole whitespace-delimited token at the start or end of a line, in any order with an
+ *    `@group` tag (`cheese /custom @lunch`). On a header line (`## Dinner /custom`, `Dinner /custom:`, `/custom ## Dinner`)
+ *    or a line that is only a flag (`/custom`, `## /all`) it applies to the lines below until the next header; a
+ *    line's own flag wins, and so does a split line segment's (`oats 40 g /custom, milk 200 ml`). A flag left inside
+ *    a name (`cheese /custom 30g`) fails the line. → item.customOnly true / false (absent without a flag).
+ *  - Energy amounts (0.3.2): `300cal almonds`, `almonds 300 kcal`, `1250kJ almonds`, `2 x 150cal bar` are ordinary
+ *    quantity+unit pairs whose unit is 'kcal' (cal, Cal, kcal, calorie(s), kilocalorie(s)) or 'kj' (kJ, kilojoule(s));
+ *    item.qty stays the typed number. `100 calorie pack almonds` therefore means 100 kcal of "pack almonds". Also
+ *    `300 kilo calories`, `300 k cal`, `300-cal`; an energy number's `1,250` is 1250 (a thousands comma, not the
+ *    decimal comma `1,5` is elsewhere), and `almonds 1 250 kJ` (a plain space inside the number) is an error.
  */
 window.CMA = window.CMA || {};
 (function () {
@@ -90,7 +101,14 @@ window.CMA = window.CMA || {};
     ['ear', ['ear', 'ears']],
     ['pod', ['pod', 'pods']],
     ['bunch', ['bunch', 'bunches']],
-    ['dozen', ['dozen', 'doz']]
+    ['dozen', ['dozen', 'doz']],
+    // Energy amounts (0.3.2, SPEC §5 / Appendix N): `300cal almonds` = enough almonds for 300 kcal. `cal` / `Cal` mean
+    // kcal, as on food labels. They are not measures: plan.js hands them to units.pickEnergy, which converts the target
+    // into the food's default measure. kJ keeps its own unit so the preview can show what was typed (÷ 4.1868 later).
+    // The two-word spellings win over `kilo` → kg (`300 kilo calories almonds` is 300 kcal, not 300 kg of "calories").
+    ['kcal', ['kcal', 'kcals', 'cal', 'cals', 'calorie', 'calories', 'kilocalorie', 'kilocalories', 'kilo calorie',
+      'kilo calories', 'kilo-calorie', 'kilo-calories', 'kilo cal', 'kilo cals', 'k cal', 'k cals', 'k-cal', 'k-cals']],
+    ['kj', ['kj', 'kilojoule', 'kilojoules', 'kilo joule', 'kilo joules', 'kilo-joule', 'kilo-joules']]
   ];
 
   /** synonym → canonical unit (lower-case keys, whitespace collapsed). */
@@ -104,6 +122,18 @@ window.CMA = window.CMA || {};
 
   /** Conversions the parser applies itself (SPEC §5 example `0.5 kg potatoes` → 500 g). */
   const PARSER_CONVERSIONS = { kg: ['g', 1000], mg: ['g', 0.001], l: ['ml', 1000] };
+
+  /** The energy units (0.3.2): the only ones a hyphen may join to the number (`300-cal almonds`). */
+  const ENERGY_UNITS = { kcal: true, kj: true };
+  // Every energy spelling as a whole word, longest first; a space inside one matches any run of spaces.
+  const ENERGY_WORD_SRC = '(?:' + ALIASES.kcal.concat(ALIASES.kj).sort((a, b) => b.length - a.length)
+    .map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+')).join('|') + ')(?![A-Za-z])';
+  // Digit groups of an energy number (`1,250 kJ`, `2,000 kcal`, `8 700 kJ` with a no-break or thin space): a
+  // thousands separator, not the decimal comma it would be anywhere else (`1,250 kJ` is never 1.25 kJ). Never `0,250`.
+  const ENERGY_THOUSANDS_RE = new RegExp('(?<![\\p{L}\\d.,])([1-9]\\d{0,2})((?:,\\d{3})+|(?:[\\u00A0\\u2009\\u202F]\\d{3})+)'
+    + '(?=(?:\\.\\d+)?\\s*-?' + ENERGY_WORD_SRC + ')', 'giu');
+  // The same with a plain space (`almonds 1 250 kJ`, `2 150cal bars`) is refused: 1250 kJ, or 2 × 150 kcal?
+  const ENERGY_SPACED_RE = new RegExp('(?<![\\p{L}\\d.,])([1-9]\\d{0,2})((?: \\d{3})+)(?=(?:\\.\\d+)?\\s*-?(' + ENERGY_WORD_SRC + '))', 'iu');
 
   /**
    * Normalise a unit token. Returns the canonical unit ('g', 'cup', 'fl oz', ...)
@@ -181,9 +211,14 @@ window.CMA = window.CMA || {};
   /**
    * Given the text right after a number, find a known unit at its start.
    * Returns {unit, consumed} (consumed = number of chars of `rest` used) or null.
-   * Tries the two-word candidate first (`fl oz`, `extra large`) then one word.
+   * Tries the two-word candidate first (`fl oz`, `extra large`) then one word. A hyphen glued to the number and
+   * the word is taken before an energy unit only (`300-cal almonds`, `100-calorie pack`); `2-3 cups` is unchanged.
    */
   function unitAt(rest) {
+    if (/^-(?=[A-Za-z])/.test(rest)) {
+      const e = unitAt(rest.slice(1));
+      return e && ENERGY_UNITS[e.unit] ? { unit: e.unit, consumed: e.consumed + 1 } : null;
+    }
     const m = UNIT_AFTER_RE.exec(rest);
     if (!m) return null;
     if (m[2]) {
@@ -217,8 +252,12 @@ window.CMA = window.CMA || {};
     return [Math.round(qty * c[1] * 1e6) / 1e6, c[0]];
   }
 
-  /** `1,5` → `1.5` when it is the only comma, or when every other comma is a list separator (`rice, 1,5 cups`). */
+  /**
+   * `1,5` → `1.5` when it is the only comma, or when every other comma is a list separator (`rice, 1,5 cups`).
+   * An energy number's thousands separators go first (`1,250 kJ` → `1250 kJ`; `300,5 kcal` stays a decimal comma).
+   */
   function decimalComma(line) {
+    line = line.replace(ENERGY_THOUSANDS_RE, (all, head, groups) => head + groups.replace(/\D/g, ''));
     const dc = /(\d),(\d)/.exec(line);
     if (!dc) return line;
     const rest = line.slice(0, dc.index) + line.slice(dc.index + dc[0].length);
@@ -338,6 +377,38 @@ window.CMA = window.CMA || {};
   const TAG_LEAD_RE = /^@([\p{L}\p{N}_-]+)\s*/u;
   const TAG_TRAIL_RE = /\s*@([\p{L}\p{N}_-]+)\s*$/u;
   const GROUP_LINE_RE = /^(#+)\s*(.*?)\s*$/u;
+  // Search-scope flags: a whole token only, so `1/2`, `salt/pepper`, `w/o`, `cheese/custom` and `//` never match.
+  // A trailing flag may sit right before a header's final ':' (`Dinner /custom:`); the ':' stays on the text.
+  const FLAG_LEAD_RE = /^\/(custom|c|all)(?:\s+|$)/i;
+  const FLAG_TRAIL_RE = /(?:^|\s)\/(custom|c|all)(:?)$/i;
+  // A flag token left inside a food name (`cheese /custom 30g`): the line is rejected instead of searching it.
+  const FLAG_INNER_RE = /(?:^|\s)(\/(?:custom|c|all))(?=\s|$)/i;
+
+  /**
+   * Strip the search-scope flags (and, with `tags`, one `@group` tag per end) from both ends of `text`, in any
+   * order: `cheese /custom @lunch`, `cheese @lunch /custom`, `/custom @lunch cheese`. A trailing tag wins over a
+   * leading one (as before the flags existed); of several flags the last one in reading order wins.
+   * Returns {text, customOnly (true | false | undefined), leadTag, trailTag (null when absent)}.
+   */
+  function stripMarks(text, tags) {
+    let body = String(text == null ? '' : text).trim();
+    let leadTag = null, trailTag = null, leadFlag, trailFlag, m;
+    for (;;) {
+      if (tags && leadTag === null && (m = TAG_LEAD_RE.exec(body))) { leadTag = m[1]; body = body.slice(m[0].length); continue; }
+      if ((m = FLAG_LEAD_RE.exec(body))) { leadFlag = m[1].toLowerCase() !== 'all'; body = body.slice(m[0].length); continue; }
+      break;
+    }
+    for (;;) {
+      if (tags && trailTag === null && (m = TAG_TRAIL_RE.exec(body))) { trailTag = m[1]; body = body.slice(0, m.index).trimEnd(); continue; }
+      if ((m = FLAG_TRAIL_RE.exec(body))) {
+        if (trailFlag === undefined) trailFlag = m[1].toLowerCase() !== 'all';    // the rightmost flag is stripped first
+        body = body.slice(0, m.index).trimEnd() + m[2];
+        continue;
+      }
+      break;
+    }
+    return { text: body, customOnly: trailFlag !== undefined ? trailFlag : leadFlag, leadTag, trailTag };
+  }
 
   /**
    * A single-`#` line switches the group only when its text looks like a group name: one word
@@ -358,47 +429,68 @@ window.CMA = window.CMA || {};
    * the current group for the following lines (no item emitted). `@lunch` at the start or end of a line
    * sets that line's group only. `line` is the 1-based line number. `groupFallback` lists the earlier
    * header groups (most recent first) so plan.js can fall back to the last *resolvable* header when the
-   * current one is not a real group (a `# note` mistaken for a header).
+   * current one is not a real group (a `# note` mistaken for a header). `/custom` (`/c`) / `/all` set
+   * `customOnly` true / false on every item of the line (a split line's segment may carry its own); on a header
+   * line, or on a line that is only a flag (`/custom`, `## /all`), they apply until the next header.
    */
   function lines(text) {
     const out = [];
     if (text == null) return out;
     const src = String(text).replace(/\r\n?/g, '\n').split('\n');
     const headers = [];                                   // header groups seen so far, most recent first
-    const pushHeader = (g) => { if (g && headers[0] !== g) headers.unshift(g); };
+    let headerFlag;                                       // the current header's scope flag (undefined = none)
+    const pushHeader = (g, flag) => { if (g && headers[0] !== g) headers.unshift(g); headerFlag = flag; };
     for (let i = 0; i < src.length; i++) {
       const raw = src[i];
-      const trimmed = raw.trim();
+      let trimmed = raw.trim();
       if (!trimmed) continue;
+      // `/custom ## Dinner`, `/c // note`: a flag in front of a header or a comment belongs to that line.
+      let leadFlag;
+      if (/^\/(?!\/)/.test(trimmed)) {
+        const pre = stripMarks(trimmed, false);
+        if (/^(?:#|\/\/)/.test(pre.text)) { trimmed = pre.text; leadFlag = pre.customOnly; }
+      }
       if (trimmed[0] === '#') {
         const g = GROUP_LINE_RE.exec(trimmed);
-        const gname = g ? g[2].replace(/^@/, '').replace(/:$/, '').trim() : '';
-        if (gname && (g[1].length >= 2 || looksLikeGroupName(gname))) pushHeader(gname);   // `## Dinner`, `# Lunch`
+        const hs = stripMarks(g ? g[2] : '', false);      // `## Dinner /custom`, `## Dinner /custom:`: not part of the name
+        const flag = hs.customOnly !== undefined ? hs.customOnly : leadFlag;
+        const gname = g ? hs.text.replace(/^@/, '').replace(/:$/, '').trim() : '';
+        if (gname && (g[1].length >= 2 || looksLikeGroupName(gname))) pushHeader(gname, flag);   // `## Dinner`, `# Lunch`
+        else if (!gname && flag !== undefined) headerFlag = flag;   // `## /custom`, `## /all`: the scope changes, the group stays
         continue;                                          // bare `#`, `# a comment` → ignored
       }
       if (trimmed.startsWith('//')) continue;              // comment convenience
 
-      let body = trimmed;
+      // Tags and flags come off before the header check, splitSegments and parseFoodLine, so `banana 1 /custom`
+      // keeps its quantity and no name ever contains a flag.
+      const marks = stripMarks(trimmed, true);
+      const body = marks.text;
       let group = headers[0] || null;
       let fallback = headers.slice(1, 4);
-      let t = TAG_LEAD_RE.exec(body);
-      if (t) { group = t[1]; body = body.slice(t[0].length); fallback = headers.slice(0, 3); }
-      t = TAG_TRAIL_RE.exec(body);
-      if (t) { group = t[1]; body = body.slice(0, t.index); fallback = headers.slice(0, 3); }
+      const tag = marks.trailTag !== null ? marks.trailTag : marks.leadTag;
+      if (tag !== null) { group = tag; fallback = headers.slice(0, 3); }
+
+      // A line that is only a flag (`/custom`, `/all`) sets the scope of the lines below it, like `## /custom`.
+      if (marks.customOnly !== undefined && tag === null && /^:?$/.test(body)) { headerFlag = marks.customOnly; continue; }
 
       // `Breakfast:` — a quantity-less line ending in ':' is a group header, not a food.
-      if (/:$/.test(body) && !t) {
+      if (/:$/.test(body) && marks.trailTag === null) {
         const h = parseFoodLine(body.slice(0, -1));
-        if (h.qty == null && h.unit == null && h.name) { pushHeader(h.name); continue; }
+        if (h.qty == null && h.unit == null && h.name) { pushHeader(h.name, marks.customOnly); continue; }
       }
 
+      const lineFlag = marks.customOnly !== undefined ? marks.customOnly : headerFlag;
       const segments = splitSegments(body);
       for (let k = 0; k < segments.length; k++) {
         const item = { raw, line: i + 1, name: '', qty: null, unit: null, group: group || null };
         if (fallback.length) item.groupFallback = fallback.slice();
         if (segments.length > 1) item.part = k;
+        // `mozzarella 30g /custom, banana 1`: a segment's own flag wins for that segment
+        const seg = stripMarks(segments[k], false);
+        const customOnly = seg.customOnly !== undefined ? seg.customOnly : lineFlag;
+        if (customOnly !== undefined) item.customOnly = customOnly;
         try {
-          const p = parseFoodLine(segments[k]);
+          const p = parseFoodLine(seg.text);
           item.name = p.name;
           item.qty = p.qty;
           item.unit = p.unit;
@@ -406,6 +498,16 @@ window.CMA = window.CMA || {};
             item.error = 'invalid quantity';
           }
           if (!item.name) item.error = item.error || 'no food name';
+          // `cheese /custom 30g`: a flag inside the name would be searched as text, with the other scope
+          const inner = FLAG_INNER_RE.exec(item.name || '');
+          if (inner) item.error = item.error || "move '" + inner[1] + "' to the start or end of the line";
+          // `almonds 1 250 kJ`, `2 150cal bars`: a plain space inside a calorie number is refused, never guessed
+          const sp = ENERGY_SPACED_RE.exec(seg.text);
+          if (sp) {
+            const word = sp[3].replace(/\s+/g, ' ');
+            item.error = item.error || '"' + sp[1] + sp[2] + ' ' + word + '" is ambiguous: write ' + sp[1] + sp[2].replace(/ /g, '')
+              + ' ' + word + ' (no space inside the number), or ' + sp[1] + ' x ' + sp[2].trim() + ' ' + word + ' for a count';
+          }
         } catch (e) {
           item.error = 'parse error: ' + (e && e.message ? e.message : String(e));
         }
@@ -419,6 +521,7 @@ window.CMA = window.CMA || {};
     lines,
     parseFoodLine,
     splitSegments,
+    stripMarks,
     looksLikeGroupName,
     normalizeUnit,
     toNumber,

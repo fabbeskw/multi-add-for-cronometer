@@ -93,8 +93,16 @@
       eq(G.boxSig('i'), S.INTEGER);
       await T.throws(() => G.sig('no.such.Type'), /no type signature/);
       deepEq(G.F, { SERVING: { DAY: 0, ORDER: 4, TIME: 5, USER: 6, GRAMS: 7, FOOD: 8, ID: 9, MEASURE: 10, TRANSLATION: 12 },
-        MEASURE: { AMOUNT: 0, FOOD: 2, HIDDEN: 3, ID: 4, ML: 5, NAME: 6, TYPE: 8, GRAMS: 9 }, FOOD: { NAME: 4, ID: 7, MEASURES: 11, TRANSLATIONS: 17 },
+        MEASURE: { AMOUNT: 0, FOOD: 2, HIDDEN: 3, ID: 4, ML: 5, NAME: 6, TYPE: 8, GRAMS: 9 },
+        FOOD: { NAME: 4, ID: 7, MEASURES: 11, NUTRIENTS: 12, TRANSLATIONS: 17, TYPE: 18 },
+        NUTRIENT_MAP: { FILTER: 0, MAP: 1 }, NUTRIENT: { AMOUNT: 0, ID: 1, TYPE: 2 },
         DAYINFO: { LIST1: 2, LIST2: 3 }, USER: { ID: 19, SESSION: 33 } });
+      // calorie amounts (0.3.2, Appendix N): Food.f[12] NutrientMap [o filter, o Map], Nutrient [d amount, i id, o type]
+      eq(G.SIG.NUTRIENT_MAP, S.NUTRIENT_MAP); eq(G.SIG.NUTRIENT, S.NUTRIENT);
+      eq(G.SIG.NUTRIENT_FILTER, S.NUTRIENT_FILTER); eq(G.SIG.NUTRIENT_TYPE, S.NUTRIENT_TYPE); eq(G.SIG.FOOD_TYPE, S.FOOD_TYPE);
+      deepEq(REG.types[S.NUTRIENT_MAP].f, ['o', 'o']); deepEq(REG.types[S.NUTRIENT].f, ['d', 'i', 'o']);
+      eq(REG.types[S.NUTRIENT_FILTER].k, 'enum'); eq(REG.types[S.NUTRIENT_TYPE].k, 'enum'); eq(REG.types[S.FOOD_TYPE].k, 'enum');
+      eq(REG.types[S.FOOD].f[G.F.FOOD.NUTRIENTS], 'o'); eq(REG.types[S.FOOD].f[G.F.FOOD.TYPE], 'o');
     });
   });
 
@@ -334,6 +342,24 @@
       eq(r.f[G.F.FOOD.TRANSLATIONS][0].f[1], 'Poulet');
       deepEq(r.f[18], { $t: S.FOOD_TYPE, ordinal: 1 });
       deepEq(r, food);
+    });
+    T.it('Food with a NutrientMap (field 12): filter enum, HashMap<Integer, Nutrient> with numeric keys after decoding', () => {
+      const food = FX.food({ id: 7, name: 'Almonds', defaultMeasureId: 3, type: 0, nutrientFilter: 1,
+        measures: [FX.measure({ foodId: 7, id: 3, name: 'oz', type: 0, grams: 28.3495 })],
+        nutrients: { 208: 579, 203: { amount: 21.15, type: 2 }, 268: 2423 } });
+      const r = rt(food);
+      const nm = r.f[G.F.FOOD.NUTRIENTS];
+      eq(nm.$t, S.NUTRIENT_MAP);
+      deepEq(nm.f[G.F.NUTRIENT_MAP.FILTER], { $t: S.NUTRIENT_FILTER, ordinal: 1 });
+      const map = nm.f[G.F.NUTRIENT_MAP.MAP];
+      ok(map instanceof Map, 'the nutrient map decodes to a Map'); eq(map.size, 3);
+      deepEq(Array.from(map.keys()).sort(), [203, 208, 268], 'Integer keys decode to plain numbers');
+      const kcal = map.get(208);
+      eq(kcal.$t, S.NUTRIENT); eq(kcal.f[G.F.NUTRIENT.AMOUNT], 579); eq(kcal.f[G.F.NUTRIENT.ID], 208);
+      deepEq(kcal.f[G.F.NUTRIENT.TYPE], { $t: S.NUTRIENT_TYPE, ordinal: 0 });
+      deepEq(map.get(203).f[G.F.NUTRIENT.TYPE], { $t: S.NUTRIENT_TYPE, ordinal: 2 });
+      deepEq(r.f[G.F.FOOD.TYPE], { $t: S.FOOD_TYPE, ordinal: 0 });
+      eq(rt(FX.food({ id: 8, nutrients: { 208: 52 } })).f[G.F.FOOD.NUTRIENTS].f[G.F.NUTRIENT_MAP.FILTER], null, 'no filter = null (ALL)');
     });
     T.it('User (42 fields) with the UserPreferences map', () => {
       const u = FX.user({ userId: 1234567, session: 'SESSIONKEY', groups: [{ id: 0, name: 'Uncategorized', enabled: false }, { id: 1, name: 'Breakfast', enabled: true }] });

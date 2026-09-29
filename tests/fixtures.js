@@ -30,6 +30,10 @@ window.CMA = window.CMA || {};
     FOOD: 'com.cronometer.shared.foods.models.Food/2097636843',
     FOOD_SOURCE: 'com.cronometer.shared.foods.FoodSource/4236433762',
     FOOD_TYPE: 'com.cronometer.shared.foods.FoodType/2323555378',
+    NUTRIENT_MAP: 'com.cronometer.shared.foods.models.NutrientMap/168231382',
+    NUTRIENT_FILTER: 'com.cronometer.shared.foods.models.NutrientMap$NutrientFilter/1990310964',
+    NUTRIENT: 'com.cronometer.shared.foods.models.Nutrient/331784102',
+    NUTRIENT_TYPE: 'com.cronometer.shared.foods.models.Nutrient$Type/4187872513',
     TRANSLATION: 'com.cronometer.shared.foods.models.Translation/4034452093',
     SEARCH_HIT: 'com.cronometer.shared.foods.models.SearchHit/1904627920',
     USER: 'com.cronometer.shared.user.models.User/91151502',
@@ -111,12 +115,27 @@ window.CMA = window.CMA || {};
     return { $t: SIG.FOOD_MEASURES, f: [defaultMeasureId || 0, measures || []] };
   }
   function translation(name, id) { return { $t: SIG.TRANSLATION, f: [null, name, id || 0] }; }
-  /** Food (20 fields): {id, name, category, defaultMeasureId, measures:[measure], translations, type, source} */
+  /** Nutrient (SPEC 3.3 / Appendix N): [d amount, i id, o type (Nutrient$Type: 0 PRIMARY, 1 ALTERNATIVE, 2 CALCULATED, 3 MANUAL_ENTRY, 4 FORMULATION)] */
+  function nutrient(amount, id, type) {
+    return { $t: SIG.NUTRIENT, f: [amount, id, type === null ? null : { $t: SIG.NUTRIENT_TYPE, ordinal: type || 0 }] };
+  }
+  /** NutrientMap: [o filter (0 ALL, 1 PRIMARY) | null, o HashMap<Integer, Nutrient>]. nutrients = {id: amount | {amount, type}}
+   *  (type defaults to PRIMARY); the keys are {i: id} so the Encoder writes java.lang.Integer boxes, as the server does. */
+  function nutrientMap(nutrients, filter) {
+    const m = new Map();
+    Object.keys(nutrients || {}).forEach(function (k) {
+      const v = nutrients[k];
+      m.set({ i: Number(k) }, typeof v === 'number' ? nutrient(v, Number(k), 0) : nutrient(v.amount, Number(k), v.type));
+    });
+    return { $t: SIG.NUTRIENT_MAP, f: [filter === undefined || filter === null ? null : { $t: SIG.NUTRIENT_FILTER, ordinal: filter }, m] };
+  }
+  /** Food (20 fields): {id, name, category, defaultMeasureId, measures:[measure], translations, type, source,
+   *  nutrients: {208: kcal, …} (field 12, absent → null), nutrientFilter: 0 ALL | 1 PRIMARY | null} */
   function food(o) {
     o = o || {};
     return { $t: SIG.FOOD, f: [
       0, false, null, o.category || 0, o.name === undefined ? null : o.name, 0, 0, o.id || 0, null, null, 'A',
-      foodMeasures(o.defaultMeasureId, o.measures), null, null, false, o.source === undefined ? null : o.source,
+      foodMeasures(o.defaultMeasureId, o.measures), o.nutrients ? nutrientMap(o.nutrients, o.nutrientFilter) : null, null, false, o.source === undefined ? null : o.source,
       null, o.translations || [], o.type === undefined || o.type === null ? null : { $t: SIG.FOOD_TYPE, ordinal: o.type }, 0,
     ] };
   }
@@ -184,7 +203,7 @@ window.CMA = window.CMA || {};
     updateDiaryResponse, editDiaryEntriesResponse, notLoggedInResponse, voidResponse, v7LiteralResponse,
     updateDiaryTemplate, getDayInfoTemplate, getFoodTemplate, removeServingTemplate, authenticateTemplate,
     day, time, serving, addEntryChange, addEntryChangeResult, errorEntryChangeResult,
-    measure, foodMeasures, translation, food, searchHit, dayInfo, prefsMap, user,
+    measure, foodMeasures, translation, nutrient, nutrientMap, food, searchHit, dayInfo, prefsMap, user,
     authenticateResponse, dayInfoResponse, foodResponse, updateDiaryOkResponse, updateDiaryErrorResponse, notLoggedInEx,
   };
 })();

@@ -60,7 +60,8 @@ window.CMA = window.CMA || {};
   const PRIVACY_URL = 'https://github.com/fabbeskw/multi-add-for-cronometer/blob/HEAD/PRIVACY.md';
   // rememberInput is opt-in (off unless the user ticks it on the first-run notice or in Settings): a remembered list
   // is a convenience, not needed for the extension's purpose. normSettings keeps an explicit true stored by 0.3.0.
-  const DEFAULT_SETTINGS = Object.freeze({ engine: 'rpc', delayMs: 250, rememberInput: false });
+  // customOnly (0.3.2): search only the user's own custom foods / recipes / meals unless a line says /all.
+  const DEFAULT_SETTINGS = Object.freeze({ engine: 'rpc', delayMs: 250, rememberInput: false, customOnly: false });
   // Built-in views. Other scripts add views through CMA.panel.registerView (see "View registry" below); the tab
   // order is by `order` (built-ins 10..50, a registered view defaults to 35 = just before Diagnostics).
   const BUILTIN_VIEWS = ['input', 'preview', 'results', 'diagnostics', 'settings'];
@@ -315,6 +316,7 @@ window.CMA = window.CMA || {};
     o.delayMs = Math.max(0, Math.min(60000, Number(o.delayMs) || 0));
     if (!(Number(s && s.delayMs) >= 0)) o.delayMs = DEFAULT_SETTINGS.delayMs;
     o.rememberInput = o.rememberInput === true;
+    o.customOnly = o.customOnly === true;
     return o;
   }
   /** The last input is remembered only while the setting is on AND the first-run notice was acknowledged. */
@@ -896,7 +898,9 @@ window.CMA = window.CMA || {};
         el('li', null, 'No quantity = 1 of the default measure; a number without a unit uses the default measure'),
         el('li', null, el('code', null, '## Dinner'), ' switches the group for the lines below; ', el('code', null, '@lunch'), ' at the start or end of a line sets that line’s group'),
         el('li', null, el('code', null, '# Lunch'), ' / ', el('code', null, 'Lunch:'), ' also switch the group; longer ', el('code', null, '# …'), ' notes and ', el('code', null, '// …'), ' lines are ignored'),
-        el('li', null, 'Two foods on one line: ', el('code', null, 'oats 40 g, milk 200 ml'), '; multipliers: ', el('code', null, '2 x 100g yoghurt'), ', ', el('code', null, 'protein bar 60g x2')))));
+        el('li', null, 'Two foods on one line: ', el('code', null, 'oats 40 g, milk 200 ml'), '; multipliers: ', el('code', null, '2 x 100g yoghurt'), ', ', el('code', null, 'protein bar 60g x2')),
+        el('li', null, 'By calories: ', el('code', null, '300cal almonds'), ', ', el('code', null, 'almonds 300 kcal'), ', ', el('code', null, '1250kJ almonds'), ' = as much of the food as has that many calories, in its default unit (not for meals)'),
+        el('li', null, el('code', null, '/custom'), ' (or ', el('code', null, '/c'), ') at the start or end of a line searches only your own custom foods, recipes and meals: ', el('code', null, '1.5 lbs mozzarella /custom'), '; ', el('code', null, '/all'), ' searches everything (overrides the setting); on a header (', el('code', null, '## Dinner /custom'), ') or on a line of its own it applies to the lines below, until the next header'))));
 
     els.findBtn = btn('Find foods', () => findFoods(), { primary: true, title: 'Search every line and build the preview' });
     els.footer.appendChild(els.findBtn);
@@ -1127,13 +1131,14 @@ window.CMA = window.CMA || {};
       await waitForRebuild(60000);
     }
     state.buildStatus = 'Searching 0/' + items.length + '…';
-    log('find foods: ' + items.length + ' line(s), engine ' + engine + (degraded ? ' (no RPC session: unverified rows)' : ''));
+    log('find foods: ' + items.length + ' line(s), engine ' + engine + (degraded ? ' (no RPC session: unverified rows)' : '') + (state.settings.customOnly ? ', custom foods only' : ''));
     switchView('preview');
     const dd = diaryDate();
     try {
       const plan = await CMA.plan.build(sessionFrom(), items, {
         groups: groups(), defaultGroupId: currentDefaultGroupId(), date: dd.date, isCancelled: () => state.cancel,
-        unverified: engine === 'ui', positions: !degraded, sessionProvider: sessionFrom
+        unverified: engine === 'ui', positions: !degraded, sessionProvider: sessionFrom,
+        customOnly: !!state.settings.customOnly
       }, (p) => onBuildProgress(p, items.length));
       state.plan = plan;
       if (plan && plan.stopped === 'session') notify('Session expired while searching: reload the Cronometer tab and log in again.', true);
@@ -1169,6 +1174,16 @@ window.CMA = window.CMA || {};
     for (const r of rows) { if (r.status === 'ready') s.ready++; else if (r.status === 'needs-choice') s.choice++; else s.error++; }
     return s;
   }
+  /** The preview footer's search scope: '' (nothing custom-only), 'custom foods only' (every row) or 'N lines custom-only'. */
+  function customScopeText(plan) {
+    const rows = plan && Array.isArray(plan.rows) ? plan.rows : [];
+    const custom = rows.filter(r => r && r.customOnly === true);
+    if (!custom.length) return '';
+    if (custom.length === rows.length) return 'custom foods only';
+    // a split line (`oats 40 g, milk 200 ml`) is one input line
+    const n = new Set(custom.map(r => (r.item && r.item.line != null ? r.item.line : 'row' + r.index))).size;
+    return n + (n === 1 ? ' line' : ' lines') + ' custom-only';
+  }
 
   // ---------------------------------------------------------------------------
   // Preview view
@@ -1179,7 +1194,15 @@ window.CMA = window.CMA || {};
     if (row.food && CMA.plan && typeof CMA.plan.foodDisplayName === 'function') { try { const n = CMA.plan.foodDisplayName(row.food); if (n) return String(n); } catch (e) { /* ignore */ } }
     return row.item && row.item.name ? String(row.item.name) : '';
   }
+  /** A calorie-amount row (`300cal almonds`, 0.3.2): its Qty is the kcal / kJ target, the measure only carries it. */
+  function isEnergyRow(row) {
+    const u = row && row.item ? row.item.unit : null;
+    if (CMA.units && typeof CMA.units.isEnergyUnit === 'function') { try { return !!CMA.units.isEnergyUnit(u); } catch (e) { /* fall through */ } }
+    return /^(kcal|kj)$/i.test(String(u || ''));
+  }
+  function energyUnitLabel(row) { return String(row.item.unit).toLowerCase() === 'kj' ? 'kJ' : 'kcal'; }
   function rowQty(row) {
+    if (isEnergyRow(row) && row.item.qty != null) return Number(row.item.qty);
     if (row.pick && row.pick.quantity != null && !row.pick.error) return Number(row.pick.quantity);
     if (row.item && row.item.qty != null) return Number(row.item.qty);
     return 1;
@@ -1222,9 +1245,11 @@ window.CMA = window.CMA || {};
     table.appendChild(tbody);
     els.body.appendChild(table);
     // The plan is frozen at Find-foods time: show ITS date, and say so when the diary has moved since.
+    const scope = customScopeText(plan);
     els.body.appendChild(el('div', { class: 'cma-muted cma-small cma-plan-date', style: 'margin-top:6px' },
       'Diary date ' + formatDate(planDate) + (sameDate(planDate, shown.date) ? '' : ' — differs from the day shown in the diary (' + formatDate(shown.date) + ')') +
       ' · engine ' + (state.settings.engine === 'ui' ? 'UI automation' : 'RPC') +
+      (scope ? ' · ' + scope : '') +
       (plan.positionsSource === 'fallback' ? ' · positions: fallback (diary could not be read)' : '')));
     const s = summarize(plan);
     const gated = decoderGated();
@@ -1238,7 +1263,10 @@ window.CMA = window.CMA || {};
   }
   function renderPreviewRow(row, i, gs) {
     const item = row.item || {};
-    const tr = el('tr', { class: 'cma-row cma-status-' + (row.status || 'error'), data: { index: String(i) } });
+    const energy = isEnergyRow(row);
+    // a ready row with a check-the-number note (units.pickEnergy above 1 kg) shows its status in the warning colour
+    const warn = row.status === 'ready' && !!(row.pick && row.pick.warn);
+    const tr = el('tr', { class: 'cma-row cma-status-' + (row.status || 'error') + (warn ? ' cma-row-warn' : ''), data: { index: String(i) } });
     tr.appendChild(el('td', { class: 'cma-c-line', title: item.raw || '' }, String(item.line != null ? item.line : i + 1)));
     // Food: a select over the search hits (SPEC §8) — names come from the server, hence textContent only.
     const foodTd = el('td', { class: 'cma-c-food' });
@@ -1253,12 +1281,17 @@ window.CMA = window.CMA || {};
     tr.appendChild(foodTd);
     const hasMeasures = Array.isArray(row.measures) && row.measures.length > 0;
     const chosenMeasure = row.pick && !row.pick.error ? row.pick.measure : null;
-    const countMeasure = !!chosenMeasure && isRecipeLike(chosenMeasure);
-    tr.appendChild(el('td', { class: countMeasure ? 'cma-c-count' : null }, el('input', {
-      type: 'number', class: 'cma-qty', step: 'any', min: '0', value: formatQty(rowQty(row)), disabled: !hasMeasures, 'aria-label': 'Quantity',
-      title: countMeasure ? 'number of "' + chosenMeasure.name + '" (a recipe measure counts servings, not grams)' : null,
+    const countMeasure = !energy && !!chosenMeasure && isRecipeLike(chosenMeasure);
+    // An energy row edits its calorie target here (in the typed unit); the Unit dropdown only changes the measure that
+    // carries it, and the note in the status names the resulting amount ('300 kcal → 1.83 oz (51.8 g)').
+    const qtyTitle = energy ? 'calories (' + energyUnitLabel(row) + '): the amount of the food is worked out from its calories'
+      : countMeasure ? 'number of "' + chosenMeasure.name + '" (a recipe measure counts servings, not grams)' : null;
+    tr.appendChild(el('td', { class: countMeasure || energy ? 'cma-c-count' : null }, el('input', {
+      type: 'number', class: 'cma-qty', step: 'any', min: '0', value: formatQty(rowQty(row)), disabled: !hasMeasures,
+      'aria-label': energy ? 'Calories (' + energyUnitLabel(row) + ')' : 'Quantity', title: qtyTitle,
       on: { change: (e) => onQtyChange(row, e.target.value) }
-    }), countMeasure ? el('span', { class: 'cma-muted cma-small', title: 'count of ' + chosenMeasure.name }, ' ×') : null));
+    }), countMeasure ? el('span', { class: 'cma-muted cma-small', title: 'count of ' + chosenMeasure.name }, ' ×')
+      : energy ? el('span', { class: 'cma-muted cma-small cma-energy-unit' }, ' ' + energyUnitLabel(row)) : null));
     const unitTd = el('td');
     if (hasMeasures) {
       // A failed pick may carry a SUGGESTION (units.pickVolume/pickMass: {error, measure}); it is not a choice yet.
@@ -1266,7 +1299,8 @@ window.CMA = window.CMA || {};
       // fires no change event), so the placeholder stays selected and names the suggestion.
       const needsChoice = !!(row.pick && row.pick.error) || row.status === 'needs-choice';
       const cur = !needsChoice && row.pick && row.pick.measure ? row.pick.measure.id : null;
-      const suggested = needsChoice && row.pick && row.pick.measure ? row.pick.measure : null;
+      // an energy row never offers 'Use …': its number is a calorie target, not a count of a suggested measure
+      const suggested = needsChoice && !energy && row.pick && row.pick.measure ? row.pick.measure : null;
       const sel = el('select', { class: 'cma-measure', 'aria-label': 'Measure', on: { change: (e) => onMeasureChange(row, e.target.value) } });
       if (cur == null) sel.appendChild(option('', 'choose…' + (suggested ? ' (suggested: ' + suggested.name + ')' : ''), true));
       row.measures.forEach(m => sel.appendChild(option(m.id, String(m.name) + (m.grams ? ' (' + formatGrams(m.grams) + ')' : '') + (m.hidden ? ' (hidden)' : ''), cur != null && Number(m.id) === Number(cur))));
@@ -1276,7 +1310,7 @@ window.CMA = window.CMA || {};
         unitTd.appendChild(btn('Use ' + suggested.name, () => onMeasureChange(row, suggested.id), { small: true, title: 'Use the suggested measure', class: 'cma-use-suggested' }));
       }
     } else {
-      unitTd.appendChild(el('span', { class: 'cma-muted' }, item.unit || ''));
+      unitTd.appendChild(el('span', { class: 'cma-muted' }, energy ? energyUnitLabel(row) : item.unit || ''));
     }
     tr.appendChild(unitTd);
     tr.appendChild(el('td', { class: 'cma-c-grams' }, rowGramsText(row)));
@@ -1313,7 +1347,10 @@ window.CMA = window.CMA || {};
     // onMeasureChange's convertQuantity / reset-to-1 guard still applies to a typed unit).
     const unresolved = !!(row.pick && row.pick.error) || row.status === 'needs-choice';
     const measureId = !unresolved && row.pick && row.pick.measure ? row.pick.measure.id : null;
-    if (measureId != null && CMA.plan && typeof CMA.plan.repick === 'function') CMA.plan.repick(row, measureId, q);
+    // An energy row: the number is the new calorie target; plan.repick recomputes the amount in the row's measure (the
+    // default one when the row is unresolved), so a target can never be accepted as a count of a suggestion.
+    if (isEnergyRow(row) && CMA.plan && typeof CMA.plan.repick === 'function') { try { CMA.plan.repick(row, measureId, q); } catch (e) { notify(errText(e), true); } }
+    else if (measureId != null && CMA.plan && typeof CMA.plan.repick === 'function') CMA.plan.repick(row, measureId, q);
     else if (row.item) row.item.qty = q;
     else row.item = { qty: q };
     renderView();
@@ -1321,6 +1358,12 @@ window.CMA = window.CMA || {};
   function onMeasureChange(row, value) {
     if (value === '' || value == null) return;
     if (!CMA.plan || typeof CMA.plan.repick !== 'function') return;
+    if (isEnergyRow(row)) {
+      // same calorie target, other measure: plan.repick works out the amount again (qty null keeps the target)
+      try { CMA.plan.repick(row, Number(value), null); } catch (e) { notify(errText(e), true); }
+      renderView();
+      return;
+    }
     const measure = Array.isArray(row.measures) ? row.measures.find(m => Number(m.id) === Number(value)) : null;
     let qty = rowQty(row);
     let note = null;
@@ -1691,7 +1734,7 @@ window.CMA = window.CMA || {};
     cap.nonceUpdatedAt = c.nonceUpdatedAt != null ? c.nonceUpdatedAt : null;
     const capLog = Array.isArray(c.log) ? c.log.slice(-LOG_TAIL).map(x => redact(typeof x === 'string' ? x : safeJson(x))) : [];
     const plan = state.plan ? {
-      rows: state.plan.rows.map(r => ({ line: r.item && r.item.line, status: r.status, message: redact(r.message || ''), foodId: r.hit && r.hit.id, measureId: r.pick && r.pick.measure ? r.pick.measure.id : null, quantity: r.pick && r.pick.quantity, grams: r.pick && r.pick.grams, groupId: r.groupId, order: r.order })),
+      rows: state.plan.rows.map(r => Object.assign({ line: r.item && r.item.line, status: r.status, message: redact(r.message || ''), foodId: r.hit && r.hit.id, measureId: r.pick && r.pick.measure ? r.pick.measure.id : null, quantity: r.pick && r.pick.quantity, grams: r.pick && r.pick.grams, groupId: r.groupId, order: r.order, customOnly: r.customOnly === true }, energyDiagnostics(r))),
       date: state.plan.date, positionsSource: state.plan.positionsSource, warnings: state.plan.warnings, stopped: state.plan.stopped
     } : null;
     const result = state.result ? {
@@ -1716,6 +1759,14 @@ window.CMA = window.CMA || {};
       views: viewDiagnostics(),
       panelLog: state.log.slice(-LOG_TAIL)
     };
+  }
+  /** An energy row's numbers for the dump (0.3.2): the kcal target and the food's kcal per 100 g — numbers only, no names. */
+  function energyDiagnostics(r) {
+    if (!isEnergyRow(r)) return {};
+    const p = r.pick && !r.pick.error ? r.pick : null;
+    const per100 = p && p.measure && !isRecipeLike(p.measure) && Number(p.measure.grams) > 0 && Number.isFinite(p.kcalPerUnit)
+      ? Math.round(p.kcalPerUnit / Number(p.measure.grams) * 1000) / 10 : null;
+    return { energy: { unit: String(r.item.unit).toLowerCase(), target: Number(r.item.qty), kcal: p && Number.isFinite(p.kcal) ? Math.round(p.kcal * 10) / 10 : null, kcalPer100g: per100 } };
   }
   function safeHref() { try { return location.origin + location.pathname + location.hash; } catch (e) { return ''; } }
   function safeJson(v) {
@@ -1825,16 +1876,18 @@ window.CMA = window.CMA || {};
     engine.value = s.engine;
     const delay = el('input', { id: 'cma-s-delay', type: 'number', min: '0', max: '60000', step: '50', value: String(s.delayMs), style: 'width:90px' });
     const remember = el('input', { id: 'cma-s-remember', type: 'checkbox', checked: !!s.rememberInput });
-    els.settingsForm = { engine, delay, remember };
+    const custom = el('input', { id: 'cma-s-custom', type: 'checkbox', checked: !!s.customOnly });
+    els.settingsForm = { engine, delay, remember, custom };
     els.body.appendChild(el('div', { class: 'cma-form' },
       el('label', { for: 'cma-s-engine' }, 'Engine'), engine,
       el('label', { for: 'cma-s-delay' }, 'Delay between adds (ms)'), delay,
       el('label', { for: 'cma-s-remember' }, 'Remember last input'), remember,
-      el('div', { class: 'cma-full cma-muted cma-small' }, 'RPC is fast and can be undone; switch to UI automation if RPC fails after a Cronometer deploy. Settings are stored in this browser profile only.')));
+      el('label', { for: 'cma-s-custom' }, 'Search only my custom foods'), custom,
+      el('div', { class: 'cma-full cma-muted cma-small' }, 'RPC is fast and can be undone; switch to UI automation if RPC fails after a Cronometer deploy. "Search only my custom foods" limits every line to your own custom foods, recipes and meals; /all at the start or end of a line searches everything for that line (and /custom limits one line without the setting). Settings are stored in this browser profile only.')));
     els.settingsStatus = el('span', { class: 'cma-muted cma-small' });
     els.footer.appendChild(btn('Save', async () => {
       // saveSettings also clears the stored input when rememberInput is switched off.
-      const ok = await saveSettings({ engine: engine.value, delayMs: Number(delay.value), rememberInput: !!remember.checked });
+      const ok = await saveSettings({ engine: engine.value, delayMs: Number(delay.value), rememberInput: !!remember.checked, customOnly: !!custom.checked });
       els.settingsStatus.textContent = ok ? 'Saved' : 'Saved for this page only (chrome.storage unavailable)';
       log('settings saved: ' + JSON.stringify(state.settings));
     }, { primary: true }));

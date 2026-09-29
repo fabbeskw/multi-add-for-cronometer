@@ -778,8 +778,13 @@ window.CMA = window.CMA || {};
     // d = 'Hidden' in the measure editor (the Add Food dialog's VCe drops measures with d === true).
     MEASURE: { AMOUNT: 0, FOOD: 2, HIDDEN: 3, ID: 4, ML: 5, NAME: 6, TYPE: 8, GRAMS: 9 },
     // Food.f (NAME, index 4) is NOT a display name in this build (prototype default '', never read by the app):
-    // the name the app shows is the locale Translation's (Rjj), see CMA.plan.foodDisplayName.
-    FOOD: { NAME: 4, ID: 7, MEASURES: 11, TRANSLATIONS: 17 },
+    // the name the app shows is the locale Translation's (Rjj), see CMA.plan.foodDisplayName. NUTRIENTS = the
+    // NutrientMap (energy for calorie amounts, CMA.rpc.energyKcalOf); TYPE = FoodType (0 FOOD, 1 RECIPE, 2 MEAL, 3 FORMULATION).
+    FOOD: { NAME: 4, ID: 7, MEASURES: 11, NUTRIENTS: 12, TRANSLATIONS: 17, TYPE: 18 },
+    // NutrientMap/168231382 [o filter (NutrientMap$NutrientFilter: 0 ALL, 1 PRIMARY) | null, o Map<Integer nutrientId, Nutrient>]
+    NUTRIENT_MAP: { FILTER: 0, MAP: 1 },
+    // Nutrient/331784102 [d amount, i id, o type (Nutrient$Type: 0 PRIMARY, 1 ALTERNATIVE, 2 CALCULATED, 3 MANUAL_ENTRY, 4 FORMULATION)]
+    NUTRIENT: { AMOUNT: 0, ID: 1, TYPE: 2 },
     DAYINFO: { LIST1: 2, LIST2: 3 },
     USER: { ID: 19, SESSION: 33 },
   };
@@ -794,6 +799,9 @@ window.CMA = window.CMA || {};
     MEASURE: 'com.cronometer.shared.foods.models.Measure', MEASURE_TYPE: 'com.cronometer.shared.foods.models.Measure$Type',
     FOOD_MEASURES: 'com.cronometer.shared.foods.models.FoodMeasures', FOOD: 'com.cronometer.shared.foods.models.Food',
     FOOD_SOURCE: 'com.cronometer.shared.foods.FoodSource', SEARCH_HIT: 'com.cronometer.shared.foods.models.SearchHit',
+    FOOD_TYPE: 'com.cronometer.shared.foods.FoodType', NUTRIENT_MAP: 'com.cronometer.shared.foods.models.NutrientMap',
+    NUTRIENT_FILTER: 'com.cronometer.shared.foods.models.NutrientMap$NutrientFilter',
+    NUTRIENT: 'com.cronometer.shared.foods.models.Nutrient', NUTRIENT_TYPE: 'com.cronometer.shared.foods.models.Nutrient$Type',
     USER: 'com.cronometer.shared.user.models.User', USER_PREFERENCES: 'com.cronometer.shared.user.models.UserPreferences',
     NOT_LOGGED_IN: 'com.cronometer.shared.user.exceptions.NotLoggedInException',
     // Adaptive TDEE reads (rpc.getBiometrics / getCalendarInfo / getCaloriesConsumedAndBurned, research/tdee-critic.md):

@@ -169,6 +169,7 @@
       eq(kinds(S.ADD_ENTRY_CHANGE), 'zzo'); eq(kinds(S.ADD_ENTRY_CHANGE_RESULT), 'o'); eq(kinds(S.ERROR_ENTRY_CHANGE_RESULT), 'oo');
       eq(kinds(S.DAYINFO), 'zooozs'); eq(kinds(S.MEASURE), 'dziziosood'); eq(kinds(S.FOOD_MEASURES), 'io');
       eq(kinds(S.FOOD).length, 20); eq(kinds(S.FOOD)[4], 's'); eq(kinds(S.FOOD)[7], 'i'); eq(kinds(S.FOOD)[11], 'o');
+      eq(kinds(S.FOOD)[12], 'o'); eq(kinds(S.NUTRIENT_MAP), 'oo'); eq(kinds(S.NUTRIENT), 'dio'); eq(CMA.registry.types[S.FOOD_TYPE].k, 'enum');
       eq(kinds(S.USER).length, 42); eq(kinds(S.USER)[19], 'i'); eq(kinds(S.USER)[33], 's');
       eq(CMA.registry.types[S.SINGLETON].k, 'singleton'); eq(CMA.registry.types[S.ARRAYLIST].k, 'list');
       eq(CMA.registry.types[S.MEASURE_TYPE].k, 'enum');
@@ -176,7 +177,9 @@
       deepEq(CMA.gwt.F, {
         SERVING: { DAY: 0, ORDER: 4, TIME: 5, USER: 6, GRAMS: 7, FOOD: 8, ID: 9, MEASURE: 10, TRANSLATION: 12 },
         MEASURE: { AMOUNT: 0, FOOD: 2, HIDDEN: 3, ID: 4, ML: 5, NAME: 6, TYPE: 8, GRAMS: 9 },
-        FOOD: { NAME: 4, ID: 7, MEASURES: 11, TRANSLATIONS: 17 },
+        FOOD: { NAME: 4, ID: 7, MEASURES: 11, NUTRIENTS: 12, TRANSLATIONS: 17, TYPE: 18 },
+        NUTRIENT_MAP: { FILTER: 0, MAP: 1 },
+        NUTRIENT: { AMOUNT: 0, ID: 1, TYPE: 2 },
         DAYINFO: { LIST1: 2, LIST2: 3 },
         USER: { ID: 19, SESSION: 33 },
       });
@@ -219,6 +222,25 @@
       eq(r.ok, true);
       eq(r.value[0].f[0].f[CMA.gwt.F.SERVING.ID], 'D80lp$');
       eq(CMA.gwt.isLongToken('D80lp$'), true);
+    });
+    T.it('parse `300cal almonds` -> decoded Food (NutrientMap) -> rpc.energyKcalOf -> plan.repick / units.pickEnergy -> plan.servingFor (0.3.2)', () => {
+      const FX = CMA.fixtures;
+      const item = CMA.parse.lines('300cal almonds')[0];
+      eq(item.qty, 300); eq(item.unit, 'kcal'); eq(item.name, 'almonds');
+      const food = CMA.gwt.readResponse(CMA.gwt.encodeResponse(FX.food({ id: 12061, name: 'Almonds', defaultMeasureId: 2, nutrients: { 208: 579, 268: 2423 },
+        measures: [FX.measure({ foodId: 12061, id: 1, name: 'g', type: 0, grams: 1, a: 1 }), FX.measure({ foodId: 12061, id: 2, name: 'oz', type: 0, grams: 28.3495, a: 1 }),
+          FX.measure({ foodId: 12061, id: 3, name: 'cup, whole', type: 1, grams: 143, a: 1 })] }))).value;
+      eq(CMA.rpc.energyKcalOf(food), 579);
+      const row = { item, hit: { id: 12061, name: 'Almonds', measureId: 0, type: 'FOOD', translationId: 0 }, food, measures: CMA.rpc.measuresOf(food),
+        translationId: 0, groupId: 1, groupNote: null, position: 1, order: (1 << 16) | 1, status: 'error' };
+      CMA.plan.repick(row, null);                      // an energy row: null = the default measure (FoodMeasures.f[0] = oz)
+      eq(row.status, 'ready', row.message);
+      eq(row.pick.measure.id, 2); T.approx(row.pick.quantity, 300 / (579 * 28.3495 / 100), 1e-6); T.approx(row.pick.grams, 51.8135, 1e-3);
+      eq(row.message, '300 kcal → 1.83 oz (51.8 g)');
+      const serving = CMA.plan.servingFor(row, { day: 4, month: 3, year: 2026 });
+      eq(serving.f[CMA.gwt.F.SERVING.MEASURE], 2); eq(serving.f[CMA.gwt.F.SERVING.FOOD], 12061);
+      T.approx(serving.f[CMA.gwt.F.SERVING.GRAMS] * 579 / 100, 300, 1e-3, 'the diary shows the target');
+      eq(CMA.rpc.servingValue(serving), serving);
     });
     T.it('capture.session() has exactly the keys rpc.js takes; snapshot and panel diagnostics never carry the nonce', () => {
       deepEq(Object.keys(CMA.capture.session()), ['moduleBase', 'permutation', 'policyHash', 'nonce', 'userId']);

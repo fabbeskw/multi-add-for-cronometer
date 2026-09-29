@@ -4,9 +4,10 @@
  *   CMA.rpc.call(session, method, paramSigs, values[, {kind, timeoutMs}]) -> CMA.gwt.readResponse result
  *   CMA.rpc.getDayInfo(session, day)        -> DayInfo value; CMA.rpc.servingsOf(dayInfo) -> [Serving values]
  *   CMA.rpc.getFood(session, foodId)        -> Food value;    CMA.rpc.measuresOf(food) -> [{id, name, grams, type, foodId, hidden, ...}]
+ *   CMA.rpc.energyKcalOf(food) -> kcal (nutrient 208) | null;  CMA.rpc.foodTypeOf(food) -> 'FOOD'|'RECIPE'|'MEAL'|'FORMULATION'|null
  *   CMA.rpc.updateDiaryAdd(session, serving) -> {servingId (GWT base64 long string), serving, results}
  *   CMA.rpc.removeServing(session, servingIdStr) -> true
- *   CMA.rpc.searchFoods(session, query, {maxResults=50, includeRetired=false}) -> hits
+ *   CMA.rpc.searchFoods(session, query, {maxResults=50, includeRetired=false, customOnly=false}) -> hits
  *   Adaptive TDEE reads (read-only, src/tdee/tdee-data.js; evidence research/tdee-critic.md, tdee-intake-burned.md,
  *   tdee-weight-history.md):
  *   CMA.rpc.getFirstDayWithData(session)               -> 'YYYY-MM-DD' | null
@@ -23,7 +24,8 @@
  *   one Collections$SingletonList(AddEntryChange(true, true, Serving)); removeServing(String, long, int) is
  *   VOID; getDayInfo(String, Day, int); getFood(String, int); food search is REST:
  *   GET /api/v3/user/{id}/food-search/string?query=UPPER&maxResults=..&sources=All&categoryId=0&selectedTab=ALL&type=All
- *   (cookie auth, no extra headers; spaces in the query are `+` like the app's `o2k` encoder).
+ *   (cookie auth, no extra headers; spaces in the query are `+` like the app's `B3k` encoder). That is the Add Food
+ *   dialog's All tab, which returns custom items too; customOnly sends the dialog's Custom tab (selectedTab=CUSTOM).
  *   X-Cronometer-Throttle-Version is a response header.
  */
 window.CMA = window.CMA || {};
@@ -77,6 +79,8 @@ window.CMA = window.CMA || {};
     DAYINFO: 'com.cronometer.shared.entries.models.DayInfo/',
     FOOD: 'com.cronometer.shared.foods.models.Food/',
     MEASURE: 'com.cronometer.shared.foods.models.Measure/',
+    NUTRIENT_MAP: 'com.cronometer.shared.foods.models.NutrientMap/',
+    NUTRIENT: 'com.cronometer.shared.foods.models.Nutrient/',
     AECR: 'com.cronometer.shared.entries.changes.AddEntryChangeResult/',
     EECR: 'com.cronometer.shared.entries.changes.ErrorEntryChangeResult/',
     DAY: 'com.cronometer.shared.entries.models.Day/',
@@ -99,6 +103,14 @@ window.CMA = window.CMA || {};
   };
   // Measure$Type ordinals ($pj in the bundle: Weight 0, Volume 1, Atomic 2, Recipe 3)
   const MEASURE_TYPE_NAMES = ['Weight', 'Volume', 'Atomic', 'Recipe'];
+  // FoodType ordinals (`acj`, build FB395E8B): FOOD 0, RECIPE 1, MEAL 2, FORMULATION 3
+  const FOOD_TYPE_NAMES = ['FOOD', 'RECIPE', 'MEAL', 'FORMULATION'];
+  // Energy in the Food's NutrientMap (SPEC 3.3 / Appendix N, build FB395E8B): nutrient 208 (ENERC_KCAL) is always kcal;
+  // the app never reads 268 (kJ) and shows kJ as kcal x 4.1868. A PRIMARY filter (NutrientMap$NutrientFilter ordinal 1)
+  // counts only nutrients whose Nutrient$Type is PRIMARY (ordinal 0).
+  const ENERGY_NUTRIENT_ID = 208;
+  const NUTRIENT_FILTER_PRIMARY = 1;
+  const NUTRIENT_TYPE_PRIMARY = 0;
 
   const rpc = {
     defaults: { timeoutMs: 30000, searchTimeoutMs: 20000, maxResults: 50 },
@@ -423,6 +435,44 @@ window.CMA = window.CMA || {};
     }
     return out;
   }
+  /** One entry of a decoded Map<Integer, V> (keys are numbers; a hand-built graph may use {i: n} tags or a plain object). */
+  function mapEntry(map, id) {
+    if (map instanceof Map) {
+      if (map.has(id)) return map.get(id);
+      const g = gwt();
+      for (const [k, v] of map) { const t = g.tagOf(k); if (Number(t ? k[t] : k) === id) return v; }
+      return undefined;
+    }
+    return map && typeof map === 'object' && !Array.isArray(map) ? map[id] : undefined;
+  }
+  /**
+   * energyKcalOf(food) -> the kcal amount of nutrient 208 in the Food's NutrientMap (Food.f[12], per the Food's own
+   * basis: per 100 g, or the whole recipe for a serving-based recipe; CMA.units.kcalPerUnit applies the measure), or
+   * null when it is missing, not finite, excluded by a PRIMARY filter (the Nutrient's type is not PRIMARY) or `food` is
+   * not a Food. A null filter counts as ALL. 0 is returned as 0 (the app reads a missing entry as 0 too; the caller
+   * refuses both). Read from the getFood reply the plan already holds: no extra request (SPEC 6, Appendix N).
+   */
+  function energyKcalOf(food) {
+    if (!isType(food, BASE.FOOD)) return null;
+    const F = gwt().F;
+    const nm = food.f[F.FOOD.NUTRIENTS];
+    if (!isType(nm, BASE.NUTRIENT_MAP)) return null;
+    const filter = nm.f[F.NUTRIENT_MAP.FILTER];
+    const n = mapEntry(nm.f[F.NUTRIENT_MAP.MAP], ENERGY_NUTRIENT_ID);
+    if (!isType(n, BASE.NUTRIENT)) return null;
+    if (filter && filter.ordinal === NUTRIENT_FILTER_PRIMARY) {
+      const t = n.f[F.NUTRIENT.TYPE];
+      if (!t || t.ordinal !== NUTRIENT_TYPE_PRIMARY) return null;
+    }
+    const v = n.f[F.NUTRIENT.AMOUNT];
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  }
+  /** foodTypeOf(food) -> 'FOOD' | 'RECIPE' | 'MEAL' | 'FORMULATION' | null (Food.f[18], enum FoodType). */
+  function foodTypeOf(food) {
+    if (!isType(food, BASE.FOOD)) return null;
+    const t = food.f[gwt().F.FOOD.TYPE];
+    return t && typeof t === 'object' && Number.isInteger(t.ordinal) ? FOOD_TYPE_NAMES[t.ordinal] || null : null;
+  }
   function foodName(food) { const g = gwt(); return food && Array.isArray(food.f) ? food.f[g.F.FOOD.NAME] : null; }
   function foodId(food) { const g = gwt(); return food && Array.isArray(food.f) ? food.f[g.F.FOOD.ID] : null; }
 
@@ -506,16 +556,18 @@ window.CMA = window.CMA || {};
   // ------------------------------------------------------------------------------------------------
   // searchFoods (REST)
   // ------------------------------------------------------------------------------------------------
-  /** The app's query-string encoder (`o2k`): encodeURIComponent with `%20` turned into `+` (GWT URL.encodeQueryString). */
+  /** The app's query-string encoder (`B3k`): encodeURIComponent with `%20` turned into `+` (GWT URL.encodeQueryString). */
   function encodeQueryValue(s) { return encodeURIComponent(String(s)).replace(/%20/g, '+'); }
-  function searchUrl(session, query, maxResults) {
-    // Byte-identical to the UI's request (`fBe` param order, `zJf`/`PIf` join): query, maxResults, sources,
-    // categoryId, selectedTab, type.
+  function searchUrl(session, query, maxResults, customOnly) {
+    // Byte-identical to the UI's request (param order of the request builder `cCe`, build FB395E8B): query,
+    // maxResults, sources, categoryId, selectedTab, type. The Add Food dialog's All tab sends selectedTab=ALL, its
+    // Custom tab the same URL with selectedTab=CUSTOM (the enum values are case-sensitive: UPPER here, mixed case in
+    // sources / type); type stays All (Food / Recipe / Meal only when the Custom tab's radio is changed).
     return originOf(session.moduleBase) + '/api/v3/user/' + session.userId + '/food-search/string'
       + '?query=' + encodeQueryValue(String(query).toUpperCase())
-      + '&maxResults=' + maxResults + '&sources=All&categoryId=0&selectedTab=ALL&type=All';
+      + '&maxResults=' + maxResults + '&sources=All&categoryId=0&selectedTab=' + (customOnly === true ? 'CUSTOM' : 'ALL') + '&type=All';
   }
-  /** One REST hit -> the SPEC 4 shape. JSON names verified in the bundle's JSON->SearchHit converter (VEe). */
+  /** One REST hit -> the SPEC 4 shape. JSON names verified in the bundle's JSON->SearchHit converter (`SFe`, build FB395E8B). */
   function mapHit(h) {
     if (!h || typeof h !== 'object') return null;
     const id = Number(h.id);
@@ -534,8 +586,11 @@ window.CMA = window.CMA || {};
     };
   }
   /**
-   * searchFoods(session, query, {maxResults=50, includeRetired=false, timeoutMs}) -> hits
+   * searchFoods(session, query, {maxResults=50, includeRetired=false, customOnly=false, timeoutMs}) -> hits
    * [{id, name, measureId, measureDisplayName, score, source, type, translationId, retired}] in server order.
+   * customOnly searches like the dialog's Custom tab (selectedTab=CUSTOM). The app filters nothing on the client
+   * under that tab, so the server is expected to scope the answer (not verified live): hits that name another
+   * source are dropped anyway (a null source is kept, as the app styles it like a custom one) and the count noted.
    */
   async function searchFoods(session, query, opts) {
     opts = opts || {};
@@ -544,13 +599,14 @@ window.CMA = window.CMA || {};
     const q = String(query == null ? '' : query).trim();
     if (!q) return [];
     const maxResults = isPosInt(opts.maxResults) ? opts.maxResults : rpc.defaults.maxResults;
+    const customOnly = opts.customOnly === true;
     await backoffIfPending(opts);
-    const url = searchUrl(session, q, maxResults);
+    const url = searchUrl(session, q, maxResults, customOnly);
     const t0 = Date.now();
     rpc.stats.restCalls++;
     let res;
     try {
-      // No Accept header: the app's REST client (`SIf`) sets only Content-Type, and only when a body is sent.
+      // No Accept header: the app's REST client (`PJf`) sets only Content-Type, and only when a body is sent.
       res = await fetchText(url, { method: 'GET', credentials: 'same-origin' },
         typeof opts.timeoutMs === 'number' ? opts.timeoutMs : rpc.defaults.searchTimeoutMs);
     } catch (e) {
@@ -558,7 +614,9 @@ window.CMA = window.CMA || {};
       throw e;
     }
     // The query is the food name the user typed: keep it out of the capture log (it ends up in the diagnostics dump).
-    noteLog('rest-out', { path: '/food-search/string', status: res.status, ms: Date.now() - t0, queryLength: q.length });
+    const logged = { path: '/food-search/string', status: res.status, ms: Date.now() - t0, queryLength: q.length };
+    if (customOnly) logged.customOnly = true;
+    noteLog('rest-out', logged);
     noteThrottle(res.headers[THROTTLE_HEADER.toLowerCase()]);
     let json = null;
     try { json = res.text ? JSON.parse(res.text) : null; } catch (e) { json = null; }
@@ -580,12 +638,16 @@ window.CMA = window.CMA || {};
     let raw = Array.isArray(json) ? json : (json && typeof json === 'object' ? (json.foods || json.hits || json.results || json.items || json.data || []) : []);
     if (!Array.isArray(raw)) raw = [];
     const hits = [];
+    let dropped = 0;
     for (let i = 0; i < raw.length; i++) {
       const h = mapHit(raw[i]);
       if (!h) continue;
       if (h.retired && !opts.includeRetired) continue;
+      if (customOnly && h.source !== null && h.source !== 'Custom') { dropped++; continue; }
       hits.push(h);
     }
+    // the count only: the dropped names are food names and must not reach the diagnostics dump
+    if (dropped) noteLog('warn', { path: '/food-search/string', note: 'custom-only search: dropped ' + dropped + ' hit(s) from other sources', dropped: dropped });
     return hits;
   }
 
@@ -798,6 +860,8 @@ window.CMA = window.CMA || {};
   rpc.getFood = getFood;
   rpc.measuresOf = measuresOf;
   rpc.defaultMeasureIdOf = defaultMeasureIdOf;
+  rpc.energyKcalOf = energyKcalOf;
+  rpc.foodTypeOf = foodTypeOf;
   rpc.foodName = foodName;
   rpc.foodId = foodId;
   rpc.updateDiaryAdd = updateDiaryAdd;
@@ -824,5 +888,7 @@ window.CMA = window.CMA || {};
   rpc.STRING_SIG = STRING_SIG;
   rpc.THROTTLE_HEADER = THROTTLE_HEADER;
   rpc.MEASURE_TYPE_NAMES = MEASURE_TYPE_NAMES;
+  rpc.FOOD_TYPE_NAMES = FOOD_TYPE_NAMES;
+  rpc.ENERGY_NUTRIENT_ID = ENERGY_NUTRIENT_ID;
   CMA.rpc = rpc;
 })();

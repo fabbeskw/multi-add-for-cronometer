@@ -258,6 +258,7 @@ window.CMA.panelCss = `
 .cma-status-ready .cma-icon { color: var(--ok); }
 .cma-status-needs-choice .cma-icon { color: var(--warn-fg); }
 .cma-status-error .cma-icon { color: var(--err); }
+.cma-row-warn .cma-c-status, .cma-status-ready.cma-row-warn .cma-icon { color: var(--warn-fg); }
 .cma-icon { font-weight: 700; margin-right: 4px; }
 
 /* Results list */

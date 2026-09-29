@@ -39,7 +39,7 @@ data layer has NOT been exercised against a live account yet (§12.6).
 ## 1. File layout (repo root = the folder that contains `manifest.json`)
 
 ```
-manifest.json               name "Multi-Add for Cronometer", version 0.3.1 (the store reads name / description / version from it),
+manifest.json               name "Multi-Add for Cronometer", version 0.3.2 (the store reads name / description / version from it),
                             homepage_url = the public GitHub repository, icons 16/32/48/128
 popup.html                  static toolbar-icon page: three-line instructions (MV3 CSP: no inline script, §8)
 src/hook-main.js            MAIN world, document_start: XHR hook + relay (§2)
@@ -334,11 +334,18 @@ Also record in the registry: `permutation`, `policyHash` (regex `'app','([A-F0-9
   sits on top of both. `CMA.rpc.measuresOf` flags the measure as `isDefault`, `CMA.rpc.defaultMeasureIdOf` /
   `CMA.plan.foodDefaultMeasureId` expose the int (null for 0), and `CMA.units.defaultMeasure` honours it right after
   the search hit's measure (§5.3).
-* `Food/2097636843`: 20 fields: `[i, z, o, i category, s f, i, i, i id, o, o, l, o FoodMeasures, o, o, z, s source, o, o list<Translation>, o type, i]` — id index 7, measures index 11, translations index 17. **Index 4 (`Food.f`) is not a display name** (prototype default `''`; no `.f` read in the bundle): the name the app shows is `Rjj(food, lYb())` = the Translation whose Language code equals the app locale — `lYb()` evaluates `(N3k(),'en')`, i.e. `'en'` is compiled in — else the first Translation's name (`CMA.plan.foodDisplayName`).
+* `Food/2097636843`: 20 fields: `[i, z, o, i category, s f, i, i, i id, o, o, l, o FoodMeasures, o NutrientMap, o, z, s source, o, o list<Translation>, o type, i]` — id index 7, measures index 11, nutrients index 12, translations index 17, type index 18 (enum `FoodType/2323555378`: 0 FOOD, 1 RECIPE, 2 MEAL, 3 FORMULATION; `CMA.rpc.foodTypeOf`). **Index 4 (`Food.f`) is not a display name** (prototype default `''`; no `.f` read in the bundle): the name the app shows is `Rjj(food, lYb())` = the Translation whose Language code equals the app locale — `lYb()` evaluates `(N3k(),'en')`, i.e. `'en'` is compiled in — else the first Translation's name (`CMA.plan.foodDisplayName`).
+* `NutrientMap/168231382` (Food index 12, read since 0.3.2, Appendix N): `[o filter | null, o Map<Integer nutrientId, Nutrient>]`
+  — the filter is `NutrientMap$NutrientFilter/1990310964` (0 ALL, 1 PRIMARY; null counts as ALL), the map decodes to a
+  JS `Map` with number keys. `Nutrient/331784102`: `[d amount, i id, o type]` with `Nutrient$Type/4187872513` (0
+  PRIMARY, 1 ALTERNATIVE, 2 CALCULATED, 3 MANUAL_ENTRY, 4 FORMULATION); under a PRIMARY filter only PRIMARY-typed
+  nutrients count. Energy is nutrient **208** (ENERC_KCAL), always kcal, per the Food's basis (per 100 g; a
+  serving-based recipe's whole-recipe total); 268 (kJ) is never read — the app shows kJ as kcal × 4.1868.
+  `CMA.rpc.energyKcalOf(food)` returns the 208 amount or null (missing, not finite, excluded by the filter, not a Food).
 * `Translation/4034452093`: `[o Language, s name, i id]`; `Language/1257207975` (package `com.cronometer.shared.user.models`, not `foods.models`): `[s code, s, s, s]`.
 * `SearchHit/1904627920` (only if the app still returns it anywhere): `[i category,i globalPopularity,i id,s language,s measureDisplayName,i measureId,s name,z retired,i score,o source,s stemName,i translationId,o type,i userPopularity]`
 * `User/91151502`: 42 fields; index 19 userId (int), index 33 session key (string).
-`CMA.gwt.F = { SERVING:{DAY:0,ORDER:4,TIME:5,USER:6,GRAMS:7,FOOD:8,ID:9,MEASURE:10,TRANSLATION:12}, MEASURE:{AMOUNT:0,FOOD:2,ID:4,ML:5,NAME:6,TYPE:8,GRAMS:9}, FOOD:{NAME:4,ID:7,MEASURES:11,TRANSLATIONS:17}, DAYINFO:{LIST1:2,LIST2:3}, USER:{ID:19,SESSION:33} }`
+`CMA.gwt.F = { SERVING:{DAY:0,ORDER:4,TIME:5,USER:6,GRAMS:7,FOOD:8,ID:9,MEASURE:10,TRANSLATION:12}, MEASURE:{AMOUNT:0,FOOD:2,HIDDEN:3,ID:4,ML:5,NAME:6,TYPE:8,GRAMS:9}, FOOD:{NAME:4,ID:7,MEASURES:11,NUTRIENTS:12,TRANSLATIONS:17,TYPE:18}, NUTRIENT_MAP:{FILTER:0,MAP:1}, NUTRIENT:{AMOUNT:0,ID:1,TYPE:2}, DAYINFO:{LIST1:2,LIST2:3}, USER:{ID:19,SESSION:33} }`
 (`MEASURE.AMOUNT` = `Measure.a`, the amount the dialog prints before the name when ≠ 1; `MEASURE.ML` = `Measure.f`, the boxed Double behind the ` — N ml` label suffix).
 
 ### 3.4 API
@@ -638,9 +645,19 @@ CMA.rpc.updateDiaryAdd(session, serving) → { servingId (GWT base64 long string
    or throws (kind 'rejected', e.serverMessage) with the ErrorEntryChangeResult message; `serving` is a Serving value
    (13 fields) or a plain {day, order, grams, foodId, measureId, translationId?}
 CMA.rpc.removeServing(session, servingIdStr) → true   (params String, J, I: the id string is passed back verbatim)
-CMA.rpc.searchFoods(session, query, {maxResults=50}) → hits [{id, name, measureId, measureDisplayName, score, source, type, translationId, retired}]
-   GET /api/v3/user/{userId}/food-search/string?query=<UPPERCASED, encodeURIComponent with %20 → '+' like the app's o2k>&maxResults=50&sources=All&categoryId=0&selectedTab=ALL&type=All
-   no extra headers (the app's REST client `SIf` sets only Content-Type, and only with a body); 401 → CMA.errors.Session.
+CMA.rpc.searchFoods(session, query, {maxResults=50, includeRetired=false, customOnly=false}) → hits [{id, name, measureId, measureDisplayName, score, source, type, translationId, retired}]
+   GET /api/v3/user/{userId}/food-search/string?query=<UPPERCASED, encodeURIComponent with %20 → '+' like the app's B3k>&maxResults=50&sources=All&categoryId=0&selectedTab=ALL&type=All
+   no extra headers (the app's REST client `PJf` sets only Content-Type, and only with a body); 401 → CMA.errors.Session.
+   This is byte-identical to the Add Food dialog's All tab (request builder `cCe`, bundle FB395E8B, deferredjs/14),
+   which returns the user's custom foods / recipes / meals too (hit source 'Custom', type FOOD/RECIPE/MEAL; public
+   foods carry their database: USDA, NCCDB, CRDB, FDCBranded, USDAWeb, …; JSON converter `SFe`). `customOnly: true`
+   (0.3.2, Appendix M) sends the dialog's Custom tab instead: the same URL with `selectedTab=CUSTOM` (enum values are
+   case-sensitive: selectedTab UPPER, sources/type mixed case; `type` stays All — Food/Recipe/Meal only when the Custom
+   tab's radio is changed, not used). The app does no client-side source filtering under that tab, so the server is
+   expected to scope the answer (NOT verified live); searchFoods still drops every hit whose source is non-null and
+   not 'Custom' (a null source is kept: the app styles it like a custom one) and, when it dropped any, writes ONE
+   capture-log `warn` entry with the count only (`dropped`, never a name). The `rest-out` entry then carries
+   `customOnly: true`. `CMA.rpc.searchUrl(session, query, maxResults, customOnly)` builds the URL.
 Adaptive TDEE reads (0.3.0, read-only; semantics and the energy row layout in §12.2):
 CMA.rpc.getFirstDayWithData(session) → 'YYYY-MM-DD' | null
 CMA.rpc.getPreference(session, key) → string | null                      (response kind 's')
@@ -677,7 +694,7 @@ Translation list (field 17) and zeroed only when that Translation's name equals 
 locale (`CMA.plan.foodDisplayName`); an id that is not in the list is kept (`CMA.plan.translationIdFor`).
 
 ## 5. Input parsing (parse.js, units.js)
-`CMA.parse.lines(text) → [{raw, line, name, qty:number|null, unit:string|null, group:string|null, groupFallback?:[...], part?, error?}]`.
+`CMA.parse.lines(text) → [{raw, line, name, qty:number|null, unit:string|null, group:string|null, groupFallback?:[...], part?, customOnly?:boolean, error?}]`.
 * Blank lines and `// …` lines are ignored. `## <group name>` always switches the current group; a single-`#` line
   switches it only when its text looks like a group name (one word, or two words with a number or a capitalised
   head: `# Lunch`, `# Group 6`, `# Second breakfast`); any other `# …` line (`# a comment`, `# leftovers from
@@ -685,6 +702,24 @@ locale (`CMA.plan.foodDisplayName`); an id that is not in the list is kept (`CMA
   `groupFallback` = the earlier headers (most recent first) so plan.js can fall back to the last *resolvable*
   header when the current one is not a real group. `@dinner` / `@Lunch` at the start or end of a line sets that
   line's group (case-insensitive, matched to group names by prefix).
+* Search-scope flags (0.3.2, Appendix M): `/custom` (alias `/c`) → `customOnly: true` (search only the user's own
+  custom foods / recipes / meals), `/all` → `customOnly: false`; case-insensitive, and only as a whole
+  whitespace-delimited token at the START or END of the line body, so `1/2`, `1 1/2`, `salt/pepper`, `w/o`,
+  `half/half`, a glued `cheese/custom`, `// …` comments and `@custom` (a group tag) are never flags. Flags and
+  `@group` tags are stripped in a loop, in any order (`cheese /custom @lunch`, `cheese @lunch /custom`, `/custom
+  @lunch cheese`; one tag per end, a trailing tag wins as before; of several flags the last in reading order wins),
+  BEFORE the `Breakfast:` header check, the two-foods split and the quantity parse, so `banana 1 /custom`, `eggs x2
+  /custom` and `vitamin c 500mg x2 /custom` keep their quantities and no name contains a flag; `raw` stays the typed
+  line. Every segment of a split line carries the line's flag; a flag at the start or end of one segment
+  (`mozzarella 30g /custom, banana 1 medium`) applies to that segment only and wins over the line's. On a header line
+  (`## Dinner /custom`, `# Lunch /custom`, `Dinner: /custom`, also right before the header's colon: `Dinner /custom:`,
+  and in front of it: `/custom ## Dinner`) the flag is stripped before the group name is read and applies to the
+  following lines until the next header (a header without a flag ends it); a line's own flag wins. A header with no
+  name (`## /custom`, `# /all`) and a line that is only a flag (`/custom`, `/all`) change that scope and keep the
+  current group (no item). A flag in front of a `// …` comment is ignored with it. A flag token still inside a food
+  name after the quantity parse (`cheese /custom 30g`, `eggs /custom x2`) fails that item with "move '/custom' to
+  the start or end of the line" instead of searching the flag as text. `customOnly` is absent without a flag.
+  `CMA.parse.stripMarks(text, tags)` is the helper.
 * Quantity grammar (anywhere: leading, or trailing after `,`, `:`, `-`, `x`, `×`, or bare at the end): integer, decimal
   (`1.5`, `.5`, `1,5` when no other comma), fraction `1/2`, mixed `1 1/2`, unicode ½ ¼ ¾ ⅓ ⅔. `x2`/`2x`/`×2`.
   A number is a quantity only at a boundary: not followed by a digit or `%` (`2% milk`, `12%` stay in the name) and,
@@ -696,11 +731,26 @@ locale (`CMA.plan.foodDisplayName`); an id that is not in the list is kept (`CMA
   g gram grams gr; kg; mg; oz ounce; lb lbs pound; ml milliliter millilitre mL; l liter litre L; cup; tbsp tablespoon;
   tsp teaspoon; slice; piece pc pcs; serving srv; large medium small xl xs; scoop; can; bottle; packet pack; bar;
   each ea; unit; clove; egg? no (food word). Unknown token after the number → not a unit, stays in the name.
+* Energy units (0.3.2, Appendix N): `cal cals kcal kcals calorie calories kilocalorie kilocalories`, the spaced /
+  hyphenated `kilo calorie(s) kilo-calorie(s) kilo cal(s) k cal(s) k-cal(s)` (any case, so `Cal`) → `kcal`; `kj
+  kilojoule kilojoules kilo joule(s) kilo-joule(s)` (`kJ`) → `kj`. They are ordinary quantity+unit pairs wherever a
+  quantity is recognised (leading, trailing, mid-line, after `,` `:` `-`, glued `300cal` or spaced `300 cal`, and —
+  for energy units only — hyphenated `300-cal`; multipliers `2 x 150cal bar` → 300, split lines `almonds 300cal,
+  banana 1 medium`, decimal comma, fractions); whole tokens only (`calzone 2`, `2 calzones`, `calamari 100g`, a
+  bare `cal` are not energy). The two-word spellings are tried before one word, so `300 kilo calories` is not 300 kg.
+  Before an energy word, `N,NNN` groups are a thousands separator (`1,250 kJ` → 1250, `2,000 kcal` → 2000; also a
+  no-break / thin space), not the decimal comma they are elsewhere (`300,5 kcal` stays 300.5, `0,250` stays 0.25);
+  the same groups with a plain space (`almonds 1 250 kJ`, `2 150cal bars`) are an error that names both readings
+  ('write 1250 kJ …, or 1 x 250 kJ for a count'). A dot is always a decimal point (`1.250 kJ` = 1.25 kJ; §5.3 flags it).
+  `item.qty` stays the typed number and `item.unit` is `'kcal'` or `'kj'` (no parser conversion: the preview shows
+  what was typed; units.js divides kJ by 4.1868). Deliberately, a number right before an energy word is always an
+  amount: `100 calorie pack almonds` is 100 kcal of "pack almonds". `0 cal soda` is 'invalid quantity' like any 0.
 * Name = remaining text trimmed of separators. Examples that must parse (tests):
   `200g chicken breast`→200,g,"chicken breast"; `chicken breast 200 g`; `chicken breast, 200g`; `Chicken breast - 200 g`;
   `2 large eggs`→2,large,"eggs"; `2 eggs`→2,null,"eggs"; `eggs x2`; `1 1/2 cups rice, cooked`→1.5,cup,"rice, cooked";
   `½ cup oats`; `banana`→null,null,"banana"; `3 tbsp olive oil`; `100 ml milk`; `1 slice bread`; `0.5 kg potatoes`→500,g;
-  `## Dinner` (group line); `salmon 150g @lunch`.
+  `## Dinner` (group line); `salmon 150g @lunch`; `1.5lbs mozzarella cheese /custom`→1.5,lb,"mozzarella cheese",customOnly;
+  `300cal almonds`→300,kcal,"almonds"; `almonds 1250 kJ`→1250,kj,"almonds".
 ### 5.3 Measure matching (`CMA.units.pickMeasure(measures, unit, qty, opts)`) →
 `{measure, quantity, grams, note}`; measures as returned by `CMA.rpc.measuresOf`.
 * **No unit typed** (quantity q or none) — `CMA.units.defaultMeasure(measures, {hitMeasureId, defaultMeasureId})` first
@@ -774,15 +824,51 @@ locale (`CMA.plan.foodDisplayName`); an id that is not in the list is kept (`CMA
   the word (in that order); `{error}` if none.
 * Always return `grams = quantity × measure.grams` for Weight/Volume/Atomic (the raw double product, unrounded, as
   the dialog's `Nqj`); for Recipe type grams = quantity.
+* **Calorie amounts** (0.3.2, Appendix N) never go through `pickMeasure` (it refuses `kcal` / `kj` with an error, and
+  `convertQuantity` returns null for them, so a measure named '…cal…' can never receive the number as a count):
+  `CMA.units.pickEnergy(measures, energyValue, targetKcal, opts)` → `{measure, quantity, grams, note, kcal,
+  kcalPerUnit, warn}` | `{error, refused?}`, with `energyValue` = `CMA.rpc.energyKcalOf(food)` and `targetKcal` =
+  `CMA.units.energyToKcal(qty, unit)` (kJ ÷ 4.1868, `KJ_PER_KCAL`).
+  - kcal per ONE of a measure is the Add Food dialog's `Rrj` (`CMA.units.kcalPerUnit(m, value)`, k = `grams`): a
+    Recipe-type measure → `value / k` (0 when k is 0); a weightless Weight measure (k 0, the 'full recipe') → `value`;
+    anything else `value × k / 100`. `Measure.a` plays no part. quantity = target / perUnit, exactly what Cronometer's
+    own diary Calories-cell edit computes (`j2i`, which does nothing when perUnit is 0), so the diary shows the target
+    for the entry; grams = `gramsFor(measure, quantity)` like any pick (6-decimal quantity, unrounded product).
+  - Measure: `opts.measureId` (the panel's Unit dropdown) when given, refused with `{error: "'handful' has no weight to
+    put calories on — pick another unit", refused}` when it carries no energy; else the SAME default a unit-less line
+    starts on (`defaultMeasure` with `{hitMeasureId, defaultMeasureId}`), where a bare gram default is fine (the amount
+    is exact whatever the measure, so no needs-choice). A measure "carries energy" when perUnit > 0 and it is
+    recipe-like or has grams > 0; if the default does not (a weightless Volume / Atomic / Recipe measure, a weightless
+    Weight measure other than 'full recipe'), the plain 'g', then any Weight measure with grams > 0, else `{error: 'no
+    measure with a weight to put calories on'}`. Hidden measures are skipped as in `defaultMeasure`.
+  - Typable: a measure is used only when its quantity survives the Add Food dialog's amount box (6 characters, 3
+    decimals: `formatQuantity`): > 0 at 3 decimals, below 1,000,000 and within 5 % of itself there
+    (`ENERGY_TYPABLE_SHARE`), so the UI engine types what the RPC engine would send. The default path takes the
+    next candidate above that is typable (3 kcal of a 2,000 kcal 'full recipe' is 0.0015 → typed 0.002 → its 'g'
+    instead); when none is, or the picked `measureId` is not, `{error: "0.1 kcal is too small an amount of 'serving'
+    to add — pick another unit", refused}` (needs-choice; 'too large' above the limit).
+  - Errors (the row is not added): energy null / 0 / not finite → 'no calorie data for this food'; `opts.meal` →
+    'calorie amounts are not supported for meals (Cronometer adds a meal whole)'; a target ≤ 0 → 'invalid quantity'.
+  - Note: `'300 kcal → 1.83 oz (51.8 g)'`, `'300 kcal → 51.8 g'` on the plain 'g', `'250 kcal → 0.5 × serving'` for a
+    recipe count, `'1250 kJ (298.6 kcal) → …'` with `opts.kj`. Above 1000 g (`ENERGY_SANITY_G`; recipe counts
+    excepted) the note adds '— over 1 kg: check the food and the number', below 5 kcal (`ENERGY_SANITY_MIN_KCAL`: a
+    `1.250 kJ` meant as 1250) '— under 5 kcal: check the number'; either sets `warn`, and the row stays ready.
 
 ## 6. Plan (plan.js) and RPC engine (engine-rpc.js)
 `CMA.plan.build(session, items, opts, progressCb) → plan = {rows, date, groups, defaultGroupId, positionsSource:
 'getDayInfo'|'fallback'|null, nextPos, warnings:[], stopped:null|'session', builtAt}` where each row is
 `{index, item, hits:[...], hit (chosen), hitIndex, food (Food value)|null, measures:[...], pick:{measure, quantity,
-  grams, note}|{error}, translationId, groupId, groupName, groupNote, position, order, status:'ready'|'needs-choice'|
-  'error', message, result?}`; opts = `{groups, defaultGroupId, date, searchDelayMs=300, retryMs=2000, maxHits=10,
-maxResults=50, positions=true, now, isCancelled}` (groups and date default to `CMA.capture.state`). Rows never
-store the session (nothing the diagnostics view may serialise carries the nonce).
+  grams, note}|{error}, translationId, customOnly, groupId, groupName, groupNote, position, order,
+  status:'ready'|'needs-choice'|'error', message, result?}`; opts = `{groups, defaultGroupId, date, searchDelayMs=300,
+retryMs=2000, maxHits=10, maxResults=50, positions=true, customOnly=false, unverified, sessionProvider, now,
+isCancelled}` (groups and date default to `CMA.capture.state`). Rows never store the session (nothing the
+diagnostics view may serialise carries the nonce).
+* Custom-only search (0.3.2, Appendix M): each row's scope is `item.customOnly != null ? item.customOnly :
+  opts.customOnly` (the panel passes Settings → *Search only my custom foods*; only an explicit `true` counts) and is
+  stored as `row.customOnly` on every row (also rows that are never searched: engine-ui reads it). searchFoods gets
+  `{maxResults, customOnly}`; for a custom-only row the hits are filtered to `CMA.plan.isCustomHit` (source 'Custom' or
+  none) BEFORE the maxHits slice, and an empty result is "no custom food matches" (unverified mode: the reason
+  "unverified (UI engine): no custom food matches") instead of "no results".
 * A quantity-less item whose name equals a group name (`Breakfast`) is not searched: status 'error' with the hint
   "looks like a group header — write '## Breakfast' to switch groups".
 * Search each item sequentially (300 ms apart; one retry after 2 s on network error). Choose hit: exact
@@ -817,6 +903,20 @@ store the session (nothing the diagnostics view may serialise carries the nonce)
   `unverified:true`, `hit` (kept when the search worked) and `pick = {measure: item.unit ? {name: item.unit} :
   null, quantity: item.qty || 1, grams: null, note:'unverified (UI engine): <why>'}`; `servingFor` throws for such
   rows and engine-rpc skips them ("unverified row (UI engine only)").
+* Calorie amounts (0.3.2, Appendix N): an item whose unit is `kcal` / `kj` (`CMA.plan.isEnergyItem`) is picked by
+  `units.pickEnergy` over the loaded Food (`rpc.energyKcalOf`; the getFood reply every row already fetches — search
+  hits carry no energy, so there is no extra request) with `{hitMeasureId, defaultMeasureId, meal, kj}`; meal =
+  `hit.type === 'MEAL'` or `rpc.foodTypeOf(food) === 'MEAL'` (`CMA.plan.isMealRow`). A refused measure (`{refused}`:
+  picked without a weight, or not typable) is needs-choice, every other refusal is 'error' (no diary position is
+  reserved). Without the Food — the getFood
+  fallback to the hit's measure, or an unverified UI-engine row — the row is an error "calories need the food's
+  details, which could not be read (<why>); type an amount such as 50 g instead": the typed number is never sent as
+  a count of the hit's measure or typed into the dialog with a 'kcal' unit. `repick(row, measureId, qty)` on such a
+  row takes `qty` as the new target in the typed unit (`row.item.qty`) and `measureId` as the measure to carry it
+  (null = the default again), so the Unit dropdown keeps the calories and no path turns them into a count;
+  `rechoose` recomputes from the new food. Engines: the RPC engine sends `pick.grams` / quantity like any pick; the
+  UI engine selects `pick.measure` and types `pick.quantity` (≤ 3 decimals, `formatQuantity`; pickEnergy plans only a
+  quantity that survives that, and the engine never types a 0, §7 step 6).
 ### 6.4 `CMA.engineRpc.run(session, plan, opts, progressCb) → {added:[{row, servingId, serving, message?}], failed:[{row, error, kind}], skipped:[{row, reason}], stopped:null|'session'|'cancelled'|'decode', lastBatch, refresh}`
 `opts = {delayMs=250, retryMs=3000, throttleMs=5000, refresh=true, refreshOpts, isCancelled, sessionProvider}`; only
 rows with `status === 'ready'` are sent; `progressCb({phase:'adding'|'row'|'retry'|'throttled'|'refresh'|'done',
@@ -871,6 +971,12 @@ Recipe (from the compiled bundle; selectors are authored CSS names, stable acros
    then startsWith); among several equally named rows the one whose source cell (cell 1: FoodSource enum name such
    as USDA/NCCDB, `Custom Food`/`Custom Recipe`/`Custom Meal` for the Custom source, `UPC`/`FDC UPC`) agrees with
    `row.hit.source` wins. No name match → row error "no result row matches …" (only a single-row result is accepted).
+   A custom-only row (`row.customOnly`, 0.3.2) first keeps only the rows whose source cell satisfies
+   `sourceMatches(cell, {source:'Custom'}) === true` (`Custom Food` / `Custom Recipe` / `Custom Meal`) and applies the
+   same tiers to them; a non-custom row is never accepted, not even as the single result, and when no custom row
+   remains the row fails with "no custom food row matches "<name>" (N result row(s), none of them a custom food,
+   recipe or meal)". The engine NEVER clicks the dialog's search tabs: the app persists `lastUserSelectedTab` in
+   cronometer.com's localStorage, so a click would change the user's next manual Add Food search.
    Dispatch `mousedown` (`bubbles:true, cancelable:true, button:0`) then `mouseup` on the row's FIRST `<td>`:
    PrettyTable's `ADf` → `jDf` → `Wpd` walks up from event.target looking for a td whose parent tr is in the body and
    returns null when it reaches the tbody, so a mousedown targeted at the `<tr>` itself selects nothing (fallback
@@ -904,7 +1010,8 @@ Recipe (from the compiled bundle; selectors are authored CSS names, stable acros
    engine then types nothing and adds only when the plan asks for exactly the hidden amount × the shown measure
    (row warning "meal: amount/measure are not settable in the dialog"), otherwise the row fails.
    THEN amount: native setter on `.add-serving-measure-selector .amount input.text-box` with the quantity (max 6
-   chars; up to 3 decimals, trailing zeros stripped), dispatch `input`, `change`, `keyup`.
+   chars; up to 3 decimals, trailing zeros stripped), dispatch `input`, `change`, `keyup`. A quantity whose text is
+   not > 0 (`0.0004` → `0`) is never typed: the row fails ('amount 0.0004 becomes "0" in the amount box …').
 7. Click `div.add-to-diary-btn-container button` (text `Add to Diary`). Wait for `.pretty-dialog` to be detached
    (≤ 3 s; `oke` hides the dialog ~100 ms after the click BEFORE the Serving is built and `updateDiary` sent, recipe
    §8, so detachment says nothing about success). Then the diary refresh: the panel passes `opts.waitForRefresh(row)`
@@ -971,7 +1078,9 @@ iframe) and asserts `window.__added`.
   status; `Add all` / `Back`), **Progress/Results** (per-row ✓/✗ with messages; `Undo this batch`, `Reload page`,
   `Done`), **Diagnostics** (state without the nonce: hooked, userId, permutation, policy, groups+source,
   date+source, last 50 log lines; `Copy diagnostics` → clipboard as JSON; `Reload page`), **Settings** (delay ms,
-  engine, remember last input; *Forget saved input* and *Forget last batch* delete the stored input / the stored
+  engine, remember last input, *Search only my custom foods* (`#cma-s-custom`, 0.3.2: `DEFAULT_SETTINGS.customOnly`
+  false, `normSettings` keeps only an explicit `true`, passed to `CMA.plan.build` as `opts.customOnly`; the note says
+  a line's `/all` overrides it); *Forget saved input* and *Forget last batch* delete the stored input / the stored
   undo record on demand — the on-demand deletion PRIVACY.md names). Persist settings + last input text in
   `chrome.storage.local`; the input is stored
   as `{text, userId}` and restored only when the captured userId matches (or neither side knows the account — a
@@ -1001,6 +1110,13 @@ iframe) and asserts `window.__added`.
   accept it silently; the later **Use** / measure choice resolves with the new number. The Unit dropdown marks a
   hidden measure '(hidden)'. The Grams cell of a recipe-like measure shows
   `quantity × measure.grams` (or `—` when weightless), never the count.
+* Calorie-amount rows (0.3.2): the Qty box shows and edits the calorie TARGET (`row.item.qty`, labelled `kcal` / `kJ`
+  after the box, aria-label 'Calories (kcal)'), the Unit dropdown the measure that carries it (a change calls
+  `plan.repick(row, id, null)`: same target), the Grams cell the resulting grams and the status the note ('300 kcal →
+  1.83 oz (51.8 g)'); such a row never offers **Use …** and never goes through `convertQuantity`. A ready row whose
+  pick has `warn` (over 1 kg) gets `.cma-row-warn` (status in the warning colour). The cheat-sheet lists `300cal
+  almonds`, `almonds 300 kcal`, `1250kJ almonds`; the dump's plan rows add `energy: {unit, target, kcal,
+  kcalPer100g}` (numbers only).
 * Results: an added row shows its id, an engine message ('added; the reply could not be read …') and the UI
   engine's fallback warnings next to the tick (`.cma-r-warn`); a run summary ends with "the diary did not confirm
   the refresh: press Reload page …" when `refresh.verified` is false and "stopped: reply unreadable" plus a
@@ -1020,7 +1136,9 @@ iframe) and asserts `window.__added`.
   counter) still fire.
 * The preview footer shows the PLAN's date (frozen at Find-foods time) and appends "— differs from the day shown in
   the diary (…)" when the diary moved; the Results summary names the written date ("2 added, 1 failed — diary date
-  27 Sep 2026", plus "(not the day shown in the diary)" and a notice when they differ).
+  27 Sep 2026", plus "(not the day shown in the diary)" and a notice when they differ). When rows were searched
+  custom-only the footer adds "· custom foods only" (every row) or "· N lines custom-only" (a split line counts once);
+  the dump's plan rows carry `customOnly`. The Input view's cheat-sheet lists `/custom` (`/c`) and `/all`.
 * Undo started from the Input view (stored batch, no plan) reports "Undo: n removed, m failed: <id error>" in the
   notice. The stored batch button is shown only when `batch.userId` equals the captured userId (a batch without
   userId, stored by an older version, is offered); a batch older than 24 h is cleared on mount. `subscribeState()`
@@ -1088,6 +1206,12 @@ f[0] → `isDefault` → plain 'g' → first) and the same rows through `plan.bu
 measure asks for a unit, f[0] resolves it, g-only foods take 100 g / N g, `repick` + `servingFor` after the
 suggestion); `tests/panel.html`: a no-unit needs-choice row starts on `choose… (suggested: large)`, its **Use** button
 and a hand-picked measure keep the typed number as a COUNT (no `convertQuantity`, no reset note).
+Calorie amounts (0.3.2, Appendix N): `tests/unit.html` (the energy grammar and its negatives, thousands commas and
+the refused spaced form, `pickEnergy` against the table, the typable rule and the under-5-kcal note, plan rows incl.
+recipes, meals, missing energy, getFood failure, unverified mode, repick / rechoose), `tests/gwt.html` and
+`tests/capture.html` (a Food with a NutrientMap round-trips; `energyKcalOf` over a decoded reply and its filter
+cases), `tests/load-all.html` (parse → decoded Food → pickEnergy → servingFor), `tests/panel.html` (the energy row)
+and `tests/engine-ui.html` (an energy row added with its measure and quantity; a 0 at 3 decimals is never typed).
 Adaptive TDEE (0.3.0, §12): `tests/tdee.html` (the 17 upstream node tests ported 1:1 with their names compared to
 `adaptive-tdee.test.mjs`, the TDEE spec §7 figures, marker / SHA-256 parity of the generated wrapper, the frozen
 API, < 50 ms for 365 days), `tests/tdee-data.html` (the five request bodies byte-equal to research/tdee-critic.md 5,
@@ -1114,8 +1238,9 @@ layer read the edited days again).
 ## 10. README essentials
 Install (chrome://extensions → Developer mode → Load unpacked → this folder → open https://cronometer.com/#diary and
 **reload the tab**), usage, input format cheat-sheet, engines (RPC first; switch to UI automation if RPC fails), what to
-send back when it fails (Diagnostics → Copy), limitations (Gold time-of-day not set; custom meals via UI engine only;
-positions), privacy (no data leaves cronometer.com; the runtime-rebuilt decoder under `chrome.storage.local['cmaRegistry']`
+send back when it fails (Diagnostics → Copy), limitations (Gold time-of-day not set; a custom meal only with the
+dialog's defaults in the UI engine; the custom-only search and calorie amounts live-tested on one account
+(2026-09-29); calorie amounts not for meals; positions; the Status banner names what is not verified live yet), privacy (no data leaves cronometer.com; the runtime-rebuilt decoder under `chrome.storage.local['cmaRegistry']`
 holds type layouts only), maintenance after a Cronometer deploy (the RPC engine reads permutation/policy live, but
 the CRCs of the classes we SEND (Serving, Day, AddEntryChange) and the layouts we READ come from the registry; since
 0.2.0 the extension rebuilds it from the live bundle by itself — banner "Cronometer deployed a new build —
@@ -1144,8 +1269,8 @@ test. Exit 0 only on `PACKAGE OK`. The archive is written under a temporary name
 renamed to the release name only when every check passed — a stale package under the release name is removed
 first and a failed build deletes the temporary file, so `dist/` never holds a broken zip under the name a good
 build produces (review round 5). Run `tools/check_manifest.py` and `tests/run.sh` first and
-rebuild the zip after ANY change to `src/` or `manifest.json` (it snapshots the tree). The 0.3.1 package holds 26
-members: manifest, popup, license, 4 icons (16/32/48/128) and the 19 scripts (0.3.0: 25 members with 3 icons; 0.2.1:
+rebuild the zip after ANY change to `src/` or `manifest.json` (it snapshots the tree). The 0.3.2 package (like 0.3.1)
+holds 26 members: manifest, popup, license, 4 icons (16/32/48/128) and the 19 scripts (0.3.0: 25 members with 3 icons; 0.2.1:
 22 members, 16 scripts). Since 0.3.1 `tools/check_manifest.py` also accepts `homepage_url` (must be a github.com
 repository URL) and an optional 32 px icon (16/48/128 required, any other size fails) and requires a description of
 1-132 characters starting with "Unofficial". Since 0.3.0 the
@@ -1172,7 +1297,8 @@ estimate energy expenditure from the intake and weight already logged there") an
 review risk (fallback: ship the TDEE tab as a separate listing). `SUBMISSION-CHECKLIST.md` (0.3.1) is the ordered
 path to *Submit for review* (owner-only steps: registration and fee, 2-Step Verification, contact e-mail, trader
 declaration, Submit; the build commands; which STORE-LISTING block goes into which dashboard field; rejection codes).
-Placeholders (the repository-derived ones are filled since 0.3.1; the store URL and item id remain):
+Placeholders (the repository-derived ones are filled since 0.3.1; the store URL and item id since 0.3.2, item
+`eggnohhalgffodifhpdpedeofilfffhd`):
 `<privacy policy URL>` and `<support URL>` (STORE-LISTING.md), `<your contact email or GitHub issues URL>`
 (PRIVACY.md), `<repo URL>` (README, PRIVACY.md, STORE-LISTING.md), `<Chrome Web Store URL>` (README Install) and
 `<item id>` (STORE-LISTING.md). `python tools/set_repo_url.py https://github.com/<owner>/<repo> [--dry-run] [--check]`
@@ -1905,3 +2031,74 @@ reviewer will see.
   keeping the legacy value; otherAccountsStored as a count only) and *other tabs* (a third tab of another account
   enabling, syncing, saving, disabling and deleting never affects the first; two tabs of one account migrating at
   once); the existing same-account two-tab tests run on the keyed names.
+
+## Appendix M. Custom-only search (0.3.2, 2026-09-29)
+
+* **Request**: a user asked to limit the food search to their OWN custom foods / recipes / meals, as a setting or per
+  line (`1.5lbs mozzarella cheese /custom`).
+* **Research** (bundle FB395E8B, deferredjs/14.cache.js): the extension's search URL was already byte-identical to the
+  Add Food dialog's *All* tab (`cCe`), which returns custom items too — the earlier README / SPEC claims that the RPC
+  engine only searched the public database and that custom recipes and meals were only reachable through the UI
+  engine were wrong and are corrected. The dialog's *Custom* tab sends the same URL with `selectedTab=CUSTOM` and does
+  no client-side source filtering, so the server scopes the results (not verified live). Custom hits carry source
+  'Custom' (type FOOD/RECIPE/MEAL); the result table shows 'Custom Food' / 'Custom Recipe' / 'Custom Meal'.
+* **Behaviour**: §4 `searchFoods({customOnly})` (Custom-tab URL, the default URL unchanged; defensive source filter
+  keeping a null source; the drop COUNT logged, never names), §5 the `/custom` (`/c`) and `/all` flags (whole token,
+  start or end, any order with `@group`, header scope, `item.customOnly`), §6 `opts.customOnly`, `row.customOnly`,
+  filtering before the maxHits slice, "no custom food matches", §7 custom-only rows accept only a Custom result row
+  and never click the dialog's tabs (`lastUserSelectedTab` is persisted by the app), §8 the Settings checkbox, the
+  preview footer's scope, the cheat-sheet, `customOnly` in the dump's plan rows. PRIVACY.md: `cmaSettings` also holds
+  the flag, the search request may carry `selectedTab=CUSTOM`, the flag itself is never sent.
+* **Out of scope**: clicking the dialog's tabs, the Custom tab's Food / Recipe / Meal radio (`type=`), special
+  handling of custom-meal measures, and the parser's `1/2 & 1/2 30ml` case.
+* **Tests**: tests/unit.html *search-scope flags* (flag positions and quantities, any order with tags, split lines
+  and a segment's own flag, header scope incl. `Dinner /custom:`, `/custom ## Dinner` and the scope-only `## /custom`
+  / `/custom` lines, a flag inside a name failing the line, the negatives: fractions, slashes in names, glued forms,
+  `//`, `@custom`) and *plan.build — custom-only
+  search* (setting, per-line override both ways, header flag, scope-only lines, a segment's flag, no flag ever in a
+  query, "no custom food matches" also unverified, filtering before maxHits; the fake search honours
+  `opts.customOnly`); tests/capture.html (default URL unchanged, CUSTOM URL,
+  the filter with a null source kept and the count-only log); tests/panel.html (the settings records with
+  `customOnly`, the checkbox round trip, an invalid stored value → false, `opts.customOnly` to plan.build, the footer
+  text); tests/engine-ui.html (a Custom Food row chosen over same-named database rows, a custom-only row without a
+  custom result failing, a single database row never accepted, normal rows unchanged, no tab touched).
+
+## Appendix N. Calorie amounts (0.3.2, 2026-09-29)
+
+* **Request**: log a food by calories: `300cal almonds` = enough almonds for 300 kcal, in the food's default measure,
+  previewed as '300 kcal → 1.83 oz (51.8 g)'. Ships in 0.3.2 with the custom-only search (Appendix M).
+* **Research** (bundle FB395E8B: the main permutation and deferredjs/14.cache.js; the function names are specific to
+  that build and change with every Cronometer deploy). The decode was checked offline with the extension's own decoder on synthetic data, **not
+  yet on a live getFood reply** (SUBMISSION-CHECKLIST step 6 has the live check):
+  - the Food deserializer (`Ioj`) reads field 12 as class 673 = `NutrientMap/168231382` `[filter, Map<Integer,
+    Nutrient>]` and field 18 as class 492 = `FoodType` (`acj`: FOOD 0, RECIPE 1, MEAL 2, FORMULATION 3);
+    `Nutrient/331784102` = `[amount, id, Nutrient$Type]`; a PRIMARY filter counts only PRIMARY-typed nutrients;
+  - energy is nutrient 208, always kcal; 268 (kJ) is never read by the app (kJ is display only, × 4.1868), and a
+    missing entry reads as 0;
+  - the Add Food dialog's kcal for an amount is `Rrj`: `(Recipe ? (k==0 ? 0 : value/k) : Weight && k==0 ? value :
+    value*k/100) × quantity` with k = Measure.k (`measuresOf().grams`);
+  - the diary's Calories-cell edit (`j2i`) sets quantity = target / perUnit (nothing when perUnit is 0) and the
+    Serving's grams through `bsj` / `Zrj` = quantity × (recipe-like ? 1 : k) — what `CMA.units.gramsFor` already does
+    (the app matches 'full recipe' exactly, the extension trims / lower-cases; no test shows a difference);
+  - serving-based recipes hold whole-recipe totals on a Recipe measure (k = servings) and weight-based recipes are
+    per 100 g: the per-measure rule covers both;
+  - a meal's Add dialog hides the measure selector and adds it whole ('full recipe'), so a meal cannot be scaled;
+  - search hits carry no energy: the getFood reply each row already fetches is the only source (no extra request).
+* **Behaviour**: §3.3 (NutrientMap / Nutrient / FoodType layouts, `CMA.gwt.F.FOOD.NUTRIENTS` / `TYPE`,
+  `F.NUTRIENT_MAP`, `F.NUTRIENT`, `CMA.rpc.energyKcalOf`, `CMA.rpc.foodTypeOf`), §5 (energy units in the grammar), §5.3
+  (`CMA.units.pickEnergy`, `kcalPerUnit`, `energyToKcal`, `isEnergyUnit`; `pickMeasure` / `convertQuantity` refuse
+  energy units; only quantities the dialog's amount box can take; a check-the-number note under 5 kcal and over
+  1 kg), §6 (energy rows in plan.build / repick / rechoose, the errors without a Food or for a meal), §7 step 6 (a 0
+  is never typed), §8 (the preview row, the cheat-sheet, the dump's `energy` numbers). PRIVACY.md: the food's calorie
+  figure from the getFood reply is used in memory; nothing new is stored or sent.
+* **Review follow-ups** (same release): kJ figures are nearly always 4 digits and often written `1,250 kJ`, which the
+  general decimal-comma rule read as 1.25 kJ (a ready row of 0.05 g): before an energy word `N,NNN` is now a thousands
+  separator, a plain-space `1 250 kJ` is refused as ambiguous, and a dot (`1.250 kJ`) stays a decimal point but is
+  flagged by the under-5-kcal note. `300 kilo calories` used to be 300,000 g (`kilo` → kg): the spaced and hyphenated
+  spellings are energy units now. A small target on a large measure (`2cal <recipe>` on a 5,000 kcal 'full recipe')
+  planned 0.0004, which the UI engine typed as `0`: pickEnergy now plans only typable quantities, and engine-ui
+  refuses to type a 0 whatever the plan says.
+* **Out of scope**: energy targets for meals (the dialog cannot scale them), reading kJ (268) or any other nutrient,
+  a per-line choice of the measure (the Unit dropdown does it), `100 calorie pack …` product names (documented), and a
+  thousands comma before any other unit (`1,000 g` is still 1 g, as before 0.3.2).
+* **Tests**: see §9 (unit, gwt, capture, load-all, panel, engine-ui).

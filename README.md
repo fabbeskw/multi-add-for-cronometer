@@ -27,17 +27,17 @@ tab you are already logged into.
 > **Status:** working, live-tested on 2026-09-28 (foods added through the RPC engine and undone; the UI-automation
 > engine also verified). The RPC path is reconstructed from Cronometer's compiled web client and mirrors what the
 > app itself sends. Because Cronometer redeploys often, the extension ships two engines, an undo, a runtime decoder
-> rebuild and a diagnostics dump (see *Reporting a failure*). The **Adaptive TDEE** tab (0.3.0) is new and its
-> history reads have **not** been checked against a live account yet: compare its *Check the numbers* block with
-> your diary before you rely on it (see *Adaptive TDEE*).
+> rebuild and a diagnostics dump (see *Reporting a failure*). The **Adaptive TDEE** tab (0.3.0) was compared with one
+> account's diary on 2026-09-28 (intake and burned matched); compare its *Check the numbers* block with your diary
+> before you rely on it (see *Adaptive TDEE*). 0.3.2's calorie amounts (`100cal chicken breast` came out at 100 kcal
+> in the diary) and custom-only search were live-tested on 2026-09-29.
 
 ## Install
 
 Three ways in; all of them end with the same *reload the Cronometer tab once* step.
 
-**Install from the Chrome Web Store** — *coming soon* (0.3.1 is prepared for submission). Once the listing is
-approved the store page will be `<Chrome Web Store URL>` (see *Publishing*): open it, click **Add to Chrome**, then
-continue at step 5 below.
+**Install from the Chrome Web Store** — open <https://chromewebstore.google.com/detail/multi-add-for-cronometer/eggnohhalgffodifhpdpedeofilfffhd>, click **Add to Chrome**, then continue at
+step 5 below. (The listing is unlisted: it is reachable through this link only, not through the store's search.)
 
 **From a release zip** (no git, no Python; only Chrome's *Developer mode*):
 
@@ -69,9 +69,9 @@ by `python tools/screenshots.py` (`python tools/screenshots.py --help` lists the
 can be regenerated after any change to the panel instead of being retaken by hand. They are privacy-safe: personal
 UI is blurred, the multi-add shots are taken on an empty future day of the diary that holds only the four sample
 entries the tool adds (and removes again afterwards), and the two TDEE shots use synthetic demo history, never a
-real person's intake or weight. The PNGs are not committed (a live run shows the owner's diary page); until the
-owner's live run of the current version, `store-assets/` holds no uploadable set. The store promo tiles are in
-[store-assets/promo/](store-assets/promo/).
+real person's intake or weight. The PNGs are not committed (a live run shows the owner's diary page), so a clone
+holds no uploadable set; `store-assets/manifest.json` records the owner's last live run (0.3.1, 28 September 2026,
+reused for 0.3.2: its five views look the same). The store promo tiles are in [store-assets/promo/](store-assets/promo/).
 
 ## Usage
 
@@ -103,10 +103,14 @@ last typed list*) in place of the Input view; press **Continue** to start. It is
    here you can **Undo this batch** (removes exactly the entries that were just added), **Reload page** (if the
    diary did not refresh by itself — the summary says when the extension could not confirm the refresh) or **Done**.
 
-Settings (engine, delay between adds, remember last input) are in the **Settings** tab and are stored in your
-browser profile only. *Remember last input* is **off unless you tick it** (the first-run notice shows it as an
-unticked box, *Remember my last typed list*): when it is on, the list you typed is kept (with your account id) so it
-is back when you reopen the panel; switch it off to stop, which also clears the stored copy.
+Settings (engine, delay between adds, remember last input, search only my custom foods) are in the **Settings** tab
+and are stored in your browser profile only. *Remember last input* is **off unless you tick it** (the first-run notice
+shows it as an unticked box, *Remember my last typed list*): when it is on, the list you typed is kept (with your
+account id) so it is back when you reopen the panel; switch it off to stop, which also clears the stored copy.
+*Search only my custom foods* (off by default) makes every line search only your own custom foods, recipes and meals,
+like the *Custom* tab of Cronometer's *Add Food* dialog; a line with `/all` still searches everything, and without the
+setting a single line can be limited with `/custom` (see the cheat-sheet). The preview's footer says when rows were
+searched custom-only.
 
 ### Input format cheat-sheet
 
@@ -122,15 +126,21 @@ is back when you reopen the panel; switch it off to stop, which also clears the 
 | `3 tbsp olive oil`, `100 ml milk`, `1 slice bread` | volume / count units are matched to the food's measures |
 | `## Dinner`, `# Dinner`, `Dinner:` | every line below goes to *Dinner* (until the next header) |
 | `salmon 150g @lunch` | this line goes to *Lunch* (`@` tag at the start or end; group names match by prefix) |
+| `1.5lbs mozzarella cheese /custom`, `/c 2 slices sourdough` | search only **your own custom foods, recipes and meals** for this line (`/custom` or `/c`, a separate word at the start or end of the line, in any order with an `@` tag; on a two-foods line also at the start or end of one food: `oats 40 g /custom, milk 200 ml`); a line with no custom match says *no custom food matches*, and a flag in the middle (`cheese /custom 30g`) is an error that asks you to move it |
+| `banana /all` | search everything for this line, even when *Search only my custom foods* is on in Settings |
+| `## Dinner /custom`, `Dinner /custom:`, `/custom` alone | a flag on a header, or on a line of its own, applies to every line below it until the next header (a line's own flag wins; `## /all` or `/all` alone switches back without changing the group) |
 | `# leftovers from yesterday`, `// a comment`, blank lines | ignored (a `#` line only switches the group when it looks like a group name: one word, or two words such as `Group 6` / `Second breakfast`) |
-| `2 x 100g yoghurt`, `yoghurt 2 x 100g`, `protein bar 60g x2` | multipliers: 200 g, 200 g, 120 g |
+| `300cal almonds`, `almonds 300 kcal`, `almonds, 300 Cal` | as much almonds as has **300 kcal**, in the food's default measure (the one the search row shows, else the food's own default; plain grams are used as they are, and a measure without a weight falls back to grams). The preview shows the conversion, e.g. *300 kcal → 1.83 oz (51.8 g)*; the Qty box then holds the calories (change the unit and the calories stay), and Cronometer's diary shows about 300 kcal for the entry. `cal`, `Cal`, `kcal`, `calorie(s)`, `kilo calories`, `300-cal` all mean kcal. Under 5 kcal or over 1 kg the row asks you to check the number; an amount too small for the unit (0.0002 of a recipe serving) asks for another unit |
+| `1250kJ almonds`, `1,250 kJ almonds`, `almonds 1250 kilojoules` | the same in kJ (1250 kJ = 298.6 kcal; before a calorie word `1,250` is 1250, not the decimal comma 1.25, and `1 250 kJ` with a space is refused as ambiguous). Not for meals (Cronometer adds a meal whole) or foods without calorie data; a number right before a calorie word is always an amount, so `100 calorie pack almonds` is 100 kcal of *pack almonds* |
+| `2 x 100g yoghurt`, `yoghurt 2 x 100g`, `protein bar 60g x2` | multipliers: 200 g, 200 g, 120 g (`2 x 150cal bar` = 300 kcal) |
 | `oats 40 g, milk 200 ml` | two foods on one line, each with a quantity and unit, become two rows |
 | `2% milk 1 cup`, `7up 330 ml` | a number glued to `%` or to a non-unit word stays in the name |
 | `Breakfast` (a bare group name) | flagged in the preview — write `## Breakfast` or `Breakfast:` to switch groups |
 
 Known units: `g kg mg oz lb ml l fl oz cup tbsp tsp slice piece serving large medium small xl xs scoop can bottle
-packet bar each unit clove` plus common words like `tablet capsule glass bowl handful stick fillet …`. A word after
-the number that is not a unit stays part of the food name (`2 cupcakes` → 2 × default measure of *cupcakes*).
+packet bar each unit clove` plus common words like `tablet capsule glass bowl handful stick fillet …`, and the
+calorie units `cal kcal calorie kilocalorie kJ kilojoule` (above). A word after the number that is not a unit stays part of the
+food name (`2 cupcakes` → 2 × default measure of *cupcakes*; `2 calzones` is not a calorie amount).
 
 Mass units always work for foods with a weight (grams are sent as grams; if the food has no *g* measure the quantity
 is converted and the row says *shown as …*); a recipe that only has serving/"full recipe" measures is converted to a
@@ -154,9 +164,14 @@ otherwise the row asks you to choose.
   added only when Cronometer's own `updateDiary` answer was seen (or the entry is visible in the diary). Every
   fallback the engine had to take (group not offered or disabled, measure converted, an ambiguous result row) is
   written next to that row's tick instead of a plain "added"; a measure click the dialog did not register fails
-  the row (the dialog logs whatever its toggle shows). Press **Escape twice** to abort a running UI batch. Custom
-  recipes/meals from *My Foods* are only reachable through this engine; a custom *meal* can only be added with the
-  dialog's own defaults (Cronometer hides the amount/measure controls for meals), so "2 servings of my meal" fails.
+  the row (the dialog logs whatever its toggle shows). Press **Escape twice** to abort a running UI batch. A
+  custom-only line (`/custom` or the setting) takes only a result row the dialog labels *Custom Food*, *Custom
+  Recipe* or *Custom Meal* and fails when there is none (the engine never switches the dialog's tabs: Cronometer
+  remembers the last tab for your next search). A custom *meal* can only be added with the dialog's own defaults
+  (Cronometer hides the amount/measure controls for meals), so "2 servings of my meal" fails.
+
+Both engines find your custom foods, recipes and meals: the extension's search is the one the *Add Food* dialog's
+*All* tab sends, which includes them; `/custom` (or the setting) sends the *Custom* tab's search instead.
 
 Switch engines in the Input view or in Settings.
 
@@ -222,7 +237,8 @@ off ("TDEE sync unavailable: …") without affecting the multi-add engines.
 1. A tiny script hooks `XMLHttpRequest` on the page at start-up and mirrors Cronometer's own traffic to the extension.
 2. From that traffic it learns your session token, user id, diary groups and the diary date being viewed (never from
    cookies, never persisted).
-3. Each input line is parsed into name / quantity / unit, then searched with Cronometer's food-search endpoint.
+3. Each input line is parsed into name / quantity / unit, then searched with Cronometer's food-search endpoint (the
+   request of the *Add Food* dialog's *All* tab, or of its *Custom* tab for a custom-only line).
 4. The chosen food's measures are fetched with the app's `getFood` RPC; the unit you typed is matched to a measure and
    converted to grams.
 5. The diary is read once (`getDayInfo`) to place each new entry after the existing ones in its group.
@@ -285,7 +301,15 @@ start the rebuild by hand and shows its outcome; the dump carries the same infor
 ## Limitations
 
 * Cronometer Gold *time of day* on entries is not set (entries are untimed, like a normal toolbar add).
-* Custom meals/recipes only via the UI engine; the RPC engine uses the public food search.
+* Custom-only search (`/custom`, *Search only my custom foods*) sends the *Custom* tab's request; that Cronometer's
+  server then answers with your own items only was read from the app's code; live-tested on one account on
+  2026-09-29 (results from another food database are dropped anyway, and the Diagnostics log counts them).
+* Calorie amounts (`300cal almonds`) read the food's calorie figure from the food details Cronometer sends for every
+  line; that reading was worked out from the app's code and live-tested on one account on 2026-09-29 (the diary
+  showed the typed calories) — compare the diary's calories for such an entry with the number you typed. Meals cannot be logged by calories (Cronometer adds a
+  meal whole), and neither can a row whose food details could not be loaded (including the UI engine without a
+  session). A dot as the thousands separator (`1.250 kJ`) reads as a decimal point (1.25 kJ); such a row is flagged
+  as under 5 kcal, so check the preview.
 * Positions inside a group are computed when you press *Find foods* and refreshed right before *Add all*; if you add
   foods by hand in between, ordering inside the group may be off (never lost, only the order). The position counts
   food entries only; the app itself also counts exercises, notes and biometrics and treats timed (Gold) entries
@@ -297,13 +321,11 @@ start the rebuild by hand and shows its outcome; the dump carries the same infor
 * One request at a time with a delay; large batches (50+) take a while on purpose. Server throttling is respected
   (one 5 s back-off, then the row fails).
 * The extension is for the web app at `cronometer.com` only (not the mobile apps, not Cronometer Pro's client view).
-* Adaptive TDEE: the history requests have not been checked against a live account yet (the sign and composition of
-  Cronometer's burned figures, how many days one request may cover, whether accounts without Gold get the full
-  range); use *Check the numbers* and report differences. The history read is limited to five years. The target is
+* Adaptive TDEE: the history requests were checked against one account on 2026-09-28 (intake and burned matched the
+  diary, 92-day requests accepted); not yet confirmed: other accounts' burned composition, larger request spans,
+  whether accounts without Gold get the full range; use *Check the numbers* and report differences. The history read is limited to five years. The target is
   display only (nothing is written to Cronometer), the activity-aware daily target is experimental, and the CSV
   import accepts `YYYY-MM-DD` dates only.
-* Adaptive TDEE keeps one account's copy at a time: if a second Cronometer account enables the tab in the same
-  browser profile, its data replaces the first account's (it is never shown to the other account).
 
 ## Privacy
 
@@ -411,13 +433,13 @@ any problem. The zip is written under a temporary name and renamed to the releas
 passed (a stale release zip is removed first), so a failed build never leaves a package that looks like a good one.
 Run `python tools/check_manifest.py`, `python tools/gen_tdee.py --check` and `bash tests/run.sh` first; the version
 in the file name is the manifest's.
-The zip snapshots the tree, so rebuild it after any change to `src/` or `manifest.json` (the 0.3.1 package holds 26
+The zip snapshots the tree, so rebuild it after any change to `src/` or `manifest.json` (the 0.3.2 package holds 26
 files: manifest, popup, license, 4 icons (16, 32, 48, 128) and the 19 scripts; `vendor/` — the pristine upstream TDEE engine — and any
 `.mjs` file are never packaged, only the generated `src/tdee/adaptive-tdee.js` is). `dist/` is a build output and is
 gitignored: the zip of a tagged version is attached to a GitHub Release (<https://github.com/fabbeskw/multi-add-for-cronometer/releases>), which is where the *From a release
 zip* install path points.
 
-To check that the package really installs, run `python tools/smoke_extension.py dist/multi-add-for-cronometer-0.3.1.zip`
+To check that the package really installs, run `python tools/smoke_extension.py dist/multi-add-for-cronometer-0.3.2.zip`
 (without an argument it checks the working tree). It starts a headless Chrome on a throw-away profile, installs the
 extension through the DevTools command `Extensions.loadUnpacked` — the same checks as *Load unpacked* — and opens
 the extension's own popup page, expecting its title. Google Chrome 137 and later ignore the `--load-extension`
@@ -469,6 +491,26 @@ MIT — see [LICENSE](LICENSE). Unofficial; not affiliated with Cronometer Softw
 
 ## Changelog
 
+* **0.3.2** (2026-09-29) — **Custom-only search**: `/custom` (or `/c`) at the start or end of a line searches only
+  your own custom foods, recipes and meals (`1.5lbs mozzarella cheese /custom`), `/all` searches everything, a flag on
+  a header (`## Dinner /custom`) or alone on a line covers the lines below it, and Settings → *Search only my custom
+  foods* makes it the default for every line. The search then sends the *Add Food* dialog's *Custom* tab request (`selectedTab=CUSTOM`;
+  everything else in the request is unchanged) and drops any result from another database; a line without a custom
+  match says *no custom food matches*, and the UI engine accepts only a *Custom Food / Recipe / Meal* result row
+  without touching the dialog's tabs. The preview footer names the scope. The setting is stored with the other
+  settings (`cmaSettings`); nothing else new is stored or sent. Corrected: the default search (the dialog's *All*
+  tab) always found custom items too — they were never limited to the UI engine.
+  **Log by calories**: `300cal almonds` (also `almonds 300 kcal`, `300 Cal`, `1250kJ almonds`, `1,250 kJ almonds`,
+  `2 x 150cal bar`) adds as much of the food as has that many calories, in the food's default measure (the one the
+  search row shows, else the food's own default; plain grams are used as they are, and a measure without a weight
+  falls back to grams). The amount is worked out from the food's calorie figure in the food details the extension
+  already loads for every line (no extra request), exactly as Cronometer's own diary does when you type calories into
+  an entry; the preview shows the conversion (*300 kcal → 1.83 oz (51.8 g)*), the Qty box holds the calories and
+  changing the unit keeps them, and a target under 5 kcal or a result over 1 kg is flagged. Meals, foods without
+  calorie data and rows whose food details could not be loaded are refused, and an amount too small for the unit
+  to be typed (0.0002 of a recipe serving) asks for another unit. Nothing new is stored or sent (SPEC Appendix N).
+  Also: the UI engine never types an amount that is 0 at three decimals (the row fails instead). The bundled decoder
+  is regenerated for Cronometer build D4E27627 (deployed 2026-09-29; the runtime rebuild had already handled it live).
 * **0.3.1** (2026-09-28) — Chrome Web Store submission build. **First-run notice**: before the multi-add views are
   shown the first time, the panel says what the extension reads and keeps (including that the tab's session and
   account id were already read from the page's start-up requests and are held in memory only, the *Remember my last

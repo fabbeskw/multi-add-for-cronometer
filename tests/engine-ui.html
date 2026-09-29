@@ -315,6 +315,38 @@
       eq(res.failed.length, 0);
       deepEq(window.__added.map((a) => [a.quantity, a.measure]), [[1, 'g'], [100, 'g'], [15, 'ml'], [100, 'medium']]);
     });
+    it('a calorie-amount row (0.3.2) is added like any pick: the computed measure and quantity, never the kcal number or a "kcal" unit', async () => {
+      fresh();
+      // '300cal chicken breast' as plan.js plans it (units.pickEnergy, 165 kcal / 100 g): 6.413 oz = 181.8 g
+      const q = 300 / (165 * 28.3495 / 100);
+      const energy = row('Chicken Breast, Roasted', 'oz', q, 2, {
+        item: { name: 'chicken breast', qty: 300, unit: 'kcal' },
+        hit: { id: 1, name: 'Chicken Breast, Roasted', source: 'NCCDB' },
+        pick: { measure: { name: 'oz', grams: 28.3495, type: 'Weight' }, quantity: q, grams: q * 28.3495, note: '300 kcal → 6.41 oz (181.8 g)', kcal: 300 },
+      });
+      const cup = row('Rice, White, Cooked', 'cup', 0.3623, 3, { item: { name: 'rice', qty: 75, unit: 'kcal' } });
+      const cb = collect();
+      const res = await CMA.engineUi.run([energy, cup], ENGINE_OPTS, cb);
+      eq(res.failed.length, 0, cb.lines.join('\n'));
+      deepEq(window.__added, [
+        { name: 'Chicken Breast, Roasted', quantity: 6.413, measure: 'oz', group: 'Lunch' },
+        { name: 'Rice, White, Cooked', quantity: 0.362, measure: 'cup', group: 'Dinner' },
+      ]);
+      ok(cb.lines.some((l) => /\[0\] amount: amount 6\.413$/.test(l)), 'the amount box gets the measure quantity (3 decimals)');
+      ok(!cb.lines.some((l) => /kcal/.test(l)), 'nothing typed or selected says kcal');
+    });
+    it('an amount that is 0 at 3 decimals is never typed into the amount box: the row fails, the next one is added', async () => {
+      fresh();
+      // e.g. 0.2 kcal of a 500 kcal recipe serving, had a plan let it through (units.pickEnergy refuses it)
+      const tiny = row('Rice, White, Cooked', 'cup', 0.0004, 3, { item: { name: 'rice', qty: 0.2, unit: 'kcal' } });
+      const cb = collect();
+      const res = await CMA.engineUi.run([tiny, row('Rice, White, Cooked', 'cup', 1, 3)], ENGINE_OPTS, cb);
+      eq(res.failed.length, 1, cb.lines.join('\n')); ok(res.failed[0].row === tiny);
+      ok(/^amount 0\.0004 becomes "0" in the amount box/.test(res.failed[0].error.message), res.failed[0].error.message);
+      ok(!cb.lines.some((l) => /\[0\] amount: amount 0$/.test(l)), 'no 0 typed');
+      deepEq(window.__added.map((a) => a.quantity), [1]);
+      eq(document.querySelector('.pretty-dialog'), null, 'the failed row closed its dialog');
+    });
     it('case-insensitive / startsWith row matching; a measure that is not offered fails the row unless the amount can be converted', async () => {
       fresh();
       const plan = [
@@ -411,6 +443,48 @@
       ok(cb.lines.some((l) => /\[0\] select: row "Chicken Breast, Roasted" \(exact, source USDA\)/.test(l)), cb.lines.join('\n'));
       ok(cb.lines.some((l) => /\[1\] select: row "Chicken Breast, Roasted" \(exact, source NCCDB\)/.test(l)));
       ok(cb.lines.some((l) => /\[2\] select: row "Mum's Granola" \(exact\)/.test(l)), 'a single match carries no source note');
+    });
+    it('custom-only rows (0.3.2): the Custom Food row wins over same-named database rows, a result without a custom row fails, normal rows are unchanged, the dialog tabs are never clicked', async () => {
+      // the user's own 'Chicken Breast, Roasted' next to the NCCDB and USDA ones (listed last, as a search may rank it)
+      const own = { id: 41, name: 'Chicken Breast, Roasted', source: 'Custom', type: 'FOOD', defaultMeasure: 'serving', measures: [
+        { name: 'serving', grams: 150, type: 'Atomic' }, { name: 'g', grams: 1, type: 'Weight' } ] };
+      fresh({ dataset: CMA.mock.DATASET.concat([own]) });
+      const tabClicks = [];
+      const onTab = (ev) => { if (ev.target && ev.target.closest && ev.target.closest('.search-tab')) tabClicks.push(ev.type + ':' + dom.textOf(ev.target)); };
+      for (const t of ['mousedown', 'click', 'keydown']) document.addEventListener(t, onTab, true);
+      const custom = { customOnly: true };
+      const plan = [
+        row('Chicken Breast, Roasted', 'g', 100, 2, Object.assign({ hit: { id: 41, name: 'Chicken Breast, Roasted', source: 'Custom', type: 'FOOD' } }, custom)),
+        Object.assign(row('Chicken Breast, Roasted', 'serving', 2, 3, custom), { hit: null }),    // unverified: no hit, typed name
+        row('Banana, Raw', 'medium', 1, 4, custom),                                              // one USDA row only: never accepted
+        row('Chicken Breast, Roasted', 'g', 150, 2, { hit: { id: 1, name: 'Chicken Breast, Roasted', source: 'NCCDB' } }),
+        row('Banana, Raw', 'medium', 1, 4),                                                      // the same single row, not custom-only: accepted
+      ];
+      const cb = collect();
+      try {
+        const res = await CMA.engineUi.run(plan, ENGINE_OPTS, cb);
+        eq(res.added.length, 4, cb.lines.join('\n'));
+        eq(res.failed.length, 1);
+        ok(res.failed[0].row === plan[2], 'the custom-only banana row failed');
+        ok(/no custom food row matches "Banana, Raw" \(1 result row\(s\), none of them a custom food, recipe or meal\)/.test(res.failed[0].error.message), res.failed[0].error.message);
+        deepEq(mock.state.addedIds, [41, 41, 1, 8]);
+        deepEq(window.__added.map((a) => [a.name, a.measure, a.quantity]), [['Chicken Breast, Roasted', 'g', 100], ['Chicken Breast, Roasted', 'serving', 2], ['Chicken Breast, Roasted', 'g', 150], ['Banana, Raw', 'medium', 1]]);
+        ok(cb.lines.some((l) => /\[0\] row: start: .*\(custom foods only\)$/.test(l)), cb.lines.join('\n'));
+        ok(cb.lines.some((l) => /\[3\] select: row "Chicken Breast, Roasted" \(exact, source NCCDB\)/.test(l)), 'a normal row still picks by the hit source among 3 rows');
+        ok(cb.lines.some((l) => /\[4\] select: row "Banana, Raw" \(exact\)/.test(l)));
+        deepEq(tabClicks, [], 'no search tab was touched (the app would remember it for the next manual search)');
+        eq(mock.state.closedWithoutAdd, 1, 'the failed row closed its dialog');
+      } finally {
+        for (const t of ['mousedown', 'click', 'keydown']) document.removeEventListener(t, onTab, true);
+      }
+      // a single custom row whose name does not match is accepted (with a warning), a single database row never is
+      fresh();
+      const res2 = await CMA.engineUi.run([Object.assign(row('Granola', 'serving', 1, 1, custom), { hit: null }), Object.assign(row('Broccoli', 'g', 50, 3, custom), { hit: null })], ENGINE_OPTS, null);
+      eq(res2.added.length, 1); eq(res2.failed.length, 1);
+      eq(res2.added[0].row.item.name, 'granola');
+      ok(res2.added[0].warnings.some((w) => /chosen by only custom result/.test(w)), JSON.stringify(res2.added[0].warnings));
+      ok(/no custom food row matches "broccoli"/.test(res2.failed[0].error.message), res2.failed[0].error.message);
+      deepEq(mock.state.addedIds, [20]);
     });
     it('measure labels: "cup" picks "cup — 240 ml" (not "cup, chopped"); amount-prefixed items and gram suffixes are honoured', async () => {
       fresh();

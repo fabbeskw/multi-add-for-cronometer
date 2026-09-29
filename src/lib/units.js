@@ -2,6 +2,8 @@
  *
  * CMA.units.pickMeasure(measures, unit, qty, opts) → {measure, quantity, grams, note}
  *                                                  | {error, measure?}
+ * CMA.units.pickEnergy(measures, energyValue, targetKcal, opts) → the same shape for a calorie amount (`300cal
+ *                                                  almonds`, 0.3.2): see pickEnergy below.
  *
  * `measures` is what CMA.rpc.measuresOf(food) returns: [{id, name, grams, type, foodId, hidden, ...}]
  * where `type` is the Measure$Type name ('Weight'|'Volume'|'Atomic'|'Recipe'),
@@ -30,8 +32,20 @@ window.CMA = window.CMA || {};
     g: 'g', gram: 'g', grams: 'g', kg: 'kg', mg: 'mg', oz: 'oz', ounce: 'oz', ounces: 'oz',
     lb: 'lb', lbs: 'lb', pound: 'lb', pounds: 'lb', ml: 'ml', milliliter: 'ml', millilitre: 'ml',
     l: 'l', liter: 'l', litre: 'l', 'fl oz': 'fl oz', cup: 'cup', cups: 'cup', tbsp: 'tbsp',
-    tablespoon: 'tbsp', tsp: 'tsp', teaspoon: 'tsp'
+    tablespoon: 'tbsp', tsp: 'tsp', teaspoon: 'tsp', kcal: 'kcal', cal: 'kcal', kj: 'kj'
   };
+  /** kJ per kcal (SPEC §5.3, Appendix N): Cronometer stores energy only as kcal (nutrient 208) and shows kJ = kcal × 4.1868. */
+  const KJ_PER_KCAL = 4.1868;
+  /** A calorie amount that comes out above this many grams is still ready, with a check-the-number note (`3000cal oil`). */
+  const ENERGY_SANITY_G = 1000;
+  /** … and so is a target below this many kcal (`1.250 kJ` meant as 1250, `2 cal` meant as 2 servings). */
+  const ENERGY_SANITY_MIN_KCAL = 5;
+  /**
+   * The Add Food dialog's amount box takes 3 decimals and 6 characters (engine-ui.formatQuantity): a calorie amount is
+   * put on a measure only when its quantity survives that within this share (0.0014 × a 5,000 kcal 'full recipe' would
+   * be typed as 0.001, and 0.0004 as 0).
+   */
+  const ENERGY_TYPABLE_SHARE = 0.05;
 
   function normalizeUnit(u) {
     if (u == null) return null;
@@ -261,6 +275,8 @@ window.CMA = window.CMA || {};
     if (q != null && (!isFinite(q) || q <= 0)) return { error: 'invalid quantity' };
     const def = defaultMeasure(measures, opts);
     const u = unit == null || unit === '' ? null : normalizeUnit(unit);
+    // A calorie amount is never a count of a measure whose name happens to contain 'cal': plan.js sends it to pickEnergy.
+    if (u === 'kcal' || u === 'kj') return { error: "a calorie amount needs the food's calorie data" };
     if (unit != null && unit !== '' && !u) {
       // Not a known unit: treat like an "other unit word" so a custom word can still match a measure.
       return pickOther(measures, String(unit).toLowerCase().trim(), q == null ? 1 : q);
@@ -344,6 +360,133 @@ window.CMA = window.CMA || {};
     return { error: "no '" + u + "' measure for this food", unit: u };
   }
 
+  // ---------------------------------------------------------------------------
+  // Calorie amounts (0.3.2, SPEC §5.3 / Appendix N): `300cal almonds` = enough almonds for 300 kcal.
+  // ---------------------------------------------------------------------------
+  /** True for the parser's energy units: 'kcal' (cal, Cal, calories, …) and 'kj' (kJ, kilojoules). */
+  function isEnergyUnit(u) {
+    if (u == null || u === '') return false;
+    const t = String(u).trim().toLowerCase();
+    const n = t === 'kcal' || t === 'kj' ? t : normalizeUnit(t);
+    return n === 'kcal' || n === 'kj';
+  }
+  /** An energy amount in kcal (kJ ÷ 4.1868), or null when it is not a positive finite amount of an energy unit. */
+  function energyToKcal(qty, unit) {
+    const q = qty == null || qty === '' ? NaN : Number(qty);
+    if (!isFinite(q) || q <= 0 || !isEnergyUnit(unit)) return null;
+    return String(unit).trim().toLowerCase() === 'kj' || normalizeUnit(unit) === 'kj' ? q / KJ_PER_KCAL : q;
+  }
+
+  /**
+   * kcal in ONE of measure `m` for a food whose nutrient 208 amount is `value` — the Add Food dialog's `Rrj` (build
+   * FB395E8B; names are build-specific): a Recipe-type measure → value / k (a serving-based recipe's value is the whole
+   * recipe, k its servings; 0 when k is 0); a weightless Weight measure (k 0, the 'full recipe') → value; anything else
+   * value × k / 100 (value per 100 g). k = Measure.k = measuresOf().grams; Measure.a (the label's amount) plays no part.
+   * Returns 0, never NaN, when the combination yields nothing usable.
+   */
+  function kcalPerUnit(m, value) {
+    const v = Number(value);
+    if (!m || value == null || !isFinite(v)) return 0;
+    const k = Number(m.grams) || 0;
+    const t = typeName(m);
+    const per = t === 'Recipe' ? (k === 0 ? 0 : v / k) : (t === 'Weight' && k === 0 ? v : v * k / 100);
+    return isFinite(per) && per > 0 ? per : 0;
+  }
+  /** A measure a calorie amount can be expressed in: energy per unit > 0, and a weight (or a recipe count) to send. */
+  function carriesEnergy(m, value) {
+    return !!m && kcalPerUnit(m, value) > 0 && (isRecipeLike(m) || Number(m.grams) > 0);
+  }
+  /** A quantity the dialog's amount box can take (ENERGY_TYPABLE_SHARE): > 0 at 3 decimals, below 1,000,000, close enough. */
+  function typable(q) {
+    const t = round(q, 3);
+    return isFinite(q) && t > 0 && round(q, 0) < 1e6 && Math.abs(t - q) <= q * ENERGY_TYPABLE_SHARE;
+  }
+  /** 1.8277 → '1.83', 51.81 → '51.8', 0.0042 → '0.004': the preview's energy note, never the wire value. */
+  function shortNumber(x) {
+    const n = Number(x);
+    if (!isFinite(n)) return '';
+    let r = round(n, Math.abs(n) >= 10 ? 1 : 2);
+    if (r === 0 && n !== 0) r = round(n, 3);
+    return String(r);
+  }
+
+  /**
+   * CMA.units.pickEnergy(measures, energyValue, targetKcal, opts) → {measure, quantity, grams, note, kcal, kcalPerUnit,
+   * warn} | {error}. energyValue = CMA.rpc.energyKcalOf(food) (per the Food's basis). The quantity is what Cronometer's
+   * own diary Calories-cell edit computes (`j2i`: quantity = target / perUnit, nothing when perUnit is 0), so the diary
+   * shows the target for the entry; grams = gramsFor(measure, quantity) like any pick (`bsj`: × 1 for a recipe count).
+   * opts:
+   *  - hitMeasureId / defaultMeasureId: the measure is the SAME default a unit-less line starts on (defaultMeasure); a
+   *    bare gram default is fine here (the amount is exact whichever measure carries it, so no needs-choice). When that
+   *    measure carries no energy per unit (a weightless Volume / Atomic / Recipe measure, a weightless Weight measure
+   *    that is not the 'full recipe') the plain 'g', then any Weight measure with grams, else {error};
+   *  - measureId: the measure the user picked in the panel, kept with the same target; {error, refused: measure} when
+   *    it carries no energy (the row asks for another unit);
+   *  - meal: {error} — the Add dialog hides the measure selector for a meal and adds it whole, so it cannot be scaled;
+   *  - kj: the typed kJ number, for the note ('1250 kJ (298.6 kcal) → …').
+   * A measure is used only when the quantity is typable (the dialog's 3 decimals, ENERGY_TYPABLE_SHARE): the default
+   * path moves on to the next candidate (`2cal <recipe>` whose 'full recipe' has 5,000 kcal → its g), and when none
+   * is typable, or the picked measure is not, the row asks for another unit ({error, refused}).
+   * The note reads '300 kcal → 1.83 oz (51.8 g)'; above 1000 g or under 5 kcal it adds a check-the-number warning
+   * (`warn: true`, the row stays ready). Every division is guarded: a non-finite result is an error, never a quantity.
+   */
+  function pickEnergy(measures, energyValue, targetKcal, opts) {
+    const o = opts || {};
+    if (o.meal) return { error: 'calorie amounts are not supported for meals (Cronometer adds a meal whole)' };
+    if (!Array.isArray(measures) || measures.length === 0) return { error: 'food has no measures' };
+    const kcal = targetKcal == null || targetKcal === '' ? NaN : Number(targetKcal);
+    if (!isFinite(kcal) || kcal <= 0) return { error: 'invalid quantity' };
+    const value = energyValue == null ? NaN : Number(energyValue);
+    if (!isFinite(value) || value <= 0) return { error: 'no calorie data for this food' };
+    const typed = o.kj != null && isFinite(Number(o.kj)) ? shortNumber(o.kj) + ' kJ (' + shortNumber(kcal) + ' kcal)' : shortNumber(kcal) + ' kcal';
+    // 0.0004 × a 'full recipe' would reach the dialog as 0, 2,000,000 g as a cut-off number: ask for another unit
+    const untypable = (x) => ({
+      error: typed + ' is too ' + (kcal / kcalPerUnit(x, value) < 1 ? 'small' : 'large') + " an amount of '" + x.name + "' to add — pick another unit",
+      refused: x
+    });
+    let m;
+    if (o.measureId != null) {
+      m = measures.find(x => x && Number(x.id) === Number(o.measureId)) || null;
+      if (!m) return { error: 'measure not found' };
+      if (!carriesEnergy(m, value)) return { error: "'" + m.name + "' has no weight to put calories on — pick another unit", refused: m };
+      if (!typable(kcal / kcalPerUnit(m, value))) return untypable(m);
+    } else {
+      const shown = visibleMeasures(measures);
+      const pool = shown.length ? shown : measures.filter(Boolean);
+      const byName = findByUnitName(pool, 'g');
+      const candidates = [
+        defaultMeasure(measures, o),
+        gramMeasure(pool),
+        byName && typeName(byName) === 'Weight' ? byName : null,
+        pool.find(x => typeName(x) === 'Weight' && Number(x.grams) > 0)
+      ];
+      const carrying = candidates.filter(x => carriesEnergy(x, value));
+      if (!carrying.length) return { error: 'no measure with a weight to put calories on' };
+      m = carrying.find(x => typable(kcal / kcalPerUnit(x, value))) || null;
+      if (!m) return untypable(carrying[0]);
+    }
+    const per = kcalPerUnit(m, value);
+    const q = kcal / per;
+    if (!isFinite(q) || q <= 0) return { error: 'no calorie data for this food' };
+    const r = result(m, q, null);
+    if (!(r.quantity > 0) || !isFinite(r.grams)) return { error: 'the calorie amount is too small for ' + m.name };
+    const recipe = isRecipeLike(m);
+    const label = (Number(m.amount) > 0 && Number(m.amount) !== 1 ? formatQuantity(m.amount) + ' ' : '') + m.name;
+    // '51.8 g' on the plain gram measure, '1.83 oz (51.8 g)', '0.5 × serving' for a recipe count (its grams are the count)
+    let amount = shortNumber(r.quantity) + (recipe || label !== m.name ? ' × ' : ' ') + label;
+    if (label === 'g' && Number(m.grams) === 1) amount = shortNumber(r.grams) + ' g';
+    else if (!recipe) amount += ' (' + shortNumber(r.grams) + ' g)';
+    r.note = typed + ' → ' + amount;
+    r.kcal = kcal;
+    r.kcalPerUnit = per;
+    const heavy = !recipe && r.grams > ENERGY_SANITY_G;
+    const tiny = kcal < ENERGY_SANITY_MIN_KCAL;
+    r.warn = heavy || tiny;
+    if (heavy) r.note += ' — over 1 kg: check the food and the number';
+    if (tiny) r.note += ' — under ' + ENERGY_SANITY_MIN_KCAL + ' kcal: check the number';
+    return r;
+  }
+
   /** Convert a quantity of a mass unit to grams (null for non-mass units). */
   function toGrams(qty, unit) {
     const u = normalizeUnit(unit);
@@ -374,6 +517,7 @@ window.CMA = window.CMA || {};
     const raw = unit == null ? '' : String(unit).trim();
     if (!raw) return null;
     const u = normalizeUnit(raw);
+    if (u === 'kcal' || u === 'kj') return null;     // a calorie target is not an amount of any measure (pickEnergy)
     const mu = nameUnit(measure.name);
     const recipe = isRecipeLike(measure);
     if (u && mu === u) return { quantity: round(q, 6), note: null };
@@ -416,6 +560,10 @@ window.CMA = window.CMA || {};
 
   window.CMA.units = {
     pickMeasure,
+    pickEnergy,
+    kcalPerUnit,
+    isEnergyUnit,
+    energyToKcal,
     withMeasure,
     convertQuantity,
     defaultMeasure,
@@ -433,6 +581,9 @@ window.CMA = window.CMA || {};
     formatQuantity,
     MASS_G,
     VOLUME_ML,
-    TYPE_NAMES
+    TYPE_NAMES,
+    KJ_PER_KCAL,
+    ENERGY_SANITY_G,
+    ENERGY_SANITY_MIN_KCAL
   };
 })();

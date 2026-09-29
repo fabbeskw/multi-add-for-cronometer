@@ -32,10 +32,13 @@
     // Measure/1979099908: [d a, z b, i foodId, z d, i measureId, o f, s name, o i, o type, d gramsPerUnit]
     return { $t: MEASURE, f: [0, false, foodId, false, id, null, name, null, { $t: MTYPE, ordinal: TYPES[type] }, grams] };
   }
-  function food(id, name, defaultMeasureId, measures, type) {
+  function food(id, name, defaultMeasureId, measures, type, kcal) {
     const f = new Array(20).fill(null);
     f[0] = 0; f[1] = false; f[3] = 0; f[4] = name; f[5] = 0; f[6] = 0; f[7] = id; f[10] = 0;
     f[11] = { $t: FOODMEASURES, f: [defaultMeasureId, measures] };
+    // f[12] stands in for the NutrientMap: the fake rpc.energyKcalOf below reads it (the real reader, over a decoded
+    // NutrientMap, is tested in capture.html and load-all.html)
+    f[12] = kcal === undefined ? null : { kcal };
     f[14] = false; f[15] = 'usda'; f[17] = []; f[18] = type || null; f[19] = 0;
     return { $t: FOOD, f };
   }
@@ -67,10 +70,36 @@
     { id: 1100, name: 'Whey Isolate', hitMeasureId: 0, defaultId: 0, translationId: 0, m: [measure(1100, 11001, 'g', 1, 'Weight')] },
     // hit unusable but FoodMeasures.f[0] names the 'bar' measure (the dialog's TCe default)
     { id: 1200, name: 'Granola Crunch', hitMeasureId: 0, defaultId: 12002, translationId: 0, m: [
-      measure(1200, 12001, 'g', 1, 'Weight'), measure(1200, 12002, 'bar', 45, 'Atomic')] }
+      measure(1200, 12001, 'g', 1, 'Weight'), measure(1200, 12002, 'bar', 45, 'Atomic')] },
+    // custom-only search (0.3.2): a public food listed before the user's own custom food of a similar name, a custom
+    // recipe, and a hit without a source (the app styles it like a custom one)
+    { id: 1300, name: 'Mozzarella, Part Skim', source: 'NCCDB', hitMeasureId: 13001, translationId: 0, m: [
+      measure(1300, 13001, 'g', 1, 'Weight'), measure(1300, 13002, 'oz', 28.35, 'Weight')] },
+    { id: 1310, name: 'Mozzarella Cheese', source: 'Custom', type: 'FOOD', hitMeasureId: 13101, translationId: 0, m: [
+      measure(1310, 13101, 'g', 1, 'Weight'), measure(1310, 13102, 'lb', 453.592, 'Weight')] },
+    { id: 1320, name: 'Mozzarella Bake', source: 'Custom', type: 'RECIPE', hitMeasureId: 13201, translationId: 0, m: [
+      measure(1320, 13201, 'serving', 250, 'Recipe')] },
+    { id: 1330, name: 'Mozzarella Sticks', source: null, hitMeasureId: 13301, translationId: 0, m: [
+      measure(1330, 13301, 'g', 1, 'Weight'), measure(1330, 13302, 'stick', 28, 'Atomic')] },
+    // calorie amounts (0.3.2): `kcal` = the Food's nutrient 208 (per 100 g; a serving-based recipe's whole-recipe total)
+    { id: 1400, name: 'Almonds', hitMeasureId: 14002, translationId: 0, kcal: 579, m: [
+      measure(1400, 14001, 'g', 1, 'Weight'), measure(1400, 14002, 'oz', 28.3495, 'Weight'), measure(1400, 14003, 'cup, whole', 143, 'Volume'),
+      measure(1400, 14004, 'handful', 0, 'Atomic')] },
+    { id: 1401, name: 'Almonds, Roasted', hitMeasureId: 14012, translationId: 0, kcal: 600, m: [
+      measure(1401, 14011, 'g', 1, 'Weight'), measure(1401, 14012, 'oz', 28.3495, 'Weight')] },
+    { id: 1410, name: 'Casserole', source: 'Custom', type: 'RECIPE', hitMeasureId: 14101, translationId: 0, kcal: 2000, m: [
+      measure(1410, 14101, 'serving', 4, 'Recipe'), measure(1410, 14102, 'full recipe', 0, 'Weight')] },
+    { id: 1420, name: 'Bento Meal', source: 'Custom', type: 'MEAL', hitMeasureId: 14201, translationId: 0, kcal: 650, m: [
+      measure(1420, 14201, 'full recipe', 0, 'Weight')] },
+    { id: 1430, name: 'Diet Soda', hitMeasureId: 14301, translationId: 0, kcal: 0, m: [
+      measure(1430, 14301, 'can', 355, 'Volume'), measure(1430, 14302, 'g', 1, 'Weight')] },
+    { id: 1440, name: 'Mystery Powder', hitMeasureId: 14401, translationId: 0, m: [measure(1440, 14401, 'scoop', 30, 'Atomic')] },
+    // the hit's measure has no weight and there is no 'g': the first Weight measure with grams carries the calories
+    { id: 1450, name: 'Walnut Pieces', hitMeasureId: 14501, translationId: 0, kcal: 654, m: [
+      measure(1450, 14501, 'handful', 0, 'Atomic'), measure(1450, 14502, 'lb', 453.592, 'Weight')] }
   ];
   const FOODS = {};
-  for (const d of DB) FOODS[d.id] = food(d.id, d.name, d.defaultId != null ? d.defaultId : d.hitMeasureId, d.m);
+  for (const d of DB) FOODS[d.id] = food(d.id, d.name, d.defaultId != null ? d.defaultId : d.hitMeasureId, d.m, d.type, d.kcal);
 
   function makeFake() {
     const fake = {
@@ -89,9 +118,12 @@
       async searchFoods(session, query, opts) {
         rec('searchFoods', [query, opts]); maybeFail('searchFoods');
         const q = String(query).toLowerCase();
+        // opts.customOnly: the server's Custom tab answers only the user's own items (source 'Custom' or none)
+        const custom = !!(opts && opts.customOnly === true);
         return DB.filter(d => (d.hitName || d.name).toLowerCase().indexOf(q.split(',')[0].split(' ')[0]) >= 0)
+          .filter(d => !custom || d.source === 'Custom' || d.source === null)
           .map(d => ({ id: d.id, name: d.hitName || d.name, measureId: d.hitMeasureId, measureDisplayName: '',
-            score: 1, source: 'usda', type: 'Food', translationId: d.translationId, retired: false }));
+            score: 1, source: 'source' in d ? d.source : 'usda', type: d.type || 'Food', translationId: d.translationId, retired: false }));
       },
       async getFood(session, id) {
         rec('getFood', [id]); maybeFail('getFood');
@@ -103,6 +135,11 @@
         return list.map(m => ({ id: m.f[4], name: m.f[6], grams: m.f[9], foodId: m.f[2],
           type: ['Weight', 'Volume', 'Atomic', 'Recipe'][m.f[8].ordinal] }));
       },
+      energyKcalOf(f) {
+        const k = f && f.f && f.f[12] ? f.f[12].kcal : null;
+        return typeof k === 'number' && Number.isFinite(k) ? k : null;
+      },
+      foodTypeOf(f) { return f && f.f && f.f[18] ? String(f.f[18]).toUpperCase() : null; },
       async getDayInfo(session, day) {
         rec('getDayInfo', [day]); maybeFail('getDayInfo');
         if (fake.dayInfoError) throw fake.dayInfoError;
@@ -343,6 +380,116 @@
     });
   });
 
+  describe('parse.lines — search-scope flags /custom, /c, /all (0.3.2)', () => {
+    const one = (t) => CMA.parse.lines(t)[0];
+    it('a trailing or leading flag comes off before the quantity is parsed: the quantity stays, the name never holds the flag', () => {
+      const cases = [
+        // text, qty, unit, name, customOnly
+        ['1.5lbs mozzarella cheese /custom', 1.5, 'lb', 'mozzarella cheese', true],
+        ['banana 1 /custom', 1, null, 'banana', true],
+        ['eggs x2 /custom', 2, null, 'eggs', true],
+        ['vitamin c 500mg x2 /custom', 1, 'g', 'vitamin c', true],
+        ['1/2 cup oats /c', 0.5, 'cup', 'oats', true],
+        ['/custom 200g chicken breast', 200, 'g', 'chicken breast', true],
+        ['/c 2 large eggs', 2, 'large', 'eggs', true],
+        ['chicken breast, 200 g /all', 200, 'g', 'chicken breast', false],
+        ['/all banana', null, null, 'banana', false],
+        ['banana /CUSTOM', null, null, 'banana', true],
+        ['/C banana', null, null, 'banana', true],
+        ['banana /All', null, null, 'banana', false],
+      ];
+      for (const [text, qty, unit, name, custom] of cases) {
+        const items = CMA.parse.lines(text);
+        eq(items.length, 1, text);
+        const r = items[0];
+        eq(r.name, name, text + ' name');
+        if (qty == null) eq(r.qty, null, text + ' qty'); else approx(r.qty, qty, 1e-9, text + ' qty');
+        eq(r.unit, unit, text + ' unit');
+        eq(r.customOnly, custom, text + ' customOnly');
+        eq(r.raw, text, text + ' raw unchanged');
+        ok(!r.error, text + ': ' + r.error);
+      }
+      ok(!('customOnly' in one('banana')), 'no flag: no customOnly key');
+    });
+    it('flags and @group tags come off in any order', () => {
+      for (const text of ['cheese /custom @lunch', 'cheese @lunch /custom', '/custom @lunch cheese', '@lunch /c cheese', '@lunch cheese /custom', '/custom cheese @lunch']) {
+        const r = CMA.parse.lines('## Dinner\n' + text)[0];
+        eq(r.name, 'cheese', text); eq(r.group, 'lunch', text); eq(r.customOnly, true, text);
+        deepEq(r.groupFallback, ['Dinner'], text);
+      }
+      deepEq(CMA.parse.stripMarks('/c @lunch cheese /all', true), { text: 'cheese', customOnly: false, leadTag: 'lunch', trailTag: null });
+      eq(one('/all cheese /custom').customOnly, true, 'the last flag in reading order wins');
+      eq(one('/custom cheese /all').customOnly, false);
+      deepEq(CMA.parse.stripMarks('## x', false), { text: '## x', customOnly: undefined, leadTag: null, trailTag: null });
+    });
+    it('every segment of a split line carries the flag', () => {
+      const items = CMA.parse.lines('oats 40 g, milk 200 ml /custom\n/all oats 40 g; milk 200 ml');
+      deepEq(items.map(i => [i.name, i.qty, i.unit, i.part, i.customOnly]), [['oats', 40, 'g', 0, true], ['milk', 200, 'ml', 1, true], ['oats', 40, 'g', 0, false], ['milk', 200, 'ml', 1, false]]);
+      eq(items[1].raw, 'oats 40 g, milk 200 ml /custom');
+    });
+    it('a flag at the start or end of one food of a split line applies to that food only, and wins over the line\'s', () => {
+      let items = CMA.parse.lines('mozzarella 30g /custom, banana 1 medium');
+      deepEq(items.map(i => [i.name, i.qty, i.unit, i.part, i.customOnly]), [['mozzarella', 30, 'g', 0, true], ['banana', 1, 'medium', 1, undefined]]);
+      ok(!items[0].error && !items[1].error);
+      items = CMA.parse.lines('oats 40 g, /c milk 200 ml\noats 40 g /all, milk 200 ml /custom\n## Lunch /custom\noats 40 g /all; milk 200 ml');
+      deepEq(items.map(i => [i.name, i.customOnly]), [['oats', undefined], ['milk', true], ['oats', false], ['milk', true], ['oats', false], ['milk', true]]);
+    });
+    it('a flag on a header line is stripped from the group name and applies to the lines below until the next header; a line\'s own flag wins', () => {
+      const items = CMA.parse.lines('## Dinner /custom\ncheese 30g\nbanana /all\n# a comment about it\napple\n## Lunch\nrice 1 cup\n# Snacks /c\npear\nLunch: /all\nsoup\nBreakfast: /custom\neggs x2\n## Dinner\nkiwi');
+      deepEq(items.map(i => [i.name, i.group, i.customOnly]), [
+        ['cheese', 'Dinner', true], ['banana', 'Dinner', false], ['apple', 'Dinner', true],   // a `# comment` is no header
+        ['rice', 'Lunch', undefined], ['pear', 'Snacks', true], ['soup', 'Lunch', false], ['eggs', 'Breakfast', true],
+        ['kiwi', 'Dinner', undefined]]);                                                       // a header without a flag ends it
+      eq(items[0].qty, 30); eq(items[6].qty, 2);
+      eq(CMA.parse.lines('# Lunch /custom').length, 0, 'a header line is never an item');
+    });
+    it('a flag right before a header\'s colon, or in front of a header, still belongs to the header', () => {
+      let items = CMA.parse.lines('Dinner /custom:\ncheese 30g\n## Lunch /c:\npear\n# Snacks: /all\napple');
+      deepEq(items.map(i => [i.name, i.group, i.customOnly]), [['cheese', 'Dinner', true], ['pear', 'Lunch', true], ['apple', 'Snacks', false]]);
+      deepEq(CMA.parse.stripMarks('Dinner /all: /custom', true), { text: 'Dinner:', customOnly: true, leadTag: null, trailTag: null });
+      items = CMA.parse.lines('## Lunch\n/custom ## Dinner\nmozzarella 30g\n/c # Snacks\npear\n/custom ## Breakfast /all\neggs x2\n/custom // a note\nkiwi');
+      deepEq(items.map(i => [i.name, i.group, i.customOnly]), [['mozzarella', 'Dinner', true], ['pear', 'Snacks', true], ['eggs', 'Breakfast', false], ['kiwi', 'Breakfast', false]]);
+      deepEq(items.map(i => i.groupFallback), [['Lunch'], ['Dinner', 'Lunch'], ['Snacks', 'Dinner', 'Lunch'], ['Snacks', 'Dinner', 'Lunch']], 'the headers switched the group');
+      eq(CMA.parse.lines('/custom # a comment about it').length, 0, 'a comment stays a comment');
+    });
+    it('a line that is only a flag (`/custom`, `## /custom`) sets the scope of the lines below it and keeps the group', () => {
+      let items = CMA.parse.lines('/custom\nmozzarella 30g\nbanana /all\n## Dinner\nkiwi');
+      deepEq(items.map(i => [i.name, i.group, i.customOnly]), [['mozzarella', null, true], ['banana', null, false], ['kiwi', 'Dinner', undefined]]);
+      items = CMA.parse.lines('## Dinner /custom\nmozzarella 30g\n## /all\nmozzarella 30g\n# /c\npear\n/ALL\napple');
+      deepEq(items.map(i => [i.name, i.group, i.customOnly]), [['mozzarella', 'Dinner', true], ['mozzarella', 'Dinner', false], ['pear', 'Dinner', true], ['apple', 'Dinner', false]]);
+      ok(items.every(i => !i.error), 'no "no food name" rows');
+      eq(CMA.parse.lines('/custom').length, 0);
+      eq(CMA.parse.lines('## /custom').length, 0);
+      const r = one('/custom @lunch');
+      eq(r.error, 'no food name', 'with a tag it is a (nameless) line of its own'); eq(r.customOnly, true);
+    });
+    it('a flag left inside a food name (before a trailing quantity) fails the line instead of being searched', () => {
+      for (const [text, name, tok] of [['cheese /custom 30g', 'cheese /custom', '/custom'], ['eggs /custom x2', 'eggs /custom', '/custom'],
+          ['rice /c 1 1/2', 'rice /c', '/c'], ['1/2 cup /C oats', '/C oats', '/C'], ['vitamin /c 500mg', 'vitamin /c', '/c']]) {
+        const r = one(text);
+        eq(r.name, name, text); ok(!('customOnly' in r), text);
+        eq(r.error, "move '" + tok + "' to the start or end of the line", text);
+      }
+    });
+    it('not a flag: fractions, names with slashes, glued forms, `//` comments and `@custom`', () => {
+      let r = one('1/2 cup oats'); eq(r.qty, 0.5); ok(!('customOnly' in r));
+      r = one('rice 1 1/2 cups'); eq(r.qty, 1.5); eq(r.name, 'rice'); ok(!('customOnly' in r));
+      r = one('salt/pepper 1 tsp'); eq(r.name, 'salt/pepper'); eq(r.qty, 1); ok(!('customOnly' in r));
+      r = one('coffee w/o sugar'); eq(r.name, 'coffee w/o sugar'); ok(!('customOnly' in r));
+      r = one('half/half 30ml'); eq(r.name, 'half/half'); eq(r.qty, 30); eq(r.unit, 'ml'); ok(!('customOnly' in r));
+      r = one('cheese/custom'); eq(r.name, 'cheese/custom'); ok(!('customOnly' in r));
+      r = one('cheese //custom'); eq(r.name, 'cheese //custom'); ok(!('customOnly' in r));
+      r = one('/customer salad'); eq(r.name, '/customer salad'); ok(!('customOnly' in r));
+      r = one('pie /call'); eq(r.name, 'pie /call'); ok(!('customOnly' in r));
+      eq(CMA.parse.lines('// /custom cheese').length, 0, '`//` line is a comment');
+      r = one('cheese @custom'); eq(r.group, 'custom'); eq(r.name, 'cheese'); ok(!('customOnly' in r));
+      r = one('@custom cheese'); eq(r.group, 'custom'); ok(!('customOnly' in r));
+      for (const t of ['1/2 cup oats', 'salt/pepper 1 tsp', 'coffee w/o sugar', 'half/half 30ml', 'cheese/custom', 'cheese //custom', '/customer salad', 'pie /call']) {
+        ok(!one(t).error, t + ': ' + one(t).error);
+      }
+    });
+  });
+
   // ===========================================================================
   // §5.3 units.pickMeasure
   // ===========================================================================
@@ -362,6 +509,211 @@
     fullRecipe: [{ id: 7101, name: 'full recipe', grams: 0, type: 'Weight', foodId: 710 }],
     volOnlyOdd: [{ id: 1, name: 'ladle', grams: 120, type: 'Volume', foodId: 1 }, { id: 2, name: 'g', grams: 1, type: 'Weight', foodId: 1 }]
   };
+  describe('parse.lines — calorie amounts (0.3.2)', () => {
+    const cases = [
+      ['300cal almonds', 300, 'kcal', 'almonds'],
+      ['300 cal almonds', 300, 'kcal', 'almonds'],
+      ['300 Cal almonds', 300, 'kcal', 'almonds'],
+      ['300 CAL almonds', 300, 'kcal', 'almonds'],
+      ['300kcal almonds', 300, 'kcal', 'almonds'],
+      ['300 kcals almonds', 300, 'kcal', 'almonds'],
+      ['300 cals almonds', 300, 'kcal', 'almonds'],
+      ['300 calories almonds', 300, 'kcal', 'almonds'],
+      ['1 calorie gum', 1, 'kcal', 'gum'],
+      ['300 kilocalories almonds', 300, 'kcal', 'almonds'],
+      ['almonds 300 kcal', 300, 'kcal', 'almonds'],
+      ['almonds 300kcal', 300, 'kcal', 'almonds'],
+      ['almonds, 300 cal', 300, 'kcal', 'almonds'],
+      ['almonds: 300 Cal', 300, 'kcal', 'almonds'],
+      ['almonds - 300 calories', 300, 'kcal', 'almonds'],
+      ['almonds 300 kcal roasted', 300, 'kcal', 'almonds roasted'],
+      ['1250kJ almonds', 1250, 'kj', 'almonds'],
+      ['1250 kJ almonds', 1250, 'kj', 'almonds'],
+      ['1250 KJ almonds', 1250, 'kj', 'almonds'],
+      ['almonds 1250 kilojoules', 1250, 'kj', 'almonds'],
+      ['1 kilojoule mint', 1, 'kj', 'mint'],
+      ['2 x 150cal bar', 300, 'kcal', 'bar'],
+      ['bar 2 x 150 cal', 300, 'kcal', 'bar'],
+      ['bar 150cal x2', 300, 'kcal', 'bar'],
+      ['almonds 150,5 kcal', 150.5, 'kcal', 'almonds'],
+      ['1/2 cal mint', 0.5, 'kcal', 'mint'],
+      ['½ kcal mint', 0.5, 'kcal', 'mint'],
+      ['1 1/2 kcal mint', 1.5, 'kcal', 'mint'],
+      // an energy number's `N,NNN` is a thousands comma (kJ figures are nearly always 4 digits), never 1.25 kJ
+      ['1,250 kJ almonds', 1250, 'kj', 'almonds'],
+      ['1,250kJ almonds', 1250, 'kj', 'almonds'],
+      ['almonds 2,000 kcal', 2000, 'kcal', 'almonds'],
+      ['8,700 kJ pasta bake', 8700, 'kj', 'pasta bake'],
+      ['almonds, 1,250 kJ', 1250, 'kj', 'almonds'],
+      ['2 x 1,250 kJ bar', 2500, 'kj', 'bar'],
+      ['almonds 1 250 kJ', 1250, 'kj', 'almonds'],
+      ['almonds 300,5 kcal', 300.5, 'kcal', 'almonds'],
+      ['0,250 kcal mint', 0.25, 'kcal', 'mint'],
+      // spaced and hyphenated spellings win over `kilo` → kg and over a name word
+      ['300 kilo calories almonds', 300, 'kcal', 'almonds'],
+      ['300 kilo-calories almonds', 300, 'kcal', 'almonds'],
+      ['300 kilo cal almonds', 300, 'kcal', 'almonds'],
+      ['300 k cal almonds', 300, 'kcal', 'almonds'],
+      ['1250 kilo joules almonds', 1250, 'kj', 'almonds'],
+      ['300-cal almonds', 300, 'kcal', 'almonds'],
+      ['almonds 300-kcal', 300, 'kcal', 'almonds'],
+      ['150-calorie bar', 150, 'kcal', 'bar'],
+      ['2 kilo potatoes', 2000, 'g', 'potatoes'],
+      ['2-pack almonds', 2, null, 'pack almonds'],
+      // deliberate: a number right before an energy word is always an amount ('100 calorie pack' = 100 kcal of "pack almonds")
+      ['100 calorie pack almonds', 100, 'kcal', 'pack almonds'],
+      // not energy: the word is only a prefix of another word, or has no number in front of it
+      ['calzone 2', 2, null, 'calzone'],
+      ['calamari 100g', 100, 'g', 'calamari'],
+      ['2 calzones', 2, null, 'calzones'],
+      ['2 calamari rings', 2, null, 'calamari rings'],
+      ['300calzones', null, null, '300calzones'],
+      ['cal', null, null, 'cal'],
+      ['low cal yoghurt', null, null, 'low cal yoghurt'],
+      ['vitamin c 500mg', 0.5, 'g', 'vitamin c'],
+      ['kj mix 1 cup', 1, 'cup', 'kj mix']
+    ];
+    for (const [text, qty, unit, name] of cases) {
+      it(JSON.stringify(text), () => {
+        const items = CMA.parse.lines(text);
+        eq(items.length, 1, 'one item');
+        const r = items[0];
+        eq(r.name, name, 'name');
+        if (qty == null) eq(r.qty, null, 'qty'); else approx(r.qty, qty, 1e-9, 'qty');
+        eq(r.unit, unit, 'unit');
+        ok(!r.error, 'no error: ' + r.error);
+      });
+    }
+    it('split lines, tags, flags and headers work with energy amounts; 0 cal is an invalid quantity', () => {
+      let items = CMA.parse.lines('almonds 300cal, banana 1 medium');
+      deepEq(items.map(i => [i.name, i.qty, i.unit, i.part]), [['almonds', 300, 'kcal', 0], ['banana', 1, 'medium', 1]]);
+      items = CMA.parse.lines('oats 40 g; almonds 1250 kJ');
+      deepEq(items.map(i => [i.name, i.qty, i.unit]), [['oats', 40, 'g'], ['almonds', 1250, 'kj']]);
+      items = CMA.parse.lines('## Dinner\n300cal almonds @lunch /custom');
+      deepEq([items[0].name, items[0].qty, items[0].unit, items[0].group, items[0].customOnly], ['almonds', 300, 'kcal', 'lunch', true]);
+      items = CMA.parse.lines('0 cal soda');
+      eq(items[0].error, 'invalid quantity'); eq(items[0].unit, 'kcal');
+      items = CMA.parse.lines('almonds, 1,250 kJ, banana 1 medium');
+      deepEq(items.map(i => [i.name, i.qty, i.unit]), [['almonds', 1250, 'kj'], ['banana', 1, 'medium']]);
+      // a plain space inside a calorie number is refused, not guessed: 1250 kJ, or 2 × 150 kcal?
+      items = CMA.parse.lines('almonds 1 250 kJ\n1 250 kJ almonds\n2 150cal bars');
+      eq(items[0].error, '"1 250 kJ" is ambiguous: write 1250 kJ (no space inside the number), or 1 x 250 kJ for a count');
+      ok(/^"1 250 kJ" is ambiguous/.test(items[1].error), items[1].error);
+      eq(items[2].error, '"2 150 cal" is ambiguous: write 2150 cal (no space inside the number), or 2 x 150 cal for a count');
+      ok(!CMA.parse.lines('oats 40 g, 2 x 150 kcal bar')[1].error, 'a multiplier is not a spaced number');
+      eq(CMA.parse.normalizeUnit('Cal'), 'kcal'); eq(CMA.parse.normalizeUnit('kJ'), 'kj'); eq(CMA.parse.normalizeUnit('calzone'), null);
+    });
+  });
+
+  describe('units.pickEnergy — calorie amounts (0.3.2, SPEC §5.3)', () => {
+    // almonds: 579 kcal per 100 g
+    const M = [
+      { id: 1, name: 'g', grams: 1, type: 'Weight' },
+      { id: 2, name: 'oz', grams: 28.3495, type: 'Weight' },
+      { id: 3, name: 'cup, whole', grams: 143, type: 'Volume' },
+      { id: 4, name: 'handful', grams: 0, type: 'Atomic' },
+      { id: 5, name: 'piece', grams: 0, type: 'Weight' }
+    ];
+    const U = () => CMA.units;
+    it('kcalPerUnit is the dialog\'s Rrj: Recipe value/k, weightless Weight value, else value × k / 100', () => {
+      approx(U().kcalPerUnit(M[0], 579), 5.79, 1e-12);
+      approx(U().kcalPerUnit(M[1], 579), 579 * 28.3495 / 100, 1e-9);
+      approx(U().kcalPerUnit(M[2], 579), 827.97, 1e-9);
+      eq(U().kcalPerUnit(M[3], 579), 0, 'weightless Atomic');
+      eq(U().kcalPerUnit(M[4], 579), 579, 'weightless Weight (the full recipe rule)');
+      eq(U().kcalPerUnit({ name: 'serving', grams: 4, type: 'Recipe' }, 2000), 500);
+      eq(U().kcalPerUnit({ name: 'serving', grams: 0, type: 'Recipe' }, 2000), 0);
+      eq(U().kcalPerUnit(M[1], NaN), 0); eq(U().kcalPerUnit(M[1], null), 0); eq(U().kcalPerUnit(null, 579), 0);
+    });
+    it('isEnergyUnit / energyToKcal: kJ ÷ 4.1868; a calorie unit is never a count in pickMeasure / convertQuantity', () => {
+      ok(U().isEnergyUnit('kcal') && U().isEnergyUnit('kj') && U().isEnergyUnit('Cal') && U().isEnergyUnit('kJ') && U().isEnergyUnit('kilojoules'));
+      ok(!U().isEnergyUnit('g') && !U().isEnergyUnit(null) && !U().isEnergyUnit('') && !U().isEnergyUnit('calzone'));
+      eq(U().energyToKcal(300, 'kcal'), 300); approx(U().energyToKcal(1250, 'kj'), 298.55737, 1e-5);
+      eq(U().energyToKcal(0, 'kcal'), null); eq(U().energyToKcal(-5, 'kcal'), null); eq(U().energyToKcal(300, 'g'), null); eq(U().energyToKcal(null, 'kcal'), null);
+      eq(U().KJ_PER_KCAL, 4.1868);
+      // a measure whose name contains 'cal' must never receive 300 as a count
+      const calMeasures = [{ id: 1, name: 'calorie pack', grams: 20, type: 'Atomic' }, { id: 2, name: 'g', grams: 1, type: 'Weight' }];
+      ok(U().pickMeasure(calMeasures, 'kcal', 300).error, 'pickMeasure refuses an energy unit');
+      eq(U().convertQuantity(300, 'kcal', calMeasures[0]), null);
+    });
+    it('the table: 579 kcal/100 g, 300 kcal → 51.8135 g in g, oz and cup (the same grams whichever measure carries it)', () => {
+      let p = U().pickEnergy(M, 579, 300, {});
+      eq(p.measure.id, 1, 'no hit / f[0]: the plain g (a gram default needs no choice here)');
+      approx(p.quantity, 51.8135, 1e-4); approx(p.grams, 51.8135, 1e-4); eq(p.note, '300 kcal → 51.8 g');
+      eq(p.kcal, 300); approx(p.kcalPerUnit, 5.79, 1e-12); eq(p.warn, false);
+      p = U().pickEnergy(M, 579, 300, { hitMeasureId: 2 });
+      eq(p.measure.id, 2); approx(p.quantity, 1.8277, 1e-4); approx(p.grams, 51.8135, 1e-4);
+      eq(p.note, '300 kcal → 1.83 oz (51.8 g)');
+      p = U().pickEnergy(M, 579, 300, { defaultMeasureId: 3 });
+      eq(p.measure.id, 3, 'FoodMeasures.f[0]'); approx(p.quantity, 0.3623, 1e-4); approx(p.grams, 51.8135, 1e-3);
+      eq(p.note, '300 kcal → 0.36 cup, whole (51.8 g)');
+      p = U().pickEnergy(M, 579, 300, { measureId: 2, hitMeasureId: 3 });
+      eq(p.measure.id, 2, 'a forced measure wins'); approx(p.grams, 51.8135, 1e-4);
+      // the kcal the diary will show for the entry: quantity × perUnit
+      approx(p.quantity * U().kcalPerUnit(p.measure, 579), 300, 1e-3);
+    });
+    it('a serving-based recipe (whole-recipe kcal / servings), the weightless full recipe, a measure with an amount prefix', () => {
+      const R = [{ id: 10, name: 'serving', grams: 4, type: 'Recipe' }, { id: 11, name: 'full recipe', grams: 0, type: 'Weight' }];
+      let p = U().pickEnergy(R, 2000, 250, { hitMeasureId: 10 });
+      eq(p.measure.id, 10); eq(p.quantity, 0.5); eq(p.grams, 0.5, 'a recipe count goes on the wire as the count'); eq(p.note, '250 kcal → 0.5 × serving');
+      p = U().pickEnergy(R, 2000, 250, { measureId: 11 });
+      eq(p.measure.id, 11); eq(p.quantity, 0.125); eq(p.grams, 0.125); eq(p.note, '250 kcal → 0.13 × full recipe');
+      p = U().pickEnergy(R, 2000, 250, { defaultMeasureId: 11 });
+      eq(p.measure.id, 11, 'the full recipe as the food\'s own default');
+      p = U().pickEnergy([{ id: 20, name: 'cup', grams: 70, amount: 0.5, type: 'Volume' }], 100, 35, {});
+      eq(p.quantity, 0.5); eq(p.note, '35 kcal → 0.5 × 0.5 cup (35 g)');
+    });
+    it('a default measure without a weight falls back to g, then to any Weight measure; hidden measures are skipped', () => {
+      let p = U().pickEnergy(M, 579, 300, { hitMeasureId: 4 });
+      eq(p.measure.id, 1, 'handful (0 g) → g');
+      p = U().pickEnergy(M, 579, 300, { hitMeasureId: 5 });
+      eq(p.measure.id, 1, 'a weightless Weight measure that is not the full recipe → g');
+      p = U().pickEnergy([{ id: 1, name: 'handful', grams: 0, type: 'Atomic' }, { id: 2, name: 'lb', grams: 453.592, type: 'Weight' }], 654, 300, { hitMeasureId: 1 });
+      eq(p.measure.id, 2); approx(p.grams, 300 / 6.54, 1e-3);
+      p = U().pickEnergy([{ id: 1, name: 'g', grams: 1, type: 'Weight', hidden: true }, { id: 2, name: 'oz', grams: 28.3495, type: 'Weight' }], 579, 300, {});
+      eq(p.measure.id, 2, 'the hidden g is not the default');
+      p = U().pickEnergy([{ id: 1, name: 'handful', grams: 0, type: 'Atomic' }, { id: 2, name: 'scoop', grams: 0, type: 'Volume' }], 579, 300, {});
+      ok(/no measure with a weight/.test(p.error), p.error); eq(p.measure, undefined, 'an error pick names no measure');
+    });
+    it('refusals: no or zero calorie data, a meal, a forced measure without a weight, invalid targets; kJ note; over 1 kg warns', () => {
+      for (const v of [0, null, undefined, NaN, -3, Infinity]) ok(/no calorie data/.test(U().pickEnergy(M, v, 300, {}).error), 'energy ' + v);
+      ok(/not supported for meals/.test(U().pickEnergy(M, 579, 300, { meal: true }).error));
+      let p = U().pickEnergy(M, 579, 300, { measureId: 4 });
+      ok(/'handful' has no weight/.test(p.error), p.error); eq(p.refused.id, 4); eq(p.measure, undefined);
+      eq(U().pickEnergy(M, 579, 300, { measureId: 99 }).error, 'measure not found');
+      for (const t of [0, -1, NaN, null, '']) eq(U().pickEnergy(M, 579, t, {}).error, 'invalid quantity', 'target ' + t);
+      eq(U().pickEnergy([], 579, 300, {}).error, 'food has no measures');
+      p = U().pickEnergy(M, 579, U().energyToKcal(1250, 'kj'), { hitMeasureId: 2, kj: 1250 });
+      eq(p.note, '1250 kJ (298.6 kcal) → 1.82 oz (51.6 g)'); approx(p.kcal, 298.55737, 1e-5);
+      p = U().pickEnergy(M, 579, 6000, {});
+      eq(p.warn, true); approx(p.grams, 1036.27, 0.01); ok(/over 1 kg: check the food and the number$/.test(p.note), p.note);
+      eq(U().pickEnergy(M, 579, 5700, {}).warn, false, '984 g: no warning');
+      // under 5 kcal: still ready, but the note asks to check the number (`1.250 kJ` meant as 1250)
+      // (0.0018 oz would be typed as 0.002, 10 % off: the g carries it)
+      p = U().pickEnergy(M, 579, U().energyToKcal(1.25, 'kj'), { hitMeasureId: 2, kj: 1.25 });
+      eq(p.warn, true); eq(p.measure.id, 1); eq(p.note, '1.25 kJ (0.3 kcal) → 0.05 g — under 5 kcal: check the number');
+      eq(U().pickEnergy(M, 579, 5, {}).warn, false, '5 kcal: no warning');
+    });
+    it('a quantity the dialog cannot type to 3 decimals moves to the next measure, or asks for another unit', () => {
+      // a serving-based recipe: 2000 kcal in 4 servings (500 kcal each); 0.1 kcal = 0.0002 serving would be typed as 0
+      const R = [{ id: 10, name: 'serving', grams: 4, type: 'Recipe' }, { id: 11, name: 'full recipe', grams: 0, type: 'Weight' }];
+      let p = U().pickEnergy(R, 2000, 0.1, { hitMeasureId: 10 });
+      eq(p.error, "0.1 kcal is too small an amount of 'serving' to add — pick another unit"); eq(p.refused.id, 10); eq(p.measure, undefined);
+      p = U().pickEnergy(R, 2000, 0.1, { measureId: 11 });
+      ok(/too small an amount of 'full recipe'/.test(p.error), p.error); eq(p.refused.id, 11);
+      // 3 kcal of a 2000 kcal 'full recipe' is 0.0015 (typed 0.002, a third too much): its g carries it instead
+      const W = [{ id: 20, name: 'full recipe', grams: 0, type: 'Weight' }, { id: 21, name: 'g', grams: 1, type: 'Weight' }];
+      p = U().pickEnergy(W, 2000, 3, { hitMeasureId: 20 });
+      eq(p.measure.id, 21); eq(p.quantity, 0.15); ok(p.warn, 'under 5 kcal');
+      eq(U().pickEnergy(W, 2000, 50, { hitMeasureId: 20 }).measure.id, 20, '0.025 × full recipe is typable');
+      // 1,000,000 or more of a unit would be cut off in the amount box (6 characters)
+      p = U().pickEnergy(M, 579, 6e6, {});
+      eq(p.error, "6000000 kcal is too large an amount of 'g' to add — pick another unit"); eq(p.refused.id, 1);
+      p = U().pickEnergy(M, 579, 6e6, { measureId: 2 });
+      eq(p.measure.id, 2); approx(p.grams, 6e6 / 5.79, 1); eq(p.warn, true);
+    });
+  });
+
   describe('units.pickMeasure — no unit typed: the default-measure rule (SPEC §5.3)', () => {
     const bar = [{ id: 1, name: 'g', grams: 1, type: 'Weight', foodId: 9 }, { id: 2, name: 'bar', grams: 60, type: 'Atomic', foodId: 9 }];
     const gOnly = [{ id: 1, name: 'g', grams: 1, type: 'Weight', foodId: 9 }];
@@ -1024,6 +1376,206 @@
       eq(fake.calls.filter(c => c.method === 'getDayInfo').length, 0);
       await CMA.plan.assignPositions(SESSION, plan);
       eq(plan.rows[0].order, (3 << 16) | 1);
+    });
+  });
+
+  describe('plan.build — custom-only search (0.3.2)', () => {
+    const searches = (fake) => fake.calls.filter(c => c.method === 'searchFoods').map(c => [c.args[0], c.args[1].customOnly]);
+    it('isCustomHit: source Custom or no source', () => {
+      ok(CMA.plan.isCustomHit({ source: 'Custom' }) && CMA.plan.isCustomHit({ source: null }) && CMA.plan.isCustomHit({}));
+      ok(!CMA.plan.isCustomHit({ source: 'USDA' }) && !CMA.plan.isCustomHit({ source: 'custom' }) && !CMA.plan.isCustomHit(null));
+    });
+    it('the setting (opts.customOnly) scopes every row: searchFoods gets customOnly, row.customOnly is set, only custom hits remain', async () => {
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      let plan = await CMA.plan.build(SESSION, CMA.parse.lines('mozzarella 30g'), FAST);
+      eq(plan.rows[0].customOnly, false); eq(plan.rows[0].hit.id, 1300, 'the public food first');
+      deepEq(plan.rows[0].hits.map(h => h.id), [1300, 1310, 1320, 1330]);
+      deepEq(fake.calls.find(c => c.method === 'searchFoods').args[1], { maxResults: 50, customOnly: false });
+      const fake2 = makeFake(); CMA.rpc = fake2.rpc;
+      plan = await CMA.plan.build(SESSION, CMA.parse.lines('mozzarella 30g\nbanana'), Object.assign({}, FAST, { customOnly: true }));
+      deepEq(searches(fake2), [['mozzarella', true], ['banana', true]]);
+      const r = plan.rows[0];
+      eq(r.customOnly, true); eq(r.status, 'ready');
+      deepEq(r.hits.map(h => h.id), [1310, 1320, 1330], 'custom items and the source-less one');
+      eq(r.hit.id, 1310); eq(r.pick.measure.id, 13101); eq(r.pick.grams, 30);
+      eq(plan.rows[1].customOnly, true);
+      eq(plan.rows[1].status, 'error'); eq(plan.rows[1].message, 'no custom food matches');
+      // only an explicit true turns it on
+      const fake3 = makeFake(); CMA.rpc = fake3.rpc;
+      plan = await CMA.plan.build(SESSION, CMA.parse.lines('banana'), Object.assign({}, FAST, { customOnly: 'yes' }));
+      eq(plan.rows[0].customOnly, false); eq(plan.rows[0].status, 'ready');
+    });
+    it('a line\'s own flag wins over the setting, both ways; a header flag scopes the lines below it', async () => {
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      let plan = await CMA.plan.build(SESSION, CMA.parse.lines('mozzarella 30g /all\n1 lb mozzarella /custom'), Object.assign({}, FAST, { customOnly: true }));
+      deepEq(searches(fake), [['mozzarella', false], ['mozzarella', true]]);
+      deepEq(plan.rows.map(r => [r.customOnly, r.hit.id]), [[false, 1300], [true, 1310]]);
+      eq(plan.rows[1].status, 'ready'); approx(plan.rows[1].pick.grams, 453.592, 1e-6);
+      const fake2 = makeFake(); CMA.rpc = fake2.rpc;
+      plan = await CMA.plan.build(SESSION, CMA.parse.lines('/custom mozzarella 30g\nmozzarella 30g'), FAST);
+      deepEq(plan.rows.map(r => [r.customOnly, r.hit.id]), [[true, 1310], [false, 1300]]);
+      const fake3 = makeFake(); CMA.rpc = fake3.rpc;
+      plan = await CMA.plan.build(SESSION, CMA.parse.lines('## Lunch /custom\nmozzarella 30g\nbanana /all\n## Dinner\nmozzarella 30g'), FAST);
+      deepEq(searches(fake3), [['mozzarella', true], ['banana', false], ['mozzarella', false]]);
+      deepEq(plan.rows.map(r => [r.customOnly, r.groupId, r.status]), [[true, 2, 'ready'], [false, 2, 'ready'], [false, 3, 'ready']]);
+    });
+    it('scope-only headers, a flag before a header\'s colon and a split line\'s own flag reach the search; a flag inside a name is never searched', async () => {
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      let plan = await CMA.plan.build(SESSION, CMA.parse.lines('## /custom\nmozzarella 30g\nDinner /custom:\nmozzarella 30g\n## /all\nmozzarella 30g'), FAST);
+      deepEq(searches(fake), [['mozzarella', true], ['mozzarella', true], ['mozzarella', false]]);
+      deepEq(plan.rows.map(r => [r.customOnly, r.hit.id, r.groupName, r.status]), [[true, 1310, 'Dinner', 'ready'], [true, 1310, 'Dinner', 'ready'], [false, 1300, 'Dinner', 'ready']]);
+      ok(plan.rows.every(r => !/not found/.test(r.message)), 'no group named after a flag');
+      const fake2 = makeFake(); CMA.rpc = fake2.rpc;
+      plan = await CMA.plan.build(SESSION, CMA.parse.lines('mozzarella 30g /custom, banana 1 medium\n/custom\nmozzarella 30g\ncheese /custom 30g'), FAST);
+      deepEq(searches(fake2), [['mozzarella', true], ['banana', false], ['mozzarella', true]]);
+      deepEq(plan.rows.map(r => [r.customOnly, r.status, r.hit && r.hit.id]), [[true, 'ready', 1310], [false, 'ready', 500], [true, 'ready', 1310], [true, 'error', null]]);
+      eq(plan.rows[3].message, "move '/custom' to the start or end of the line");
+      ok(fake2.calls.every(c => c.method !== 'searchFoods' || !/\/c/i.test(c.args[0])), 'no query carries a flag');
+    });
+    it('"no custom food matches" for an empty custom-only search, also as the unverified (UI engine) reason; rows without a session keep the scope', async () => {
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      let plan = await CMA.plan.build(SESSION, CMA.parse.lines('banana /custom\nbanana'), FAST);
+      eq(plan.rows[0].status, 'error'); eq(plan.rows[0].message, 'no custom food matches');
+      eq(plan.rows[1].status, 'ready');
+      plan = await CMA.plan.build(SESSION, CMA.parse.lines('nothing here\nbanana /custom'), Object.assign({}, FAST, { unverified: true }));
+      ok(/unverified \(UI engine\): no search results/.test(plan.rows[0].message), plan.rows[0].message);
+      eq(plan.rows[1].status, 'ready'); eq(plan.rows[1].unverified, true); eq(plan.rows[1].customOnly, true);
+      ok(/unverified \(UI engine\): no custom food matches/.test(plan.rows[1].message), plan.rows[1].message);
+      const noSession = { moduleBase: null, permutation: null, policyHash: null, nonce: null, userId: null };
+      const fake2 = makeFake(); CMA.rpc = fake2.rpc;
+      plan = await CMA.plan.build(noSession, CMA.parse.lines('mozzarella 30g\nbanana /all'), Object.assign({}, FAST, { unverified: true, positions: false, customOnly: true }));
+      eq(fake2.calls.length, 0);
+      deepEq(plan.rows.map(r => [r.customOnly, r.unverified]), [[true, true], [false, true]], 'engine-ui reads row.customOnly');
+    });
+    it('client-side filtering runs before the maxHits slice: a custom hit far down a mixed answer is kept', async () => {
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      // a server that ignored the Custom tab: 12 public hits first, then the user's own food and a source-less one
+      const mixed = [];
+      for (let k = 0; k < 12; k++) mixed.push({ id: 1300, name: 'Mozzarella, Part Skim #' + k, measureId: 13001, measureDisplayName: '', score: 1, source: 'NCCDB', type: 'FOOD', translationId: 0, retired: false });
+      mixed.push({ id: 1310, name: 'Mozzarella Cheese', measureId: 13101, measureDisplayName: '', score: 1, source: 'Custom', type: 'FOOD', translationId: 0, retired: false });
+      mixed.push({ id: 1330, name: 'Mozzarella Sticks', measureId: 13301, measureDisplayName: '', score: 1, source: null, type: 'FOOD', translationId: 0, retired: false });
+      fake.rpc.searchFoods = async (s, q, o) => { fake.calls.push({ method: 'searchFoods', t: Date.now(), args: [q, o] }); return mixed.slice(); };
+      let plan = await CMA.plan.build(SESSION, CMA.parse.lines('mozzarella cheese 30g /custom'), FAST);
+      deepEq(plan.rows[0].hits.map(h => h.id), [1310, 1330]);
+      eq(plan.rows[0].hit.id, 1310, 'exact name among the custom hits'); eq(plan.rows[0].status, 'ready');
+      plan = await CMA.plan.build(SESSION, CMA.parse.lines('mozzarella cheese 30g'), FAST);
+      eq(plan.rows[0].hits.length, 10, 'without the flag the first 10 are kept');
+      ok(plan.rows[0].hits.every(h => h.source === 'NCCDB'), 'and the custom one is cut off');
+    });
+  });
+
+  describe('plan — calorie amounts (0.3.2)', () => {
+    it('300cal almonds: the hit\'s measure (oz) carries 300 kcal; g, kJ and split lines; the Serving gives the target back; no extra request', async () => {
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('300cal almonds\nalmonds 150 kcal, banana 1 medium\n1250kJ almonds\n2 x 150cal almonds @lunch'), FAST);
+      const r = plan.rows;
+      eq(r[0].status, 'ready', r[0].message); eq(r[0].hit.id, 1400);
+      eq(r[0].pick.measure.id, 14002); approx(r[0].pick.quantity, 1.8277, 1e-4); approx(r[0].pick.grams, 51.8135, 1e-4);
+      eq(r[0].message, '300 kcal → 1.83 oz (51.8 g)'); eq(r[0].pick.kcal, 300);
+      eq(r[0].item.qty, 300, 'the typed number is kept'); eq(r[0].item.unit, 'kcal');
+      eq(r[1].status, 'ready'); approx(r[1].pick.grams, 150 / 5.79, 1e-3); eq(r[1].item.part, 0);
+      eq(r[2].status, 'ready'); eq(r[2].pick.measure.id, 5001, 'the other food of the line is unaffected'); eq(r[2].item.unit, 'medium');
+      eq(r[3].status, 'ready'); ok(/^1250 kJ \(298\.6 kcal\) → 1\.82 oz \(51\.6 g\)$/.test(r[3].message), r[3].message);
+      eq(r[4].status, 'ready'); eq(r[4].groupId, 2); approx(r[4].pick.grams, 300 / 5.79, 1e-3);
+      const s = CMA.plan.servingFor(r[0], DATE);
+      eq(s.f[10], 14002); eq(s.f[8], 1400); approx(s.f[7] * 579 / 100, 300, 1e-3, 'the diary shows 300 kcal');
+      eq(fake.calls.filter(c => c.method === 'getFood').length, 5, 'one getFood per row, as for any line');
+    });
+    it('a serving-based recipe is a count of its Recipe measure; a meal and a food without calorie data are errors that are never added', async () => {
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('250 kcal casserole\n300 cal bento meal\n100 cal diet soda\n100 cal mystery powder'), FAST);
+      const r = plan.rows;
+      eq(r[0].status, 'ready', r[0].message); eq(r[0].pick.measure.id, 14101); eq(r[0].pick.quantity, 0.5); eq(r[0].pick.grams, 0.5);
+      eq(r[0].message, '250 kcal → 0.5 × serving');
+      eq(r[1].status, 'error'); eq(r[1].message, 'calorie amounts are not supported for meals (Cronometer adds a meal whole)');
+      eq(r[2].status, 'error'); eq(r[2].message, 'no calorie data for this food', '0 kcal');
+      eq(r[3].status, 'error'); eq(r[3].message, 'no calorie data for this food', 'no nutrient 208');
+      eq(r[1].position, null, 'error rows reserve no diary position'); eq(r[2].position, null);
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      eq(res.added.length, 1); eq(fake.calls.filter(c => c.method === 'updateDiaryAdd').length, 1);
+      // the Food's own type counts too (a meal hit that the search labelled differently)
+      const row = r[0];
+      const mealFood = FOODS[1420];
+      row.food = mealFood; row.hit = Object.assign({}, row.hit, { type: 'FOOD' }); row.measures = fake.rpc.measuresOf(mealFood);
+      CMA.plan.repick(row, null);
+      eq(row.status, 'error'); ok(/meals/.test(row.message), row.message);
+      ok(CMA.plan.isMealRow({ hit: { type: 'meal' } }) && !CMA.plan.isMealRow({ hit: { type: 'RECIPE' }, food: null }));
+    });
+    it('the RPC engine sends the computed grams unrounded', async () => {
+      const fake = makeFake();
+      const plan = await buildPlan(fake, '300cal almonds');
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      eq(res.added.length, 1);
+      const sent = fake.calls.find(c => c.method === 'updateDiaryAdd').args[0];
+      eq(sent.f[7], plan.rows[0].pick.grams); ok(String(sent.f[7]).length > 6, 'not the preview\'s 51.8: ' + sent.f[7]);
+      eq(sent.f[10], 14002);
+    });
+    it('a getFood failure (search-hit measures only) and unverified UI-engine rows are errors: calories need the food', async () => {
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      const orig = fake.rpc.searchFoods;
+      fake.rpc.searchFoods = async (s, q, o) => (await orig(s, q, o)).map(h => Object.assign({}, h, { measureDisplayName: '1 oz - 28g' }));
+      const decode = new Error('cannot decode the getFood response'); decode.kind = 'decode';
+      fake.failScript.getFood = [decode];
+      let plan = await CMA.plan.build(SESSION, CMA.parse.lines('300cal almonds\n50g almonds'), FAST);
+      eq(plan.rows[0].status, 'error'); eq(plan.rows[0].food, null); eq(plan.rows[0].measures.length, 1, 'the hit measure is there');
+      ok(/^calories need the food's details, which could not be read \(getFood failed: cannot decode/.test(plan.rows[0].message), plan.rows[0].message);
+      eq(plan.rows[0].pick.measure, undefined, 'nothing to add');
+      eq(plan.rows[1].status, 'ready', 'a gram line still works from the loaded food');
+      // picking the hit measure by hand does not help: the target cannot become 300 oz
+      CMA.plan.repick(plan.rows[0], plan.rows[0].measures[0].id);
+      eq(plan.rows[0].status, 'error'); eq(plan.rows[0].pick.quantity, undefined);
+      // UI engine without a session: no search, the row is an error (never 300 of 'kcal' typed into the dialog)
+      const noSession = { moduleBase: null, permutation: null, policyHash: null, nonce: null, userId: null };
+      plan = await CMA.plan.build(noSession, CMA.parse.lines('300cal almonds\n50g almonds'), Object.assign({}, FAST, { unverified: true, positions: false }));
+      eq(plan.rows[0].status, 'error'); eq(plan.rows[0].unverified, true);
+      eq(plan.rows[0].message, "calories need the food's details, which could not be read (UI engine: no session captured); type an amount such as 50 g instead");
+      eq(plan.rows[1].status, 'ready'); eq(plan.rows[1].unverified, true);
+      // UI engine with a session whose getFood fails: the same
+      const fake2 = makeFake(); CMA.rpc = fake2.rpc;
+      fake2.failScript.getFood = [new Error('boom'), new Error('boom')];
+      plan = await CMA.plan.build(SESSION, CMA.parse.lines('300cal almonds'), Object.assign({}, FAST, { unverified: true }));
+      eq(plan.rows[0].status, 'error'); ok(/UI engine: getFood failed: boom/.test(plan.rows[0].message), plan.rows[0].message);
+      // UI engine with a session and a loaded food: an ordinary ready pick the dialog can take (measure + quantity)
+      const fake3 = makeFake(); CMA.rpc = fake3.rpc;
+      plan = await CMA.plan.build(SESSION, CMA.parse.lines('300cal almonds'), Object.assign({}, FAST, { unverified: true }));
+      eq(plan.rows[0].status, 'ready'); eq(plan.rows[0].unverified, false); eq(plan.rows[0].pick.measure.name, 'oz');
+    });
+    it('repick keeps the kcal target across a measure change, a qty edit changes the target, a weightless measure asks for another; rechoose recomputes', async () => {
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('almonds 300 kcal'), FAST);
+      const row = plan.rows[0];
+      eq(row.pick.measure.id, 14002);
+      CMA.plan.repick(row, 14003);                                   // cup, whole: the same 300 kcal
+      eq(row.status, 'ready'); eq(row.pick.measure.id, 14003); approx(row.pick.quantity, 0.3623, 1e-4); approx(row.pick.grams, 51.8135, 1e-3);
+      eq(row.item.qty, 300); eq(row.message, '300 kcal → 0.36 cup, whole (51.8 g)');
+      CMA.plan.repick(row, 14003, 600);                              // the panel's Qty box edits the target
+      eq(row.item.qty, 600); approx(row.pick.grams, 103.627, 1e-2); eq(row.pick.measure.id, 14003);
+      CMA.plan.repick(row, 14004);                                   // handful: 0 g per unit
+      eq(row.status, 'needs-choice'); ok(/'handful' has no weight/.test(row.message), row.message); eq(row.pick.measure, undefined);
+      CMA.plan.repick(row, null, 300);                               // a qty edit on the unresolved row: the default again
+      eq(row.status, 'ready'); eq(row.pick.measure.id, 14002); approx(row.pick.grams, 51.8135, 1e-4);
+      await CMA.plan.rechoose(SESSION, row, 1, { retryMs: 10 });     // Almonds, Roasted: 600 kcal / 100 g
+      eq(row.hit.id, 1401); eq(row.status, 'ready'); eq(row.pick.measure.id, 14012); approx(row.pick.grams, 50, 1e-4);
+      eq(row.message, '300 kcal → 1.76 oz (50 g)');
+    });
+    it('a default measure without a weight falls back to one with grams; over 1 kg stays ready with a warning', async () => {
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('300 kcal walnut pieces\n6000 kcal almonds'), FAST);
+      eq(plan.rows[0].status, 'ready'); eq(plan.rows[0].pick.measure.id, 14502, 'handful (0 g) → lb'); approx(plan.rows[0].pick.grams, 300 / 6.54, 1e-3);
+      eq(plan.rows[1].status, 'ready'); eq(plan.rows[1].pick.warn, true); ok(/over 1 kg/.test(plan.rows[1].message), plan.rows[1].message);
+    });
+    it('an amount too small for the dialog asks for another unit (never 0 × serving); `1,250 kJ` is 1250 kJ; under 5 kcal warns', async () => {
+      const fake = makeFake(); CMA.rpc = fake.rpc;
+      const plan = await CMA.plan.build(SESSION, CMA.parse.lines('0.1 cal casserole\n1,250 kJ almonds\n2 cal almonds'), FAST);
+      const r = plan.rows;
+      eq(r[0].status, 'needs-choice'); eq(r[0].message, "0.1 kcal is too small an amount of 'serving' to add — pick another unit");
+      eq(r[0].pick.measure, undefined, 'nothing to add');
+      CMA.plan.repick(r[0], null, 250);                              // a sensible target in the Qty box resolves it
+      eq(r[0].status, 'ready'); eq(r[0].pick.quantity, 0.5);
+      eq(r[1].status, 'ready'); eq(r[1].item.qty, 1250); approx(r[1].pick.grams, 51.564, 1e-3); eq(r[1].pick.warn, false);
+      eq(r[2].status, 'ready'); eq(r[2].pick.warn, true); ok(/under 5 kcal: check the number$/.test(r[2].message), r[2].message);
+      const res = await CMA.engineRpc.run(SESSION, plan, ENGINE_OPTS);
+      eq(res.added.length, 3);
     });
   });
 

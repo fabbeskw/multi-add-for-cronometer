@@ -11,10 +11,13 @@
 <script src="lib.js"></script>
 <script src="../src/lib/parse.js"></script>
 <script src="../src/lib/units.js"></script>
+<script src="../src/lib/plan.js"></script>
 <script>
 /* ---- STUBS (installed before panel.js so the panel's own CMA.events fallback is not used) ---- */
 (function () {
   window.CMA = window.CMA || {};
+  // the real plan.js (loaded above) for the calorie-amount tests; every other test drives the stub CMA.plan below
+  window.__realPlan = CMA.plan;
   const NONCE = 'SECRET-NONCE-VALUE-9f8e7d6c5b4a3210';
   window.__NONCE = NONCE;
 
@@ -73,7 +76,8 @@
       const rows = items.map((item, i) => {
         const hits = [{ id: 100 + i, name: 'Food ' + (i + 1) + ' (' + item.name + ')', measureId: 11 }, { id: 200 + i, name: 'Alt ' + (i + 1) }];
         const row = { index: i, item, hits, hitIndex: 0, hit: hits[0], food: { name: hits[0].name }, measures: MEASURES.slice(),
-          translationId: 0, groupId: opts.defaultGroupId, groupName: 'Lunch', groupNote: null, position: i + 1, order: (opts.defaultGroupId << 16) | (i + 1) };
+          translationId: 0, groupId: opts.defaultGroupId, groupName: 'Lunch', groupNote: null, position: i + 1, order: (opts.defaultGroupId << 16) | (i + 1),
+          customOnly: item.customOnly != null ? item.customOnly === true : opts.customOnly === true };   // plan.build's rule (0.3.2)
         if (i === 2) { row.pick = { error: "no 'slice' measure for this food" }; row.status = 'needs-choice'; row.message = row.pick.error; }
         else { row.pick = pick(11, item.qty || 1); row.status = 'ready'; row.message = ''; }
         cb && cb({ phase: 'search', index: i, total: items.length, row });
@@ -723,12 +727,12 @@
       engine.value = 'ui'; delay.value = '500'; remember.checked = true;
       q('.cma-footer .cma-btn-primary').click();
       await waitFor(() => store.cmaSettings && store.cmaSettings.engine === 'ui', 'stored');
-      deepEq(store.cmaSettings, { engine: 'ui', delayMs: 500, rememberInput: true });
+      deepEq(store.cmaSettings, { engine: 'ui', delayMs: 500, rememberInput: true, customOnly: false });
       // forget the in-memory copy and reload from storage
       await P.saveSettings({ engine: 'rpc', delayMs: 1 });
       store.cmaSettings = { engine: 'ui', delayMs: 500, rememberInput: true };
       const s = await P.loadSettings();
-      deepEq(s, { engine: 'ui', delayMs: 500, rememberInput: true });
+      deepEq(s, { engine: 'ui', delayMs: 500, rememberInput: true, customOnly: false }, 'a 0.3.1 record without customOnly: off');
       P.open('settings');
       eq(q('#cma-s-engine').value, 'ui');
       eq(q('#cma-s-delay').value, '500');
@@ -776,10 +780,35 @@
       eq(store.cmaLastInput, '');
       await P.saveSettings({ engine: 'rpc', delayMs: 250, rememberInput: true });
     });
+    it('the "Search only my custom foods" checkbox (0.3.2) round-trips through the shim; the note says a line\'s /all overrides it', async () => {
+      P.open('settings');
+      const box = q('#cma-s-custom');
+      ok(box && box.type === 'checkbox', 'checkbox rendered');
+      eq(box.checked, false, 'off by default');
+      eq(text(q('label[for="cma-s-custom"]')), 'Search only my custom foods');
+      ok(/\/all at the start or end of a line searches everything/.test(text(q('.cma-form .cma-full'))), text(q('.cma-form .cma-full')));
+      box.checked = true;
+      q('.cma-footer .cma-btn-primary').click();
+      await waitFor(() => store.cmaSettings && store.cmaSettings.customOnly === true, 'stored');
+      eq(P.getSettings().customOnly, true);
+      eq(store.cmaSettings.rememberInput, true, 'the other settings are saved with it');
+      // forget the in-memory copy and reload from storage: the box is ticked again
+      await P.saveSettings({ customOnly: false });
+      store.cmaSettings = Object.assign({}, store.cmaSettings, { customOnly: true });
+      eq((await P.loadSettings()).customOnly, true);
+      P.open('settings');
+      eq(q('#cma-s-custom').checked, true, 'rendered ticked after the reload');
+      q('#cma-s-custom').checked = false;
+      q('.cma-footer .cma-btn-primary').click();
+      await waitFor(() => store.cmaSettings.customOnly === false, 'stored off');
+      eq(P.getSettings().customOnly, false);
+    });
     it('invalid stored settings fall back to defaults', async () => {
-      store.cmaSettings = { engine: 'bogus', delayMs: 'x', rememberInput: 'yes' };
+      store.cmaSettings = { engine: 'rpc', delayMs: 250, rememberInput: true, customOnly: 1 };
+      eq((await P.loadSettings()).customOnly, false, 'customOnly: anything but true is off');
+      store.cmaSettings = { engine: 'bogus', delayMs: 'x', rememberInput: 'yes', customOnly: 'yes' };
       const s = await P.loadSettings();
-      deepEq(s, { engine: 'rpc', delayMs: 250, rememberInput: false });
+      deepEq(s, { engine: 'rpc', delayMs: 250, rememberInput: false, customOnly: false });
       window.chrome = realChrome;
     });
     it('rememberInput is opt-in: off by default, only an explicit true (as stored by 0.3.0) keeps it on', async () => {
@@ -1406,6 +1435,114 @@
       stub.inFlight = null;
       P.setState({ result: null, plan: null, view: 'input' });
       ok(!banner(), 'no decoder banner left');
+    });
+  });
+
+  describe('custom-only search (0.3.2): the setting reaches plan.build, the preview footer names the scope', () => {
+    const lastBuild = () => window.__planCalls.build[window.__planCalls.build.length - 1];
+    it('opts.customOnly follows the setting; the parsed /custom and /all reach plan.build; the footer says "custom foods only" or counts the lines', async () => {
+      await P.saveSettings({ engine: 'rpc', customOnly: false });
+      CMA.capture._ready = true; CMA.capture.state.registryMismatch = false;
+      P.open('input');
+      ok(/\/custom/.test(text(q('details.cma-help'))) && /\/all/.test(text(q('details.cma-help'))), 'the cheat-sheet names /custom and /all');
+      P.setInput('banana\n2 eggs');
+      await P.findFoods();
+      eq(lastBuild().opts.customOnly, false, 'setting off');
+      ok(!/custom/.test(text(q('.cma-plan-date'))), text(q('.cma-plan-date')));
+      P.setInput('banana /custom\n2 eggs\noats 40 g, milk 200 ml /c');
+      await P.findFoods();
+      eq(lastBuild().opts.customOnly, false);
+      deepEq(lastBuild().items.map(i => [i.name, i.customOnly]), [['banana', true], ['eggs', undefined], ['oats', true], ['milk', true]]);
+      ok(/Diary date 27 Sep 2026 · engine RPC · 2 lines custom-only/.test(text(q('.cma-plan-date'))), text(q('.cma-plan-date')));
+      eq(P.diagnosticsObject().panel.plan.rows.map(r => r.customOnly).join(), 'true,false,true,true', 'the dump lists the scope per row');
+      await P.saveSettings({ customOnly: true });
+      P.setInput('banana\n2 eggs');
+      await P.findFoods();
+      eq(lastBuild().opts.customOnly, true, 'setting on');
+      ok(/· custom foods only/.test(text(q('.cma-plan-date'))), text(q('.cma-plan-date')));
+      P.setInput('banana /all\n2 eggs');
+      await P.findFoods();
+      eq(lastBuild().opts.customOnly, true);
+      eq(lastBuild().items[0].customOnly, false, 'a line\'s /all is passed on');
+      ok(/· 1 line custom-only/.test(text(q('.cma-plan-date'))), text(q('.cma-plan-date')));
+      await P.saveSettings({ customOnly: false });
+      P.setInput('');
+      P.setState({ result: null, plan: null, view: 'input' });
+    });
+  });
+
+  describe('calorie amounts (0.3.2): the energy row in the preview (real plan.repick + units.pickEnergy)', () => {
+    it('Qty shows the kcal target (labelled kcal), the row names the conversion; a measure change keeps the kcal, a Qty edit edits it, no Use button ever', () => {
+      const real = window.__realPlan;
+      const stubRepick = CMA.plan.repick;
+      const repicks = [];
+      CMA.plan.repick = (row, id, qty) => { repicks.push({ id, qty }); return real.repick(row, id, qty); };
+      CMA.rpc = { energyKcalOf: (f) => f.kcal, foodTypeOf: () => null };
+      try {
+        P.open('input');
+        ok(/300cal almonds/.test(text(q('details.cma-help'))) && /1250kJ almonds/.test(text(q('details.cma-help'))), 'the cheat-sheet shows calorie amounts');
+        const M = [
+          { id: 21, name: 'g', grams: 1, type: 'Weight', foodId: 9 }, { id: 22, name: 'oz', grams: 28.3495, type: 'Weight', foodId: 9 },
+          { id: 23, name: 'cup, whole', grams: 143, type: 'Volume', foodId: 9 }, { id: 24, name: 'handful', grams: 0, type: 'Atomic', foodId: 9 },
+        ];
+        const items = CMA.parse.lines('300cal almonds\n1250 kJ almonds\n6000 kcal almonds');
+        const rows = items.map((item, i) => {
+          const hit = { id: 9, name: 'Almonds', measureId: 22, type: 'FOOD' };
+          const row = { index: i, item, hits: [hit], hitIndex: 0, hit, food: { kcal: 579 }, measures: M.slice(), translationId: 0, groupId: 2, groupName: 'Lunch',
+            groupNote: null, position: i + 1, order: (2 << 16) | (i + 1), customOnly: false, status: 'error', message: '' };
+          return real.repick(row, null);            // what plan.build's applyPick does for an energy item
+        });
+        P.setState({ plan: { rows, date: { day: 27, month: 9, year: 2026 }, groups: null, defaultGroupId: 2, positionsSource: 'getDayInfo', nextPos: {}, warnings: [], stopped: null }, result: null });
+        P.open('preview');
+        let tr = qa('.cma-preview tbody tr')[0];
+        let qty = tr.querySelector('input.cma-qty');
+        eq(qty.value, '300', 'the kcal target, not 1.828 oz'); eq(qty.getAttribute('aria-label'), 'Calories (kcal)');
+        eq(text(tr.querySelector('.cma-energy-unit')), 'kcal');
+        eq(tr.querySelector('select.cma-measure').value, '22', 'the default measure');
+        eq(tr.querySelector('.cma-c-grams').textContent, '51.8 g');
+        ok(/✓/.test(text(tr)) && /300 kcal → 1\.83 oz \(51\.8 g\)/.test(text(tr)), text(tr));
+        eq(tr.querySelector('.cma-use-suggested'), null);
+        const kj = qa('.cma-preview tbody tr')[1];
+        eq(kj.querySelector('input.cma-qty').value, '1250'); eq(text(kj.querySelector('.cma-energy-unit')), 'kJ');
+        ok(/1250 kJ \(298\.6 kcal\) → 1\.82 oz/.test(text(kj)), text(kj));
+        const big = qa('.cma-preview tbody tr')[2];
+        ok(big.classList.contains('cma-row-warn') && /over 1 kg/.test(text(big)), 'over 1 kg: warning colour and note');
+        ok(!tr.classList.contains('cma-row-warn'));
+        eq(text(q('.cma-footer .cma-btn-primary')), 'Add all (3)');
+        // another measure: the same 300 kcal
+        let sel = tr.querySelector('select.cma-measure');
+        sel.value = '23'; fire(sel, 'change');
+        deepEq(repicks[repicks.length - 1], { id: 23, qty: null }, 'the target is kept (no count passed)');
+        tr = qa('.cma-preview tbody tr')[0];
+        eq(tr.querySelector('input.cma-qty').value, '300'); eq(tr.querySelector('select.cma-measure').value, '23');
+        eq(tr.querySelector('.cma-c-grams').textContent, '51.8 g'); ok(/300 kcal → 0\.36 cup, whole \(51\.8 g\)/.test(text(tr)), text(tr));
+        // the Qty box edits the kcal target, in the chosen measure
+        qty = tr.querySelector('input.cma-qty'); qty.value = '600'; fire(qty, 'change');
+        deepEq(repicks[repicks.length - 1], { id: 23, qty: 600 });
+        tr = qa('.cma-preview tbody tr')[0];
+        eq(tr.querySelector('input.cma-qty').value, '600'); eq(tr.querySelector('.cma-c-grams').textContent, '103.6 g');
+        eq(rows[0].item.qty, 600); CMA.test.approx(rows[0].pick.quantity * 579 * 1.43, 600, 1e-2);
+        // a measure without a weight asks for another one; still no Use button, the number stays the target
+        sel = tr.querySelector('select.cma-measure'); sel.value = '24'; fire(sel, 'change');
+        tr = qa('.cma-preview tbody tr')[0];
+        ok(/\?/.test(text(tr)) && /'handful' has no weight/.test(text(tr)), text(tr));
+        eq(tr.querySelector('select.cma-measure').value, '', 'back on choose…'); eq(tr.querySelector('.cma-use-suggested'), null);
+        eq(tr.querySelector('input.cma-qty').value, '600'); eq(tr.querySelector('.cma-c-grams').textContent, '');
+        // editing the target on the unresolved row picks the default measure again
+        qty = tr.querySelector('input.cma-qty'); qty.value = '300'; fire(qty, 'change');
+        deepEq(repicks[repicks.length - 1], { id: null, qty: 300 });
+        tr = qa('.cma-preview tbody tr')[0];
+        ok(/✓/.test(text(tr)), text(tr)); eq(tr.querySelector('select.cma-measure').value, '22'); eq(tr.querySelector('.cma-c-grams').textContent, '51.8 g');
+        // the dump: numbers only (target, kcal, kcal per 100 g), never the food name
+        const dumped = P.diagnosticsObject().panel.plan.rows;
+        deepEq(dumped[0].energy, { unit: 'kcal', target: 300, kcal: 300, kcalPer100g: 579 });
+        deepEq(dumped[1].energy, { unit: 'kj', target: 1250, kcal: 298.6, kcalPer100g: 579 });
+        ok(JSON.stringify(dumped).indexOf('Almonds') < 0, 'no food name in the plan rows');
+      } finally {
+        CMA.plan.repick = stubRepick;
+        delete CMA.rpc;
+        P.setState({ plan: null, result: null, view: 'input' });
+      }
     });
   });
 

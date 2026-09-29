@@ -6,10 +6,16 @@
  *   opts.sessionProvider (optional function) is re-read before every request so a nonce rotated by the app's
  *   reauthenticate (SPEC 2.1) is picked up mid-build; `session` is the fallback snapshot.
  *   row  = { index, item, hits:[...], hitIndex, hit, food|null, measures:[...],
- *            pick:{measure, quantity, grams, note} | {error}, translationId,
+ *            pick:{measure, quantity, grams, note} | {error}, translationId, customOnly,
  *            groupId, groupName, position, order, status:'ready'|'needs-choice'|'error', message }
+ *   opts.customOnly (0.3.2): search only the user's custom foods / recipes / meals; a line's own /custom or /all
+ *   (item.customOnly) wins; row.customOnly is the scope the row was searched with.
+ *   Calorie amounts (0.3.2): an item whose unit is 'kcal' / 'kj' (`300cal almonds`) is picked by units.pickEnergy from
+ *   the loaded Food's nutrient 208 (rpc.energyKcalOf); without the Food (getFood failed, unverified row) or for a meal
+ *   the row is an error. pick.kcal / pick.kcalPerUnit carry the numbers.
  * CMA.plan.rechoose(session, row, hitIndex) → row      (user picked another hit in the panel)
- * CMA.plan.repick(row, measureId, qty) → row            (user picked another measure / qty)
+ * CMA.plan.repick(row, measureId, qty) → row            (user picked another measure / qty; on an energy row qty is the
+ *                                                        calorie target and the measure only carries it)
  * CMA.plan.servingFor(row, date) → Serving value (§4)   (used by engine-rpc)
  * CMA.plan.defaultGroupId(groups, now) → id             (time-of-day rule)
  * CMA.plan.resolveGroup(name, groups) → group|null      (case-insensitive prefix)
@@ -242,6 +248,14 @@ window.CMA = window.CMA || {};
     const exact = hits.findIndex(h => h && String(h.name || '').trim().toLowerCase() === n);
     return exact >= 0 ? exact : 0;
   }
+  /**
+   * A custom-only search keeps the user's own items: source 'Custom' (type FOOD / RECIPE / MEAL), or no source at all
+   * (the app styles a null source like a custom one). rpc.searchFoods already filters; this repeats it for any other
+   * searchFoods and runs before the maxHits slice, so a custom hit far down a mixed answer is not cut off.
+   */
+  function isCustomHit(hit) {
+    return !!hit && (hit.source == null || hit.source === 'Custom');
+  }
 
   // ---------------------------------------------------------------------------
   // Retry helper: one retry after `retryMs` on network errors only.
@@ -263,13 +277,60 @@ window.CMA = window.CMA || {};
   function newRow(item, index) {
     return {
       index, item, hits: [], hitIndex: -1, hit: null, food: null, measures: [],
-      pick: null, translationId: 0, groupId: null, groupName: null, groupNote: null,
+      pick: null, translationId: 0, customOnly: false, groupId: null, groupName: null, groupNote: null,
       position: null, order: null, status: 'error', message: ''
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // Calorie amounts (0.3.2, SPEC §6 / Appendix N): `300cal almonds` → units.pickEnergy over the Food's nutrient 208.
+  // ---------------------------------------------------------------------------
+  /** item.unit 'kcal' / 'kj' (parse.js): the typed number is an energy target, never a count of a measure. */
+  function isEnergyItem(item) {
+    return !!item && !!CMA.units && typeof CMA.units.isEnergyUnit === 'function' && CMA.units.isEnergyUnit(item.unit);
+  }
+  /** A meal cannot be scaled in the Add dialog (the measure selector is hidden): the hit's type, else the Food's FoodType. */
+  function isMealRow(row) {
+    if (row.hit && String(row.hit.type || '').toUpperCase() === 'MEAL') return true;
+    try { return !!row.food && !!CMA.rpc && typeof CMA.rpc.foodTypeOf === 'function' && CMA.rpc.foodTypeOf(row.food) === 'MEAL'; } catch (e) { return false; }
+  }
+  function energyValueOf(food) {
+    try { return CMA.rpc && typeof CMA.rpc.energyKcalOf === 'function' ? CMA.rpc.energyKcalOf(food) : null; } catch (e) { return null; }
+  }
+  /**
+   * The pick for an energy row. `measureId` (the panel's Unit dropdown) keeps the target and changes only the measure;
+   * null picks the default (units.pickEnergy). The Food itself is required: search hits carry no energy, so a row whose
+   * getFood failed (measuresFromHit fallback) or an unverified UI-engine row is an error rather than a guess.
+   */
+  function applyEnergy(row, measureId) {
+    const item = row.item || {};
+    if (!row.food) {
+      const why = row.unverified ? row.unverifiedWhy : row.foodError ? 'getFood failed: ' + row.foodError : 'the food was not loaded';
+      row.pick = { error: "calories need the food's details, which could not be read (" + (why || 'unknown') + '); type an amount such as 50 g instead' };
+    } else {
+      row.pick = CMA.units.pickEnergy(row.measures, energyValueOf(row.food), CMA.units.energyToKcal(item.qty, item.unit), {
+        hitMeasureId: row.hit ? row.hit.measureId : null,
+        defaultMeasureId: foodDefaultMeasureId(row.food),
+        measureId: measureId == null ? null : measureId,
+        meal: isMealRow(row),
+        kj: String(item.unit).toLowerCase() === 'kj' ? Number(item.qty) : null
+      });
+    }
+    if (row.pick.error) {
+      // a picked measure that cannot carry calories asks for another one; everything else cannot be added
+      row.status = row.pick.refused ? 'needs-choice' : 'error';
+      row.message = row.pick.error;
+    } else {
+      row.status = 'ready';
+      row.message = row.pick.note || '';
+    }
+    if (row.groupNote) row.message = (row.message ? row.message + '; ' : '') + row.groupNote;
+    return row;
+  }
+
   function applyPick(row) {
     const item = row.item || {};
+    if (isEnergyItem(item)) return applyEnergy(row, null);
     if (!row.measures.length) {
       row.pick = { error: 'food has no measures' };
       row.status = 'error';
@@ -352,6 +413,7 @@ window.CMA = window.CMA || {};
     row.translationId = 0;
     row.pick = null;
     row.unverified = false;
+    row.unverifiedWhy = null;
     row.foodError = null;
   }
 
@@ -374,6 +436,8 @@ window.CMA = window.CMA || {};
       // UI-engine mode: rows whose search/getFood fails (or every row when no session was captured) stay
       // 'ready' with an unverified pick built from the typed line; engine-ui drives the dialog by name (SPEC §7).
       unverified: !!(opts && opts.unverified),
+      // Settings → "Search only my custom foods": the default scope of every row (a line's /custom or /all wins).
+      customOnly: !!opts && opts.customOnly === true,
       // The session nonce rotates when the app reauthenticates (SPEC 2.1): a provider re-reads it per request.
       sessionProvider: typeof (opts && opts.sessionProvider) === 'function' ? opts.sessionProvider : null,
       isCancelled: typeof (opts && opts.isCancelled) === 'function' ? opts.isCancelled : () => false
@@ -418,6 +482,8 @@ window.CMA = window.CMA || {};
     row.unverified = true;
     row.food = null;
     row.measures = [];
+    // a calorie amount needs the Food's energy, which only getFood has: an error, never 300 of the typed unit
+    if (isEnergyItem(item)) { row.unverifiedWhy = 'UI engine: ' + why; return applyEnergy(row, null); }
     row.pick = {
       measure: item.unit ? { id: null, name: item.unit, grams: null, type: null } : null,
       quantity: item.qty != null ? Number(item.qty) : 1,
@@ -454,6 +520,9 @@ window.CMA = window.CMA || {};
       const row = newRow(item, i);
       plan.rows.push(row);
       assignGroup(row, o);
+      // the line's own /custom or /all, else the setting; engine-ui reads row.customOnly for the dialog's result rows
+      const customOnly = item.customOnly != null ? item.customOnly === true : o.customOnly;
+      row.customOnly = customOnly;
 
       if (stopped || o.isCancelled()) {
         row.status = 'error';
@@ -491,7 +560,7 @@ window.CMA = window.CMA || {};
       let hits;
       try {
         hits = await withOneRetry(
-          () => CMA.rpc.searchFoods(sessionNow(), item.name, { maxResults: o.maxResults }),
+          () => CMA.rpc.searchFoods(sessionNow(), item.name, { maxResults: o.maxResults, customOnly }),
           o.retryMs,
           () => safeCb(progressCb, { phase: 'search', index: i, total: list.length, row, message: 'retrying search' })
         );
@@ -502,12 +571,14 @@ window.CMA = window.CMA || {};
         if (e && e.kind === 'session') { stopped = true; plan.stopped = 'session'; row.message = 'session expired'; }
         continue;
       }
-      row.hits = (Array.isArray(hits) ? hits : []).slice(0, o.maxHits);
+      let found = Array.isArray(hits) ? hits : [];
+      if (customOnly) found = found.filter(isCustomHit);
+      row.hits = found.slice(0, o.maxHits);
       const idx = chooseHitIndex(row.hits, item.name);
       if (idx < 0) {
-        if (o.unverified) { markUnverified(row, 'no search results'); continue; }
+        if (o.unverified) { markUnverified(row, customOnly ? 'no custom food matches' : 'no search results'); continue; }
         row.status = 'error';
-        row.message = 'no results';
+        row.message = customOnly ? 'no custom food matches' : 'no results';
         continue;
       }
       setHit(row, idx);
@@ -624,9 +695,17 @@ window.CMA = window.CMA || {};
     return row;
   }
 
-  /** User chose a measure (and optionally a quantity) in the panel. */
+  /**
+   * User chose a measure (and optionally a quantity) in the panel. On an energy row (`300cal almonds`) `qty` is the new
+   * calorie target in the typed unit (kcal / kJ) and `measureId` the measure to express it in (null: the default), so
+   * neither the Unit dropdown nor a 'Use' button can ever turn the kcal number into a count of a measure.
+   */
   function repick(row, measureId, qty) {
     if (!row) throw new Error('row required');
+    if (isEnergyItem(row.item)) {
+      if (qty != null) row.item.qty = Number(qty);
+      return applyEnergy(row, measureId == null || measureId === '' ? null : measureId);
+    }
     const q = qty == null ? (row.pick && row.pick.quantity != null ? row.pick.quantity : (row.item && row.item.qty) || 1) : qty;
     const pick = CMA.units.withMeasure(row.measures, measureId, q);
     row.pick = pick;
@@ -675,6 +754,9 @@ window.CMA = window.CMA || {};
     defaultGroupId,
     resolveGroup,
     chooseHitIndex,
+    isCustomHit,
+    isEnergyItem,
+    isMealRow,
     translationIdFor,
     foodDisplayName,
     foodTranslations,

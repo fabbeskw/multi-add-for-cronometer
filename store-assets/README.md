@@ -72,10 +72,10 @@ are UTC.
 * **The PNGs are not committed.** `.gitignore` excludes every picture below `store-assets/` except the promo tiles,
   and `store-assets/dry-run/`: a live run shows a real account's Cronometer page (blurred where personal, on an
   empty day, but still the owner's account). `manifest.json` is committed and describes the last live run.
-* The `manifest.json` in the repository is still the one of the **2026-09-28 live run with version 0.2.0** (the old
-  set `01-input` … `05-diagnostics`, which showed the real diary day). The next live run replaces it with the new
-  set. Old PNGs of that run that may sit in a working copy (`03-results.png`, `04-diary.png`, `05-diagnostics.png`,
-  and `01-input.png` / `02-preview.png`) **show a real diary: delete them**. The tool never deletes anything in
+* The `manifest.json` in the repository is the one of the **2026-09-28 live run with version 0.3.1** (`01-input` …
+  `05-tdee-checkin`); 0.3.2 reuses that set, because it changes none of the five views. PNGs of the older 0.2.0 run
+  that may sit in a working copy (`03-results.png`, `04-diary.png`, `05-diagnostics.png`) **show a real diary:
+  delete them**. The tool never deletes anything in
   `store-assets/`: a live run **refuses to start** while any picture is in the folder (it names them), so the new set
   is never mixed with an old one, and at the end of a run it names every PNG there that is not from that run.
 * `python tools/screenshots.py --check-store` (no Chrome) prints `STORE SET READY` only when this folder holds
