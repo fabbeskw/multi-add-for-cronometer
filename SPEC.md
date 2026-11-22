@@ -39,7 +39,7 @@ data layer has NOT been exercised against a live account yet (§12.6).
 ## 1. File layout (repo root = the folder that contains `manifest.json`)
 
 ```
-manifest.json               name "Multi-Add for Cronometer", version 0.3.2 (the store reads name / description / version from it),
+manifest.json               name "Multi-Add for Cronometer", version 0.3.3 (the store reads name / description / version from it),
                             homepage_url = the public GitHub repository, icons 16/32/48/128
 popup.html                  static toolbar-icon page: three-line instructions (MV3 CSP: no inline script, §8)
 src/hook-main.js            MAIN world, document_start: XHR hook + relay (§2)
@@ -317,7 +317,14 @@ Also record in the registry: `permutation`, `policyHash` (regex `'app','([A-F0-9
 (optional, for diagnostics).
 
 ### 3.3 Known layouts (must match the registry; assert in tests)
-* `Serving/2553599101`: `[o Day, z, z, o Short|null, i order, o Time|null, i userId, d grams, i foodId, l id, i measureId, i o, i translationId]` (13)
+Serving and Food have two known layouts each (Appendix O): build 51CEDDC4 (2026-11-22) dropped one int from each. The
+extension supports both: `CMA.gwt.LAYOUTS` lists them, `CMA.gwt.layoutOf('SERVING' | 'FOOD')` matches the field-kind
+string the ACTIVE registry records for the type (the bundled one or a runtime rebuild, §3.5) and `CMA.gwt.F.SERVING` /
+`F.FOOD` are getters returning that layout's index table; `CMA.gwt.newServing(...)` builds a new entry in that layout
+(`CMA.rpc.servingValue` and `CMA.plan.servingFor` use it; `servingValue` refuses a Serving value whose field count is
+not the active layout's). `registry-builder.js` validates either layout and refuses every other (§3.5).
+* Serving, up to build D4E27627 — `Serving/2553599101`: `[o Day, z, z, o Short|null, i order, o Time|null, i userId, d grams, i foodId, l id, i measureId, i o, i translationId]` (13, `ozzoioidiliii`)
+* Serving, from build 51CEDDC4 — `Serving/2895043750`: `[o Day, z, z, o Short|null, i order, o Time|null, i userId, d grams, i foodId, l id, i measureId, i translationId]` (12, `ozzoioidilii`): the superclass Ingredient lost its always-0 `o`, so translationId moved from index 12 to 11. A new entry's wire tail is `Day(d|m|y)|1|1|0|order|0|0|grams|foodId|A|measureId|translationId` (the old `|0|` before translationId is gone). `Ingredient/1003004245` and `IngredientWithRange/623592429` changed the same way (not used by the extension).
 * `Day/782579793`: `[b day, b month(1-12), h year]`  * `Time/1552252503`: `[b h, b m, b s]`
 * `AddEntryChange/3949104564`: `[z, z, o entry]` * `AddEntryChangeResult/2006663169`: `[o entry]`
 * `ErrorEntryChangeResult/4150648168`: `[o exception, o entry]`
@@ -334,8 +341,9 @@ Also record in the registry: `permutation`, `policyHash` (regex `'app','([A-F0-9
   sits on top of both. `CMA.rpc.measuresOf` flags the measure as `isDefault`, `CMA.rpc.defaultMeasureIdOf` /
   `CMA.plan.foodDefaultMeasureId` expose the int (null for 0), and `CMA.units.defaultMeasure` honours it right after
   the search hit's measure (§5.3).
-* `Food/2097636843`: 20 fields: `[i, z, o, i category, s f, i, i, i id, o, o, l, o FoodMeasures, o NutrientMap, o, z, s source, o, o list<Translation>, o type, i]` — id index 7, measures index 11, nutrients index 12, translations index 17, type index 18 (enum `FoodType/2323555378`: 0 FOOD, 1 RECIPE, 2 MEAL, 3 FORMULATION; `CMA.rpc.foodTypeOf`). **Index 4 (`Food.f`) is not a display name** (prototype default `''`; no `.f` read in the bundle): the name the app shows is `Rjj(food, lYb())` = the Translation whose Language code equals the app locale — `lYb()` evaluates `(N3k(),'en')`, i.e. `'en'` is compiled in — else the first Translation's name (`CMA.plan.foodDisplayName`).
-* `NutrientMap/168231382` (Food index 12, read since 0.3.2, Appendix N): `[o filter | null, o Map<Integer nutrientId, Nutrient>]`
+* Food, from build 51CEDDC4 — `Food/3482863798`: 19 fields: `[i, z, o, i category, s f, i, i id, o, o, l, o FoodMeasures, o NutrientMap, o, z, s source, o, o list<Translation>, o type, i]` (`izoisiioolooozsoooi`) — one of the leading ints is gone: id index 6, measures 10, nutrients 11, translations 16, type 17. `FoodWithFormulation/2068365960` changed the same way (not used).
+* Food, up to build D4E27627 — `Food/2097636843`: 20 fields: `[i, z, o, i category, s f, i, i, i id, o, o, l, o FoodMeasures, o NutrientMap, o, z, s source, o, o list<Translation>, o type, i]` (`izoisiiioolooozsoooi`) — id index 7, measures index 11, nutrients index 12, translations index 17, type index 18 (enum `FoodType/2323555378`: 0 FOOD, 1 RECIPE, 2 MEAL, 3 FORMULATION; `CMA.rpc.foodTypeOf`). **Index 4 (`Food.f`) is not a display name** (prototype default `''`; no `.f` read in the bundle): the name the app shows is `Rjj(food, lYb())` = the Translation whose Language code equals the app locale — `lYb()` evaluates `(N3k(),'en')`, i.e. `'en'` is compiled in — else the first Translation's name (`CMA.plan.foodDisplayName`).
+* `NutrientMap/168231382` (Food index 12, 11 from build 51CEDDC4 — `F.FOOD.NUTRIENTS`; read since 0.3.2, Appendix N): `[o filter | null, o Map<Integer nutrientId, Nutrient>]`
   — the filter is `NutrientMap$NutrientFilter/1990310964` (0 ALL, 1 PRIMARY; null counts as ALL), the map decodes to a
   JS `Map` with number keys. `Nutrient/331784102`: `[d amount, i id, o type]` with `Nutrient$Type/4187872513` (0
   PRIMARY, 1 ALTERNATIVE, 2 CALCULATED, 3 MANUAL_ENTRY, 4 FORMULATION); under a PRIMARY filter only PRIMARY-typed
@@ -345,7 +353,14 @@ Also record in the registry: `permutation`, `policyHash` (regex `'app','([A-F0-9
 * `Translation/4034452093`: `[o Language, s name, i id]`; `Language/1257207975` (package `com.cronometer.shared.user.models`, not `foods.models`): `[s code, s, s, s]`.
 * `SearchHit/1904627920` (only if the app still returns it anywhere): `[i category,i globalPopularity,i id,s language,s measureDisplayName,i measureId,s name,z retired,i score,o source,s stemName,i translationId,o type,i userPopularity]`
 * `User/91151502`: 42 fields; index 19 userId (int), index 33 session key (string).
-`CMA.gwt.F = { SERVING:{DAY:0,ORDER:4,TIME:5,USER:6,GRAMS:7,FOOD:8,ID:9,MEASURE:10,TRANSLATION:12}, MEASURE:{AMOUNT:0,FOOD:2,HIDDEN:3,ID:4,ML:5,NAME:6,TYPE:8,GRAMS:9}, FOOD:{NAME:4,ID:7,MEASURES:11,NUTRIENTS:12,TRANSLATIONS:17,TYPE:18}, NUTRIENT_MAP:{FILTER:0,MAP:1}, NUTRIENT:{AMOUNT:0,ID:1,TYPE:2}, DAYINFO:{LIST1:2,LIST2:3}, USER:{ID:19,SESSION:33} }`
+`CMA.gwt.F = { SERVING:<layout>, MEASURE:{AMOUNT:0,FOOD:2,HIDDEN:3,ID:4,ML:5,NAME:6,TYPE:8,GRAMS:9}, FOOD:<layout>, NUTRIENT_MAP:{FILTER:0,MAP:1}, NUTRIENT:{AMOUNT:0,ID:1,TYPE:2}, DAYINFO:{LIST1:2,LIST2:3}, USER:{ID:19,SESSION:33} }` with
+SERVING = `{DAY:0,B:1,C:2,OFFSET:3,ORDER:4,TIME:5,USER:6,GRAMS:7,FOOD:8,ID:9,MEASURE:10,O:11,TRANSLATION:12}` (up to D4E27627) or
+`{DAY:0,B:1,C:2,OFFSET:3,ORDER:4,TIME:5,USER:6,GRAMS:7,FOOD:8,ID:9,MEASURE:10,TRANSLATION:11}` (from 51CEDDC4, no `O`) and
+FOOD = `{NAME:4,ID:7,MEASURES:11,NUTRIENTS:12,TRANSLATIONS:17,TYPE:18}` (up to D4E27627) or
+`{NAME:4,ID:6,MEASURES:10,NUTRIENTS:11,TRANSLATIONS:16,TYPE:17}` (from 51CEDDC4), chosen from the active registry. A
+registry that lacks the type or records another shape gets `layoutOf(...).known === false` and the newest table (the
+runtime rebuild never installs such a registry). The choice is cached per registry object and cleared by
+`reloadRegistry()`.
 (`MEASURE.AMOUNT` = `Measure.a`, the amount the dialog prints before the name when ≠ 1; `MEASURE.ML` = `Measure.f`, the boxed Double behind the ` — N ml` label suffix).
 
 ### 3.4 API
@@ -379,6 +394,9 @@ CMA.gwt.sig(base) → full signature from the registry; CMA.gwt.SIG.{STRING, INT
    DOUBLE_ARRAY ([D), DOUBLE_ARRAY_2D ([[D)} (lazy getters:
    other modules resolve CRCs through these, never hard-code them); boxSig(kind), entryFor(sig), tagOf(v),
    STRING_SIG, SERVICE, STREAM_VERSION, parseArrayLiteral(src) (CSP-safe parser for pre-v8 literal payloads)
+CMA.gwt.LAYOUTS, layoutOf('SERVING'|'FOOD') → {key, sig, layout, fields, known, builds, F}   // §3.3: per active registry
+CMA.gwt.newServing({day, order, grams, foodId, measureId, translationId?, userId?, time?, id?, offset?, b?, c?})
+   → {$t: SIG.SERVING, f} in the active layout (b = c = true, offset / time null, id 0, `o` = 0 only where it exists)
 ```
 Back-references on write are required for correctness (the real client emits them); on read they must be resolved.
 
@@ -420,9 +438,10 @@ validate(registry[, {maxUnknown = MAX_UNKNOWN, truncated, fragments}]) → {ok, 
    methods cover i z s o d l b h and readerHelpers.readObject exists; serviceMethods > 150 entries incl.
    updateDiary, getDayInfo, getFood, removeServing, authenticate, editDiaryEntries, reauthenticate; the §3.3
    layouts resolved by BASE name exactly like CMA.gwt.sig() (first key with prefix base + '/': a CRC change alone
-   still validates, two keys with the same base are reported as ambiguous): Serving ozzoioidiliii, Day bbh,
-   Time bbb, AddEntryChange zzo, AddEntryChangeResult o, ErrorEntryChangeResult oo, DayInfo zooozs,
-   Measure dziziosood, FoodMeasures io, Food izoisiiioolooozsoooi, Translation osi and Language ssss
+   still validates, two keys with the same base are reported as ambiguous): Serving ozzoioidiliii or
+   ozzoioidilii (0.3.3, Appendix O), Day bbh, Time bbb, AddEntryChange zzo, AddEntryChangeResult o,
+   ErrorEntryChangeResult oo, DayInfo zooozs, Measure dziziosood, FoodMeasures io, Food izoisiiioolooozsoooi or
+   izoisiioolooozsoooi (Appendix O; any other Serving / Food shape is refused), Translation osi and Language ssss
    (CMA.plan.foodDisplayName reads them), User with 42 fields, idx 19 'i' and idx 33 's', UserPreferences /
    HashMap map, ArrayList list, SingletonList singleton, String box:s, Integer box:i, String[] array:s,
    Measure$Type / FoodSource enum, NotLoggedInException s; SearchHit and java.util.Date only when present;
@@ -643,7 +662,8 @@ CMA.rpc.getDayInfo(session, day)        → DayInfo value; helper CMA.rpc.servin
 CMA.rpc.getFood(session, foodId)        → Food value; helper CMA.rpc.measuresOf(food) → [{id, name, grams, type, typeOrdinal, foodId, isDefault, amount, ml, hidden}]
 CMA.rpc.updateDiaryAdd(session, serving) → { servingId (GWT base64 long string, verbatim from the wire), serving, results }
    or throws (kind 'rejected', e.serverMessage) with the ErrorEntryChangeResult message; `serving` is a Serving value
-   (13 fields) or a plain {day, order, grams, foodId, measureId, translationId?}
+   (the active layout, §3.3: 13 fields up to D4E27627, 12 from 51CEDDC4) or a plain {day, order, grams, foodId,
+   measureId, translationId?} (built with CMA.gwt.newServing in the active layout)
 CMA.rpc.removeServing(session, servingIdStr) → true   (params String, J, I: the id string is passed back verbatim)
 CMA.rpc.searchFoods(session, query, {maxResults=50, includeRetired=false, customOnly=false}) → hits [{id, name, measureId, measureDisplayName, score, source, type, translationId, retired}]
    GET /api/v3/user/{userId}/food-search/string?query=<UPPERCASED, encodeURIComponent with %20 → '+' like the app's B3k>&maxResults=50&sources=All&categoryId=0&selectedTab=ALL&type=All
@@ -675,6 +695,8 @@ Exact request shapes (string table order matters for byte-equality with the temp
   'com.cronometer.shared.entries.models.Day/782579793']` then
   `1|2|3|4|3|5|6|7|8|<userId>|9|10|1|1|11|12|<day>|<month>|<year>|1|1|0|<order>|0|0|<grams>|<foodId>|A|<measureId>|0|<translationId>|`
   i.e. the cphoskins template with the UI's semantics (§ serving-fields-resolved.md). Order = `(groupId<<16)|position`.
+  From build 51CEDDC4 (Appendix O) the Serving string is `...Serving/2895043750` and the tail loses the always-0 `o`:
+  `...|<grams>|<foodId>|A|<measureId>|<translationId>|` (`FX.updateDiaryTemplate51` in the tests).
 * getDayInfo: `...|getDayInfo|java.lang.String/2004016611|com.cronometer.shared.entries.models.Day/782579793|I|<nonce>|1|2|3|4|3|5|6|7|8|6|<day>|<month>|<year>|<userId>|`
 * getFood: `...|getFood|java.lang.String/2004016611|I|<nonce>|1|2|3|4|2|5|6|7|<foodId>|`
 * removeServing: `...|removeServing|java.lang.String/2004016611|J|I|<nonce>|1|2|3|4|3|5|6|7|8|<idB64>|<userId>|`
@@ -1177,7 +1199,7 @@ values incl. > 2^31), string escaping, Writer round-trip through the Reader for 
 Food/User/maps/lists/enums with back-references, `updateDiary` body byte-equal to the template in §4 for fixed inputs
 (day 4/3/2026, order 65537, grams 50, foodId 464674, measureId 1072101, userId 1234567, translation 0, nonce `NONCE`,
 policy `POLICY`), `parseRequest` recovering method/nonce/userId/day from that body and from the getDayInfo template,
-real fixtures: updateDiary response
+real fixtures (D4E27627 layouts: the pages that replay them install `CMA.fixtures.legacyRegistry()`, Appendix O): updateDiary response
 `//OK[0,0,1072101,"D80lp$",464674,50.0,1234567,0,65541,0,1,1,2026,3,4,4,3,2,1,1,["java.util.ArrayList/4159755760","com.cronometer.shared.entries.changes.AddEntryChangeResult/2006663169","com.cronometer.shared.entries.models.Serving/2553599101","com.cronometer.shared.entries.models.Day/782579793"],0,7]`
 must decode to a list with one AddEntryChangeResult whose Serving has id `D80lp$`, foodId 464674, measureId 1072101,
 grams 50, order 65541, userId 1234567, Day 4/3/2026; editDiaryEntries response
@@ -1269,7 +1291,7 @@ test. Exit 0 only on `PACKAGE OK`. The archive is written under a temporary name
 renamed to the release name only when every check passed — a stale package under the release name is removed
 first and a failed build deletes the temporary file, so `dist/` never holds a broken zip under the name a good
 build produces (review round 5). Run `tools/check_manifest.py` and `tests/run.sh` first and
-rebuild the zip after ANY change to `src/` or `manifest.json` (it snapshots the tree). The 0.3.2 package (like 0.3.1)
+rebuild the zip after ANY change to `src/` or `manifest.json` (it snapshots the tree). The 0.3.3 package (like 0.3.1 and 0.3.2)
 holds 26 members: manifest, popup, license, 4 icons (16/32/48/128) and the 19 scripts (0.3.0: 25 members with 3 icons; 0.2.1:
 22 members, 16 scripts). Since 0.3.1 `tools/check_manifest.py` also accepts `homepage_url` (must be a github.com
 repository URL) and an optional 32 px icon (16/48/128 required, any other size fails) and requires a description of
@@ -2102,3 +2124,45 @@ reviewer will see.
   a per-line choice of the measure (the Unit dropdown does it), `100 calorie pack …` product names (documented), and a
   thousands comma before any other unit (`1,000 g` is still 1 g, as before 0.3.2).
 * **Tests**: see §9 (unit, gwt, capture, load-all, panel, engine-ui).
+
+## Appendix O. Build 51CEDDC4: Serving and Food layouts (0.3.3, 2026-11-22)
+
+* **Trigger**: Cronometer deployed build `51CEDDC489319DB1CA74A3063B0A1867` (policy hash
+  `D4F70C3732650C698CF5B795619D230E`) on 2026-11-22. The runtime rebuild (§3.5) refused it:
+  `com.cronometer.shared.entries.models.Serving/2895043750 layout ozzoioidilii (expected ozzoioidiliii)`.
+* **Evidence** (from the downloaded bundle, `tools/bundle/`; the previous build `D4E27627...cache.js` is there too):
+  - Serving's superclass Ingredient lost a field. The old Ingredient deserializer read `[d grams, i foodId, l id,
+    i measureId, i o (always 0), i translationId]`, the new one `[d grams, i foodId, l id, i measureId, i
+    translationId]`. The JSON → Serving converter `NWe` sets the translationId through `Tsj(a,b){a.o=b}`, the LAST
+    Ingredient field, so the removed one is the always-0 int. New `Serving/2895043750` = `[o Day, z, z, o Short|null,
+    i order, o Time|null, i userId, d grams, i foodId, l id, i measureId, i translationId]` (12 fields; old CRC
+    2553599101). `Ingredient/1003004245` and `IngredientWithRange/623592429` changed likewise.
+  - Food lost one of its leading ints: old `Food/2097636843` (20 fields) → new `Food/3482863798` (19 fields). The Add
+    Food dialog builds servings with `new otj(food.i, …)` and `FLj(a.b, a.b.o.a)` (o = FoodMeasures), which puts the
+    id at index 6 and FoodMeasures at 10: new indices ID 6, MEASURES 10, NUTRIENTS 11, TRANSLATIONS 16, TYPE 17 (old
+    7 / 11 / 12 / 17 / 18). `FoodWithFormulation` changed the same way.
+  - Unchanged (same CRC and layout in the registry diff): Day, Time, DayInfo, Measure, FoodMeasures, NutrientMap,
+    Nutrient, Translation, Language, SearchHit, User, AddEntryChange / AddEntryChangeResult / ErrorEntryChangeResult
+    and the Adaptive TDEE types (DataPoint, CalendarInfo, CalendarDayInfo, DayQueryType, `[D`, `[[D`). The other
+    changed or removed types (corn, coupon, curation, device / integration, spectrum, stripe, user-event and
+    NutrientInfo classes) are not read by the extension. Three
+    CronometerService methods disappeared (`addRepeatItem`, `getNutrientInfo`, `getPublicStripeKey`); none is called
+    (capture.js only lists `addRepeatItem` in its userId table, harmless).
+* **Change**: both layouts are supported, selected from the ACTIVE registry, never hardcoded (§3.3): `CMA.gwt.LAYOUTS` /
+  `layoutOf` / getter tables `F.SERVING` and `F.FOOD` / `newServing`; `CMA.rpc.servingValue` builds and validates in
+  that layout; `CMA.plan.servingFor` builds through `newServing` (its literal D4E27627 signature and layout remain only
+  as the fallback for a page without gwt-stream.js, `tests/unit.html`); `registry-builder.js` EXPECTED_LAYOUTS accepts
+  `ozzoioidiliii` or `ozzoioidilii` for Serving and `izoisiiioolooozsoooi` or `izoisiioolooozsoooi` for Food and keeps
+  refusing anything else; `tools/gen_registry.py` reports either as expected. The bundled registry is regenerated for
+  51CEDDC4 (585 types, 0 unknown).
+* **Tests**: the pages that replay the captured strings of §9 (D4E27627 layouts) run on `CMA.fixtures.legacyRegistry()`
+  (the bundled registry with the Serving / Food entries put back), and the fixture builders `serving()` / `food()`
+  follow the active registry. New 51CEDDC4 cases: the updateDiary body byte-exact with the 12-field Serving
+  (`FX.updateDiaryTemplate51`, gwt.html, capture.html, load-all.html), the response `FX.updateDiaryResponse51` (derived
+  from the captured one by the wire rules, not captured), getDayInfo servings and getFood with the 19-field Food (id,
+  measures, default measure, energy, type, translations), registry switching, and registry-builder validation of all
+  four layout combinations and refusal of a third shape.
+* **Live test (2026-11-22)**: the maintainer reloaded 0.3.3 against build 51CEDDC4; the runtime rebuild passed
+  validation and an RPC batch (a gram line and a calorie line) was added, checked in the diary and undone.
+* **Not verified**: the 51CEDDC4 wire strings in the tests are derived, not captured. Which of Food's two leading
+  always-0 ints was removed is not known (both read as 0; the fixture drops index 5); the extension reads neither.

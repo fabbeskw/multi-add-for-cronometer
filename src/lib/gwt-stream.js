@@ -98,13 +98,16 @@ window.CMA = window.CMA || {};
   /**
    * reloadRegistry(): forget everything derived from CMA.registry so the next lookup reads the registry now
    * installed (SPEC 3.5: CMA.registryStore swaps CMA.registry when Cronometer deploys a new build). The caches
-   * are sigCache (base name -> full signature, behind the lazy CMA.gwt.SIG getters) and boxCache (primitive
-   * kind -> java.lang box signature); every other registry read (entryFor, exceptionInfo, simpleParams) is
-   * performed per call. Returns registryInfo() of the registry now active.
+   * are sigCache (base name -> full signature, behind the lazy CMA.gwt.SIG getters), boxCache (primitive
+   * kind -> java.lang box signature) and layoutCache (the Serving / Food index tables behind CMA.gwt.F, chosen from
+   * the registry's layouts); every other registry read (entryFor, exceptionInfo, simpleParams) is performed per
+   * call. Returns registryInfo() of the registry now active.
    */
   function reloadRegistry() {
     sigCache.clear();
     boxCache.clear();
+    layoutCache.clear();
+    layoutCacheRegistry = null;
     return registryInfo();
   }
   function describe(v) {
@@ -771,8 +774,86 @@ window.CMA = window.CMA || {};
   // ------------------------------------------------------------------------------------------------
   // exports
   // ------------------------------------------------------------------------------------------------
-  const F = {   // SPEC 3.3 field indices
-    SERVING: { DAY: 0, ORDER: 4, TIME: 5, USER: 6, GRAMS: 7, FOOD: 8, ID: 9, MEASURE: 10, TRANSLATION: 12 },
+  // SPEC 3.3 layouts that differ between Cronometer builds. The field indices of Serving and Food are chosen from the
+  // layout the ACTIVE registry (CMA.registry: the bundled one or a runtime rebuild) records for the type, never
+  // hardcoded, so one extension version reads and writes both. Only these layouts are known; registry-builder.js
+  // EXPECTED_LAYOUTS accepts exactly them and refuses anything else, so a registry with another shape is never
+  // installed at runtime.
+  //  - Serving extends Ingredient. Up to build D4E27627 Ingredient was [d grams, i foodId, l id, i measureId, i o (always
+  //    0), i translationId]; build 51CEDDC4 (2026-11-22) dropped the always-0 int: Serving/2553599101 (13 fields) ->
+  //    Serving/2895043750 (12 fields), the translationId moved from 12 to 11 (SPEC Appendix O).
+  //  - Food lost one of its leading ints in the same build: Food/2097636843 (20 fields) -> Food/3482863798 (19 fields);
+  //    every index from the id on moved down by one (the dialog's `new otj(food.i, ...)` reads the id at 6).
+  const LAYOUTS = {
+    SERVING: [
+      { layout: 'ozzoioidiliii', builds: 'up to D4E27627',
+        F: { DAY: 0, B: 1, C: 2, OFFSET: 3, ORDER: 4, TIME: 5, USER: 6, GRAMS: 7, FOOD: 8, ID: 9, MEASURE: 10, O: 11, TRANSLATION: 12 } },
+      { layout: 'ozzoioidilii', builds: 'from 51CEDDC4',
+        F: { DAY: 0, B: 1, C: 2, OFFSET: 3, ORDER: 4, TIME: 5, USER: 6, GRAMS: 7, FOOD: 8, ID: 9, MEASURE: 10, TRANSLATION: 11 } },
+    ],
+    FOOD: [
+      { layout: 'izoisiiioolooozsoooi', builds: 'up to D4E27627',
+        F: { NAME: 4, ID: 7, MEASURES: 11, NUTRIENTS: 12, TRANSLATIONS: 17, TYPE: 18 } },
+      { layout: 'izoisiioolooozsoooi', builds: 'from 51CEDDC4',
+        F: { NAME: 4, ID: 6, MEASURES: 10, NUTRIENTS: 11, TRANSLATIONS: 16, TYPE: 17 } },
+    ],
+  };
+  const layoutCache = new Map();
+  let layoutCacheRegistry = null;
+  /**
+   * layoutOf('SERVING' | 'FOOD') -> {key, sig, layout, fields, known, builds, F} for the active registry: `layout` is
+   * the registry's field-kind string of the type, `F` the index table of the matching LAYOUTS entry. A registry that
+   * lacks the type (a test page's partial registry) or records an unknown shape gets known:false and the NEWEST table
+   * (what the bundled registry carries); the runtime rebuild never installs such a registry (registry-builder.js).
+   * Cached per registry object (a swapped CMA.registry is noticed even without reloadRegistry(), which clears it too).
+   */
+  function layoutOf(key) {
+    const table = LAYOUTS[key];
+    if (!table) throw new Error('GWT: no layout table for ' + key);
+    if (layoutCacheRegistry !== CMA.registry) { layoutCache.clear(); layoutCacheRegistry = CMA.registry; }
+    let out = layoutCache.get(key);
+    if (out) return out;
+    let s = null, kinds = null;
+    const types = CMA.registry && CMA.registry.types;
+    if (types && typeof types === 'object') {
+      const prefix = BASES[key] + '/';
+      s = Object.keys(types).find(function (k) { return k.startsWith(prefix); }) || null;
+      const e = s ? types[s] : null;
+      kinds = e && e.k === 'class' && Array.isArray(e.f) ? e.f.join('') : null;
+    }
+    const hit = table.find(function (x) { return x.layout === kinds; });
+    const pick = hit || table[table.length - 1];
+    out = { key, sig: s, layout: kinds, fields: kinds ? kinds.length : pick.layout.length, known: !!hit, builds: pick.builds, F: pick.F };
+    layoutCache.set(key, out);
+    return out;
+  }
+  /**
+   * newServing({day, order, grams, foodId, measureId, translationId?, userId?, time?, id?, offset?, b?, c?}) -> a
+   * Serving value {$t, f} in the ACTIVE registry's layout (SPEC 4: what the Add Food dialog sends for a new entry):
+   * b = c = true, offset null, id 0 ('A' on the wire), and the always-0 `o` only where the layout still has it.
+   * `day` must already be a Day value. Values are placed as given; CMA.rpc.servingValue validates them.
+   */
+  function newServing(v) {
+    const L = layoutOf('SERVING'), S = L.F;
+    const f = new Array(L.fields).fill(0);
+    f[S.DAY] = v.day;
+    f[S.B] = v.b === undefined ? true : v.b;
+    f[S.C] = v.c === undefined ? true : v.c;
+    f[S.OFFSET] = v.offset === undefined ? null : v.offset;
+    f[S.ORDER] = v.order;
+    f[S.TIME] = v.time === undefined ? null : v.time;
+    f[S.USER] = v.userId === undefined ? 0 : v.userId;
+    f[S.GRAMS] = v.grams;
+    f[S.FOOD] = v.foodId;
+    f[S.ID] = v.id === undefined ? 0 : v.id;
+    f[S.MEASURE] = v.measureId;
+    if (S.O !== undefined) f[S.O] = 0;
+    f[S.TRANSLATION] = v.translationId === undefined ? 0 : v.translationId;
+    return { $t: L.sig || sig(BASES.SERVING), f };
+  }
+
+  const F = {   // SPEC 3.3 field indices; SERVING and FOOD follow the active registry (layoutOf above)
+    get SERVING() { return layoutOf('SERVING').F; },
     // Measure/1979099908 [d a, z b, i foodId, z d, i measureId, o f, s name, o i, o type, d k]: a = the amount shown
     // before the name when != 1 (qqj), f = the ml Double behind the ' — N ml' label suffix (pqj), k = grams per unit,
     // d = 'Hidden' in the measure editor (the Add Food dialog's VCe drops measures with d === true).
@@ -780,7 +861,7 @@ window.CMA = window.CMA || {};
     // Food.f (NAME, index 4) is NOT a display name in this build (prototype default '', never read by the app):
     // the name the app shows is the locale Translation's (Rjj), see CMA.plan.foodDisplayName. NUTRIENTS = the
     // NutrientMap (energy for calorie amounts, CMA.rpc.energyKcalOf); TYPE = FoodType (0 FOOD, 1 RECIPE, 2 MEAL, 3 FORMULATION).
-    FOOD: { NAME: 4, ID: 7, MEASURES: 11, NUTRIENTS: 12, TRANSLATIONS: 17, TYPE: 18 },
+    get FOOD() { return layoutOf('FOOD').F; },
     // NutrientMap/168231382 [o filter (NutrientMap$NutrientFilter: 0 ALL, 1 PRIMARY) | null, o Map<Integer nutrientId, Nutrient>]
     NUTRIENT_MAP: { FILTER: 0, MAP: 1 },
     // Nutrient/331784102 [d amount, i id, o type (Nutrient$Type: 0 PRIMARY, 1 ALTERNATIVE, 2 CALCULATED, 3 MANUAL_ENTRY, 4 FORMULATION)]
@@ -819,7 +900,8 @@ window.CMA = window.CMA || {};
   });
 
   CMA.gwt = {
-    STRING_SIG, SERVICE, STREAM_VERSION, ESCAPE_RE_WEBKIT, ESCAPE_RE_DEFAULT, F, SIG, BASES,
+    STRING_SIG, SERVICE, STREAM_VERSION, ESCAPE_RE_WEBKIT, ESCAPE_RE_DEFAULT, F, SIG, BASES, LAYOUTS,
+    layoutOf, newServing,
     Writer, Encoder, Decoder,
     encodeLong, decodeLong, decodeLongBig, isLongToken,
     escapeString, unescapeString,

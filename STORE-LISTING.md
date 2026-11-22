@@ -6,7 +6,7 @@ the store shows them verbatim. [SUBMISSION-CHECKLIST.md](SUBMISSION-CHECKLIST.md
 says which block goes into which dashboard field and which steps only the account owner can do.
 
 * Package: `python tools/build_zip.py` → `dist/multi-add-for-cronometer-<version>.zip` (the version is the one in
-  `manifest.json`; this listing is written for **0.3.2**). Name, summary, version, icons and permissions come from
+  `manifest.json`; this listing is written for **0.3.3**). Name, summary, version, icons and permissions come from
   the manifest in the zip and cannot be edited in the dashboard: changing them needs a version bump and a new zip.
 * Repository-derived URLs are already filled in (`python tools/set_repo_url.py https://github.com/fabbeskw/multi-add-for-cronometer --check`
   exits 0). The item id is `eggnohhalgffodifhpdpedeofilfffhd` (approved and published, Unlisted, 2026-09-29).
@@ -138,7 +138,7 @@ explained in `store-assets/README.md`; `python tools/screenshots.py` renders the
 uploading, open every PNG and check that no name, e-mail, account number or real health figure is visible. The
 store's rule is that screenshots "demonstrate the actual user experience" of the current version: all five show the
 real panel, and the TDEE shots use demo data because the tab shows health data. The set was captured live with 0.3.1
-on 28 September 2026 (`store-assets/manifest.json`) and is reused for 0.3.2, which changes none of these five views
+on 28 September 2026 (`store-assets/manifest.json`) and is reused for 0.3.2 and 0.3.3, which change none of these five views
 (the cheat-sheet in shot 1 is collapsed, and the preview footer names no search scope while *Search only my custom
 foods* is off).
 

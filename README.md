@@ -71,7 +71,7 @@ UI is blurred, the multi-add shots are taken on an empty future day of the diary
 entries the tool adds (and removes again afterwards), and the two TDEE shots use synthetic demo history, never a
 real person's intake or weight. The PNGs are not committed (a live run shows the owner's diary page), so a clone
 holds no uploadable set; `store-assets/manifest.json` records the owner's last live run (0.3.1, 28 September 2026,
-reused for 0.3.2: its five views look the same). The store promo tiles are in [store-assets/promo/](store-assets/promo/).
+reused for 0.3.2 and 0.3.3: its five views look the same). The store promo tiles are in [store-assets/promo/](store-assets/promo/).
 
 ## Usage
 
@@ -408,6 +408,12 @@ python tools/check_manifest.py                    # manifest.json sanity (files,
 bash tests/run.sh                                 # all test pages must print ALL TESTS PASSED
 ```
 
+A deploy that changes the *layout* of a class the extension reads or writes (not only its CRC) is refused by the
+decoder check (the problem names the type, e.g. `Serving/… layout … (expected …)`) and needs a code change: add the
+new layout to `LAYOUTS` in `src/lib/gwt-stream.js` (the field indices are then picked from whichever registry is
+active) and to `EXPECTED_LAYOUTS` in `src/lib/registry-builder.js`. 0.3.3 did this for build 51CEDDC4 (SPEC
+Appendix O).
+
 Then reload the extension on `chrome://extensions` (or bump the version and publish, see below).
 `python tools/make_graphics.py` re-renders the icons and the store promo tiles from their SVG/HTML sources in
 `graphics/` (headless Chrome; `--verify` checks the committed PNGs without Chrome).
@@ -433,13 +439,13 @@ any problem. The zip is written under a temporary name and renamed to the releas
 passed (a stale release zip is removed first), so a failed build never leaves a package that looks like a good one.
 Run `python tools/check_manifest.py`, `python tools/gen_tdee.py --check` and `bash tests/run.sh` first; the version
 in the file name is the manifest's.
-The zip snapshots the tree, so rebuild it after any change to `src/` or `manifest.json` (the 0.3.2 package holds 26
+The zip snapshots the tree, so rebuild it after any change to `src/` or `manifest.json` (the 0.3.3 package holds 26
 files: manifest, popup, license, 4 icons (16, 32, 48, 128) and the 19 scripts; `vendor/` — the pristine upstream TDEE engine — and any
 `.mjs` file are never packaged, only the generated `src/tdee/adaptive-tdee.js` is). `dist/` is a build output and is
 gitignored: the zip of a tagged version is attached to a GitHub Release (<https://github.com/fabbeskw/multi-add-for-cronometer/releases>), which is where the *From a release
 zip* install path points.
 
-To check that the package really installs, run `python tools/smoke_extension.py dist/multi-add-for-cronometer-0.3.2.zip`
+To check that the package really installs, run `python tools/smoke_extension.py dist/multi-add-for-cronometer-0.3.3.zip`
 (without an argument it checks the working tree). It starts a headless Chrome on a throw-away profile, installs the
 extension through the DevTools command `Extensions.loadUnpacked` — the same checks as *Load unpacked* — and opens
 the extension's own popup page, expecting its title. Google Chrome 137 and later ignore the `--load-extension`
@@ -491,6 +497,11 @@ MIT — see [LICENSE](LICENSE). Unofficial; not affiliated with Cronometer Softw
 
 ## Changelog
 
+* **0.3.3** (2026-11-22) — works with Cronometer build 51CEDDC4: a diary entry lost its always-0 field and the food
+  record one leading number; the runtime rebuild now accepts both layouts; bundled decoder regenerated. The extension
+  picks the field positions of a diary entry and of a food from the decoder it is using (the bundled one or a rebuilt
+  one), so it keeps working with older builds too. Nothing about the data the extension reads or stores changed.
+  Live-tested against build 51CEDDC4 on 2026-11-22 (RPC batch added and undone).
 * **0.3.2** (2026-09-29) — **Custom-only search**: `/custom` (or `/c`) at the start or end of a line searches only
   your own custom foods, recipes and meals (`1.5lbs mozzarella cheese /custom`), `/all` searches everything, a flag on
   a header (`## Dinner /custom`) or alone on a line covers the lines below it, and Settings → *Search only my custom

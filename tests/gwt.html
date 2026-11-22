@@ -10,7 +10,14 @@
 <script>
 (function () {
   'use strict';
-  const T = CMA.test, G = CMA.gwt, FX = CMA.fixtures, REG = CMA.registry, S = CMA.fixtures.SIG;
+  const T = CMA.test, G = CMA.gwt, FX = CMA.fixtures, S = CMA.fixtures.SIG;
+  // The suites below replay the captured strings of SPEC 9 (build 0A1C16E1 .. D4E27627 layouts: Serving 13 fields, Food
+  // 20). They run against the bundled registry with its Serving / Food entries put back to those layouts
+  // (FX.legacyRegistry), which is what a registry of an older build carries; the last suite switches to the bundled
+  // registry itself (build 51CEDDC4: Serving 12 fields, Food 19; SPEC Appendix O).
+  const BUNDLED = CMA.registry;
+  const REG = FX.legacyRegistry(BUNDLED);
+  FX.useRegistry(REG);
   const eq = T.eq, ok = T.ok, deepEq = T.deepEq;
   const MB = FX.moduleBase;
   const UD_SIGS = [G.STRING_SIG, 'I', 'java.util.List'];
@@ -92,7 +99,7 @@
       eq(G.SIG.USER_PREFERENCES, S.USER_PREFS);
       eq(G.boxSig('i'), S.INTEGER);
       await T.throws(() => G.sig('no.such.Type'), /no type signature/);
-      deepEq(G.F, { SERVING: { DAY: 0, ORDER: 4, TIME: 5, USER: 6, GRAMS: 7, FOOD: 8, ID: 9, MEASURE: 10, TRANSLATION: 12 },
+      deepEq(G.F, { SERVING: { DAY: 0, B: 1, C: 2, OFFSET: 3, ORDER: 4, TIME: 5, USER: 6, GRAMS: 7, FOOD: 8, ID: 9, MEASURE: 10, O: 11, TRANSLATION: 12 },
         MEASURE: { AMOUNT: 0, FOOD: 2, HIDDEN: 3, ID: 4, ML: 5, NAME: 6, TYPE: 8, GRAMS: 9 },
         FOOD: { NAME: 4, ID: 7, MEASURES: 11, NUTRIENTS: 12, TRANSLATIONS: 17, TYPE: 18 },
         NUTRIENT_MAP: { FILTER: 0, MAP: 1 }, NUTRIENT: { AMOUNT: 0, ID: 1, TYPE: 2 },
@@ -609,6 +616,106 @@
       eq(G.findMaps(g).length, 2);
       eq(G.findMaps(g, (m) => m.has('DG01')).length, 1);
       eq(G.findMaps(null).length, 0);
+    });
+  });
+
+  // ------------------------------------------------------------------------------------------------
+  T.describe('build 51CEDDC4 layouts (the bundled registry; SPEC 3.3 / Appendix O)', () => {
+    const S51 = FX.SIG_51;
+    T.it('switching registries switches the Serving / Food tables (layoutOf follows the active registry)', () => {
+      eq(G.layoutOf('SERVING').layout, 'ozzoioidiliii', 'still the legacy registry');
+      eq(G.layoutOf('SERVING').known, true); eq(G.layoutOf('SERVING').fields, 13); eq(G.F.FOOD.ID, 7);
+      FX.useRegistry(BUNDLED);
+      deepEq(G.layoutOf('SERVING'), { key: 'SERVING', sig: S51.SERVING, layout: 'ozzoioidilii', fields: 12, known: true, builds: 'from 51CEDDC4',
+        F: { DAY: 0, B: 1, C: 2, OFFSET: 3, ORDER: 4, TIME: 5, USER: 6, GRAMS: 7, FOOD: 8, ID: 9, MEASURE: 10, TRANSLATION: 11 } });
+      deepEq(G.layoutOf('FOOD'), { key: 'FOOD', sig: S51.FOOD, layout: 'izoisiioolooozsoooi', fields: 19, known: true, builds: 'from 51CEDDC4',
+        F: { NAME: 4, ID: 6, MEASURES: 10, NUTRIENTS: 11, TRANSLATIONS: 16, TYPE: 17 } });
+      eq(G.SIG.SERVING, S51.SERVING); eq(G.SIG.FOOD, S51.FOOD);
+      deepEq(BUNDLED.types[S51.SERVING].f, ['o', 'z', 'z', 'o', 'i', 'o', 'i', 'd', 'i', 'l', 'i', 'i']);
+      deepEq(BUNDLED.types[S51.FOOD].f, ['i', 'z', 'o', 'i', 's', 'i', 'i', 'o', 'o', 'l', 'o', 'o', 'o', 'z', 's', 'o', 'o', 'o', 'i']);
+      eq(BUNDLED.types[S51.FOOD].f[G.F.FOOD.ID], 'i'); eq(BUNDLED.types[S51.FOOD].f[G.F.FOOD.NUTRIENTS], 'o');
+      eq(BUNDLED.types[S51.FOOD].f[G.F.FOOD.TYPE], 'o'); eq(BUNDLED.types[S51.FOOD].f[G.F.FOOD.MEASURES], 'o');
+      eq(BUNDLED.types[S51.SERVING].f[G.F.SERVING.TRANSLATION], 'i');
+      // the unchanged types keep their CRCs
+      eq(G.SIG.DAY, S.DAY); eq(G.SIG.MEASURE, S.MEASURE); eq(G.SIG.FOOD_MEASURES, S.FOOD_MEASURES); eq(G.SIG.DAYINFO, S.DAYINFO);
+      eq(G.SIG.ADD_ENTRY_CHANGE, S.AEC); eq(G.SIG.NUTRIENT_MAP, S.NUTRIENT_MAP); eq(G.SIG.USER, S.USER);
+    });
+    T.it('a swapped CMA.registry is noticed without reloadRegistry(); a registry without the type or with another shape gets the newest table', () => {
+      const legacy = FX.legacyRegistry(BUNDLED);
+      CMA.registry = legacy;
+      try {
+        eq(G.layoutOf('SERVING').layout, 'ozzoioidiliii'); eq(G.F.SERVING.TRANSLATION, 12); eq(G.F.FOOD.TYPE, 18);
+        const odd = JSON.parse(JSON.stringify(BUNDLED));
+        odd.types[S51.SERVING].f.push('i', 'i');
+        delete odd.types[S51.FOOD];
+        CMA.registry = odd;
+        eq(G.layoutOf('SERVING').known, false); eq(G.layoutOf('SERVING').fields, 14); eq(G.F.SERVING.TRANSLATION, 11);
+        eq(G.layoutOf('FOOD').known, false); eq(G.layoutOf('FOOD').sig, null); eq(G.F.FOOD.ID, 6);
+      } finally { FX.useRegistry(BUNDLED); }
+      eq(G.F.SERVING.TRANSLATION, 11);
+    });
+    T.it('updateDiary body for the fixed inputs is the 12-field Serving wire, byte-exact (no `o` before translationId)', () => {
+      const sv = G.newServing({ day: FX.day(4, 3, 2026), order: 65537, grams: 50, foodId: 464674, measureId: 1072101, translationId: 0 });
+      deepEq(sv, { $t: S51.SERVING, f: [FX.day(4, 3, 2026), true, true, null, 65537, null, 0, 50, 464674, 0, 1072101, 0] });
+      const body = writer().call('updateDiary', UD_SIGS, ['NONCE', 1234567, { $t: S.SINGLETON, f: [FX.addEntryChange(sv)] }]);
+      eq(body, FX.updateDiaryTemplate51);
+      ok(body.endsWith('|4|3|2026|1|1|0|65537|0|0|50|464674|A|1072101|0|'), body);
+      eq(writer().call('updateDiary', UD_SIGS, ['NONCE', 1234567, { $t: S.SINGLETON, f: [FX.addEntryChange(fixedServing())] }]), FX.updateDiaryTemplate51,
+        'the fixture builder follows the active registry too');
+      const t = G.newServing({ day: FX.day(4, 3, 2026), order: 65537, grams: 50, foodId: 464674, measureId: 1072101, translationId: 409412 });
+      ok(writer().call('updateDiary', UD_SIGS, ['NONCE', 1234567, { $t: S.SINGLETON, f: [FX.addEntryChange(t)] }]).endsWith('|A|1072101|409412|'));
+    });
+    T.it('the old 13-field Serving cannot be written with this registry', async () => {
+      const old = { $t: S.SERVING, f: [FX.day(4, 3, 2026), true, true, null, 65537, null, 0, 50, 464674, 0, 1072101, 0, 0] };
+      await T.throws(() => writer().call('updateDiary', UD_SIGS, ['NONCE', 1234567, { $t: S.SINGLETON, f: [FX.addEntryChange(old)] }]), /unknown type signature .*Serving\/2553599101/);
+    });
+    T.it('parseRequest reads the 51CEDDC4 updateDiary body', () => {
+      const p = G.parseRequest(FX.updateDiaryTemplate51);
+      eq(p.paramError, null); eq(p.method, 'updateDiary'); eq(p.params[1], 1234567);
+      const s = p.params[2][0].f[2];
+      eq(s.$t, S51.SERVING); eq(s.f.length, 12);
+      eq(s.f[G.F.SERVING.ORDER], 65537); eq(s.f[G.F.SERVING.GRAMS], 50); eq(s.f[G.F.SERVING.FOOD], 464674);
+      eq(s.f[G.F.SERVING.ID], 'A'); eq(s.f[G.F.SERVING.MEASURE], 1072101); eq(s.f[G.F.SERVING.TRANSLATION], 0);
+    });
+    T.it('updateDiary response (51CEDDC4 form) decodes field by field; encodeResponse reproduces it', () => {
+      const r = G.readResponse(FX.updateDiaryResponse51);
+      ok(r.ok); eq(r.remaining, 0);
+      const s = r.value[0].f[0];
+      eq(r.value[0].$t, S.AECR); eq(s.$t, S51.SERVING); eq(s.f.length, 12);
+      eq(s.f[G.F.SERVING.ID], 'D80lp$'); eq(s.f[G.F.SERVING.FOOD], 464674); eq(s.f[G.F.SERVING.MEASURE], 1072101);
+      eq(s.f[G.F.SERVING.GRAMS], 50); eq(s.f[G.F.SERVING.ORDER], 65541); eq(s.f[G.F.SERVING.USER], 1234567);
+      eq(s.f[G.F.SERVING.TRANSLATION], 0); deepEq(s.f[G.F.SERVING.DAY], FX.day(4, 3, 2026));
+      const sv = FX.serving({ day: FX.day(4, 3, 2026), order: 65541, userId: 1234567, grams: 50, foodId: 464674, id: 'D80lp$', measureId: 1072101 });
+      eq(sv.f.length, 12);
+      eq(G.encodeResponse([FX.addEntryChangeResult(sv)]), FX.updateDiaryResponse51.replace('50.0', '50'));
+    });
+    T.it('the captured D4E27627 response no longer decodes (its Serving CRC is unknown to this build)', async () => {
+      await T.throws(() => G.readResponse(FX.updateDiaryResponse), /unknown type signature .*Serving\/2553599101/);
+    });
+    T.it('getDayInfo: servings in both lists decode with the 12-field layout', () => {
+      const a = FX.serving({ order: (1 << 16) | 1, foodId: 1, id: 'D80lp$', measureId: 11, grams: 30, translationId: 5 });
+      const c = FX.serving({ order: (3 << 16) | 7, foodId: 3, id: 5, measureId: 33, grams: 12.5 });
+      const r = G.readResponse(FX.dayInfoResponse({ day: FX.day(4, 3, 2026), list1: [a], list2: [c] }));
+      const s1 = r.value.f[G.F.DAYINFO.LIST1][0], s2 = r.value.f[G.F.DAYINFO.LIST2][0];
+      eq(s1.$t, S51.SERVING); eq(s1.f.length, 12);
+      eq(s1.f[G.F.SERVING.ORDER], 65537); eq(s1.f[G.F.SERVING.FOOD], 1); eq(s1.f[G.F.SERVING.MEASURE], 11);
+      eq(s1.f[G.F.SERVING.GRAMS], 30); eq(s1.f[G.F.SERVING.TRANSLATION], 5); eq(s1.f[G.F.SERVING.ID], 'D80lp$');
+      eq(s2.f[G.F.SERVING.ORDER] >> 16, 3); eq(s2.f[G.F.SERVING.ID], 'F'); eq(s2.f[G.F.SERVING.GRAMS], 12.5);
+    });
+    T.it('getFood: the 19-field Food gives id, measures, nutrients, translations and type at the shifted indices', () => {
+      const f = FX.food({ id: 464674, category: 3, source: 'USDA', defaultMeasureId: 1072101,
+        measures: [FX.measure({ id: 1072101, name: 'g', foodId: 464674, type: 0, grams: 1 }), FX.measure({ id: 1072102, name: 'cup, diced', foodId: 464674, type: 1, grams: 140 })],
+        translations: [FX.translation('Poulet', 77)], type: 1, nutrients: { 208: 165, 203: { amount: 31, type: 2 } }, nutrientFilter: 1 });
+      eq(f.$t, S51.FOOD); eq(f.f.length, 19);
+      const r = G.readResponse(G.encodeResponse(f)).value;
+      eq(r.$t, S51.FOOD); eq(r.f.length, 19);
+      eq(r.f[G.F.FOOD.ID], 464674); eq(r.f[3], 3); eq(r.f[14], 'USDA');
+      eq(r.f[G.F.FOOD.MEASURES].$t, S.FOOD_MEASURES); eq(r.f[G.F.FOOD.MEASURES].f[0], 1072101);
+      eq(r.f[G.F.FOOD.MEASURES].f[1][1].f[G.F.MEASURE.NAME], 'cup, diced');
+      eq(r.f[G.F.FOOD.TRANSLATIONS][0].f[1], 'Poulet'); eq(r.f[G.F.FOOD.TRANSLATIONS][0].f[2], 77);
+      deepEq(r.f[G.F.FOOD.TYPE], { $t: S.FOOD_TYPE, ordinal: 1 });
+      const nm = r.f[G.F.FOOD.NUTRIENTS];
+      eq(nm.$t, S.NUTRIENT_MAP); eq(nm.f[G.F.NUTRIENT_MAP.MAP].get(208).f[G.F.NUTRIENT.AMOUNT], 165);
     });
   });
 

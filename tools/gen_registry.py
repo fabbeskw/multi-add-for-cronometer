@@ -774,8 +774,12 @@ def find_service_methods(bundle):
 # --------------------------------------------------------------------------------------------
 # 5. Emit.
 # --------------------------------------------------------------------------------------------
-EXPECTED_LAYOUTS = collections.OrderedDict([   # SPEC 3.3; the tests assert these
-    ('com.cronometer.shared.entries.models.Serving/2553599101', 'ozzoioidiliii'),
+# SPEC 3.3; the tests assert these. Keys are full signatures; a Serving / Food key is resolved by its BASE name (the CRC
+# changes with the layout) and accepts either layout the extension reads (src/lib/gwt-stream.js LAYOUTS, registry-builder.js
+# EXPECTED_LAYOUTS): up to build D4E27627 / from 51CEDDC4 (SPEC Appendix O).
+BY_BASE = ('com.cronometer.shared.entries.models.Serving', 'com.cronometer.shared.foods.models.Food')
+EXPECTED_LAYOUTS = collections.OrderedDict([
+    ('com.cronometer.shared.entries.models.Serving/2895043750', ('ozzoioidiliii', 'ozzoioidilii')),
     ('com.cronometer.shared.entries.models.Day/782579793', 'bbh'),
     ('com.cronometer.shared.entries.models.Time/1552252503', 'bbb'),
     ('com.cronometer.shared.entries.changes.AddEntryChange/3949104564', 'zzo'),
@@ -784,7 +788,7 @@ EXPECTED_LAYOUTS = collections.OrderedDict([   # SPEC 3.3; the tests assert thes
     ('com.cronometer.shared.entries.models.DayInfo/416556043', 'zooozs'),
     ('com.cronometer.shared.foods.models.Measure/1979099908', 'dziziosood'),
     ('com.cronometer.shared.foods.models.FoodMeasures/2106205728', 'io'),
-    ('com.cronometer.shared.foods.models.Food/2097636843', 'izoisiiioolooozsoooi'),
+    ('com.cronometer.shared.foods.models.Food/3482863798', ('izoisiiioolooozsoooi', 'izoisiioolooozsoooi')),
     ('com.cronometer.shared.foods.models.Translation/4034452093', 'osi'),
     ('com.cronometer.shared.user.models.Language/1257207975', 'ssss'),
     ('com.cronometer.shared.foods.models.SearchHit/1904627920', 'iiissisziosioi'),
@@ -973,8 +977,12 @@ def main(argv):
     if not quiet:
         print('known layouts (SPEC 3.3):')
         for sig, expected in EXPECTED_LAYOUTS.items():
+            base = sig.split('/')[0]
+            if base in BY_BASE:
+                sig = next((k for k in sorted(types) if k.startswith(base + '/')), sig)
             got = layout_str(types.get(sig))
-            flag = '' if (expected is None or got == expected) else '   <-- expected ' + expected
+            accepted = expected if isinstance(expected, tuple) else (expected,)
+            flag = '' if (expected is None or got in accepted) else '   <-- expected ' + ' or '.join(accepted)
             print('   %-76s %s%s' % (sig, got, flag))
         print('optional layouts (SPEC 12.2, Adaptive TDEE):')
         for sig, expected in OPTIONAL_LAYOUTS.items():

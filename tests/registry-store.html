@@ -61,8 +61,9 @@
     removeListener(fn) { const i = changeListeners.indexOf(fn); if (i >= 0) changeListeners.splice(i, 1); },
   } }, runtime: {} };
 
-  // fake builder: the "live" registry is the bundled one with the Serving CRC changed
-  const OLD_SERVING = 'com.cronometer.shared.entries.models.Serving/2553599101';
+  // fake builder: the "live" registry is the bundled one with the Serving CRC changed. OLD_SERVING is the bundled build's
+  // Serving signature, read from the registry (its CRC changes with Cronometer's builds: 2553599101 up to D4E27627).
+  const OLD_SERVING = Object.keys(CMA.registry.types).find((k) => k.startsWith('com.cronometer.shared.entries.models.Serving/'));
   const NEW_SERVING = 'com.cronometer.shared.entries.models.Serving/1111';
   window.__OLD_SERVING = OLD_SERVING; window.__NEW_SERVING = NEW_SERVING;
   function liveRegistry(permutation, generatedAt) {
@@ -117,6 +118,12 @@
   const BUNDLED = CMA.registry;                                   // the generated registry, captured before any swap
   const BUNDLED_PERM = String(BUNDLED.permutation).toUpperCase();
   const OLD_SERVING = window.__OLD_SERVING, NEW_SERVING = window.__NEW_SERVING;
+  // An updateDiary reply and request in the bundled build's own layout (built from the bundled registry, so they follow
+  // a regenerated registry; the captured strings of SPEC 9 carry the D4E27627 Serving).
+  const UD_RESPONSE = G.encodeResponse([FX.addEntryChangeResult(FX.serving({ day: FX.day(4, 3, 2026), order: 65541, userId: 1234567, grams: 50, foodId: 464674, id: 'D80lp$', measureId: 1072101 }))]);
+  const UD_REQUEST = new G.Writer(MB, 'POLICY').call('updateDiary', [G.STRING_SIG, 'I', 'java.util.List'],
+    ['NONCE', 1234567, { $t: G.SIG.SINGLETON, f: [FX.addEntryChange(FX.serving({ day: FX.day(4, 3, 2026), order: 65537, grams: 50, foodId: 464674, measureId: 1072101 }))] }]);
+  const OLD_SERVING_UNKNOWN = new RegExp('unknown type signature .*' + OLD_SERVING.replace(/[.$\/]/g, '\\$&'));
   // 32-hex "permutations" standing in for Cronometer builds the bundled registry was not generated from
   const LIVE1 = 'AB11AB11AB11AB11AB11AB11AB11AB11';
   const LIVE2 = 'AB22AB22AB22AB22AB22AB22AB22AB22';
@@ -232,11 +239,11 @@
       const sv = Object.assign(FX.serving({ grams: 50, foodId: 1, measureId: 2 }), { $t: NEW_SERVING });
       const back = G.readResponse(G.encodeResponse(sv)).value;
       eq(back.$t, NEW_SERVING); eq(back.f[G.F.SERVING.GRAMS], 50);
-      await T.throws(() => G.readResponse(FX.updateDiaryResponse), /unknown type signature .*Serving\/2553599101/);
+      await T.throws(() => G.readResponse(UD_RESPONSE), OLD_SERVING_UNKNOWN);
       // back to the bundled registry for the build it was generated from
       deepEq(s.activate(BUNDLED_PERM), { source: 'bundled', changed: true, permutation: BUNDLED_PERM });
       eq(CMA.registry, BUNDLED); eq(G.SIG.SERVING, OLD_SERVING); eq(ev.got.length, 2); eq(ev.got[1].source, 'bundled');
-      eq(G.readResponse(FX.updateDiaryResponse).ok, true);
+      eq(G.readResponse(UD_RESPONSE).ok, true);
       ev.off();
       eq(s.status().storedPermutation, LIVE1, 'the stored record is kept for the next visit');
       await restoreBundled();
@@ -718,7 +725,7 @@
       eq(C.state.registryMismatch, false);
     });
     T.it('the header activates the registry BEFORE the response of the same message is decoded (the replayed authenticate case)', async () => {
-      // the stored registry knows Serving/1111 only; the bundled one only Serving/2553599101
+      // the stored registry knows Serving/1111 only; the bundled one only OLD_SERVING
       await S().forget();
       store.cmaRegistry = record(LIVE5);
       const s = await reloadStore();
@@ -726,10 +733,10 @@
       C.reset();
       s.activate(BUNDLED_PERM);
       eq(G.SIG.SERVING, OLD_SERVING);
-      const text = FX.updateDiaryResponse.split(OLD_SERVING).join(NEW_SERVING);   // the live app's reply under the new build
+      const text = UD_RESPONSE.split(OLD_SERVING).join(NEW_SERVING);   // the live app's reply under the new build
       const events = [];
       const off = EV.on('rpc', (ev) => events.push(ev));
-      C.handleMessage(rpcMsg(FX.updateDiaryTemplate, text, { requestHeaders: { 'X-GWT-Permutation': LIVE5 } }));
+      C.handleMessage(rpcMsg(UD_REQUEST, text, { requestHeaders: { 'X-GWT-Permutation': LIVE5 } }));
       off();
       eq(C.state.permutation, LIVE5); eq(C.state.registryMismatch, false); eq(C.state.registrySource, 'runtime');
       eq(events.length, 1); eq(events[0].ok, true); eq(events[0].rejected, false, 'decoded with the runtime registry');

@@ -7,11 +7,19 @@
 <script src="lib.js"></script>
 <script src="../src/lib/gwt-registry.js"></script>
 <script src="../src/lib/gwt-stream.js"></script>
+<script src="fixtures.js"></script>
+<script>
+  // The captured strings of SPEC 9 carry the D4E27627 Serving / Food (13 / 20 fields). Most suites below replay them, so
+  // the page runs on the bundled registry with those two entries put back (CMA.fixtures.legacyRegistry: what a registry
+  // of an older build carries), installed BEFORE registry-store.js captures "the bundled registry". The suite 'rpc: build
+  // 51CEDDC4 layouts' switches to the real bundled registry (Serving 12 fields, Food 19; SPEC Appendix O).
+  window.__BUNDLED_REGISTRY = CMA.registry;
+  CMA.fixtures.useRegistry(CMA.fixtures.legacyRegistry(CMA.registry));
+</script>
 <!-- no registry-builder.js here (tests/registry-store.html stubs it): the store then refuses rebuilds -->
 <script src="../src/lib/registry-store.js"></script>
 <script src="../src/lib/rpc.js"></script>
 <script src="../src/lib/capture.js"></script>
-<script src="fixtures.js"></script>
 <script src="../src/hook-main.js"></script>
 <script src="../src/content.js"></script>
 <script>
@@ -748,6 +756,99 @@
       eq(R.energyKcalOf(null), null); eq(R.energyKcalOf({ $t: S.MEASURE, f: [] }), null, 'not a Food');
       eq(R.energyKcalOf({ $t: S.FOOD, f: [] }), null, 'a Food without field 12');
       eq(R.foodTypeOf(FX.food({ id: 1, type: 1 })), 'RECIPE'); eq(R.foodTypeOf(FX.food({ id: 1 })), null); eq(R.foodTypeOf(null), null);
+    });
+    // ---- build 51CEDDC4 (the bundled registry): the same calls with the new Serving / Food layouts ----
+    /** run fn with the real bundled registry active (Serving/2895043750, Food/3482863798), then put the legacy one back */
+    async function with51(fn) {
+      const legacy = FX.useRegistry(window.__BUNDLED_REGISTRY);
+      try { await fn(); } finally { FX.useRegistry(legacy); }
+    }
+    T.it('51CEDDC4: updateDiaryAdd sends the 12-field Serving byte-exact and parses the 51CEDDC4 response', async () => {
+      await with51(async () => {
+        eq(G.layoutOf('SERVING').layout, 'ozzoioidilii');
+        stubFetch(() => ({ body: FX.updateDiaryResponse51 }));
+        try {
+          const out = await R.updateDiaryAdd(SESSION, fixedServing());
+          eq(fixedServing().f.length, 12);
+          eq(lastCall().init.body, FX.updateDiaryTemplate51);
+          eq(out.servingId, 'D80lp$'); eq(out.serving.$t, FX.SIG_51.SERVING); eq(out.serving.f.length, 12);
+          eq(out.serving.f[G.F.SERVING.FOOD], 464674); eq(out.serving.f[G.F.SERVING.MEASURE], 1072101);
+          eq(out.serving.f[G.F.SERVING.ORDER], 65541); eq(out.serving.f[G.F.SERVING.GRAMS], 50); eq(out.serving.f[G.F.SERVING.TRANSLATION], 0);
+          // a plain description goes through CMA.gwt.newServing: the same bytes
+          await R.updateDiaryAdd(SESSION, { day: { day: 4, month: 3, year: 2026 }, order: 65537, grams: 50, foodId: 464674, measureId: 1072101 });
+          eq(lastCall().init.body, FX.updateDiaryTemplate51);
+          await R.updateDiaryAdd(SESSION, { day: { day: 4, month: 3, year: 2026 }, order: 65537, grams: 50, foodId: 464674, measureId: 1072101, translationId: 409412 });
+          ok(lastCall().init.body.endsWith('|2026|1|1|0|65537|0|0|50|464674|A|1072101|409412|'), lastCall().init.body);
+          eq(calls.length, 3);
+        } finally { restoreFetch(); }
+      });
+    });
+    T.it('51CEDDC4: servingValue validates against the active layout (a 13-field Serving is refused before any request)', async () => {
+      await with51(async () => {
+        stubFetch(() => ({ body: FX.updateDiaryResponse51 }));
+        try {
+          const old = fixedServing(); old.f.push(0);
+          await T.throws(() => R.updateDiaryAdd(SESSION, old), /Serving needs 12 fields/);
+          const bad = fixedServing(); bad.f[G.F.SERVING.TRANSLATION] = -1;
+          await T.throws(() => R.updateDiaryAdd(SESSION, bad), /translationId/);
+          const nan = fixedServing(); nan.f[G.F.SERVING.GRAMS] = NaN;
+          await T.throws(() => R.updateDiaryAdd(SESSION, nan), /grams/);
+          eq(calls.length, 0);
+        } finally { restoreFetch(); }
+      });
+      // and the legacy registry refuses the 12-field one
+      const twelve = await (async () => { let v; await with51(async () => { v = fixedServing(); }); return v; })();
+      await T.throws(() => R.updateDiaryAdd(SESSION, Object.assign({}, twelve, { $t: S.SERVING })), /Serving needs 13 fields/);
+    });
+    T.it('51CEDDC4: an ErrorEntryChangeResult names the 12-field entry', async () => {
+      await with51(async () => {
+        stubFetch(() => ({ body: FX.updateDiaryErrorResponse('bad measure', fixedServing()) }));
+        try {
+          const e = await T.throws(() => R.updateDiaryAdd(SESSION, fixedServing()), /bad measure/);
+          eq(e.kind, 'rejected'); eq(e.entry.$t, FX.SIG_51.SERVING); eq(e.entry.f.length, 12);
+        } finally { restoreFetch(); }
+      });
+    });
+    T.it('51CEDDC4: getDayInfo servings decode; servingsOf and the positions read the 12-field layout', async () => {
+      await with51(async () => {
+        const a = FX.serving({ order: (1 << 16) | 1, foodId: 1, id: 'D80lp$', measureId: 11, translationId: 4 });
+        const b = FX.serving({ order: (1 << 16) | 2, foodId: 2, id: 'D9zN$G' });
+        const c = FX.serving({ order: (3 << 16) | 7, foodId: 3, id: 5, grams: 12.5 });
+        stubFetch(() => ({ body: FX.dayInfoResponse({ day: FX.day(4, 3, 2026), list1: [a, b], list2: [c] }) }));
+        try {
+          const info = await R.getDayInfo(SESSION, { day: 4, month: 3, year: 2026 });
+          eq(lastCall().init.body, FX.getDayInfoTemplate, 'getDayInfo itself did not change (Day / DayInfo CRCs unchanged)');
+          const servings = R.servingsOf(info);
+          eq(servings.length, 3);
+          servings.forEach((x) => { eq(x.$t, FX.SIG_51.SERVING); eq(x.f.length, 12); });
+          deepEq(servings.map((x) => x.f[G.F.SERVING.FOOD]), [1, 2, 3]);
+          deepEq(servings.map((x) => x.f[G.F.SERVING.ORDER] & 0xFFFF), [1, 2, 7]);
+          eq(servings[0].f[G.F.SERVING.MEASURE], 11); eq(servings[0].f[G.F.SERVING.TRANSLATION], 4);
+          eq(servings[2].f[G.F.SERVING.GRAMS], 12.5); eq(servings[2].f[G.F.SERVING.ID], 'F');
+        } finally { restoreFetch(); }
+      });
+    });
+    T.it('51CEDDC4: getFood with the 19-field Food -> foodId, measures, default measure, energy, type, translations', async () => {
+      await with51(async () => {
+        const food = FX.food({ id: 464674, name: 'Chicken breast', defaultMeasureId: 5, type: 1, nutrients: { 203: 31, 208: 165, 268: 690 },
+          translations: [FX.translation('Chicken Breast', 0), FX.translation('Poulet', 409412)],
+          measures: [FX.measure({ foodId: 464674, id: 1072101, name: 'g', type: 0, grams: 1 }), FX.measure({ foodId: 464674, id: 5, name: 'cup, diced', type: 1, grams: 140 })] });
+        eq(food.f.length, 19); eq(food.$t, FX.SIG_51.FOOD);
+        stubFetch(() => ({ body: G.encodeResponse(food) }));
+        try {
+          const f = await R.getFood(SESSION, 464674);
+          eq(lastCall().init.body, FX.getFoodTemplate);
+          eq(f.$t, FX.SIG_51.FOOD); eq(f.f.length, 19);
+          eq(R.foodId(f), 464674); eq(R.foodName(f), 'Chicken breast'); eq(R.defaultMeasureIdOf(f), 5);
+          const ms = R.measuresOf(f);
+          deepEq(ms.map((m) => [m.id, m.name, m.grams, m.type, m.isDefault]), [[1072101, 'g', 1, 'Weight', false], [5, 'cup, diced', 140, 'Volume', true]]);
+          eq(R.energyKcalOf(f), 165); eq(R.foodTypeOf(f), 'RECIPE');
+          ok(f.f[G.F.FOOD.NUTRIENTS].f[G.F.NUTRIENT_MAP.MAP] instanceof Map);
+          deepEq(f.f[G.F.FOOD.TRANSLATIONS].map((t) => [t.f[1], t.f[2]]), [['Chicken Breast', 0], ['Poulet', 409412]]);
+          // the D4E27627 indices would read the wrong slots: 7 is a null object here, 18 the trailing int
+          eq(f.f[7], null); eq(f.f[18], 0);
+        } finally { restoreFetch(); }
+      });
     });
     T.it('searchFoods: exact URL, headers, hit mapping, retired filtering, 401 and 429 handling', async () => {
       const hits = [

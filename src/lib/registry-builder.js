@@ -1028,10 +1028,13 @@ window.CMA = window.CMA || {};
    * SPEC 3.3 layouts, by BASE name (resolved like CMA.gwt.sig(): the first key `base/CRC`, so a deploy that
    * only changes a CRC still validates) in gen_registry.py's layout_str() notation: class -> field kinds,
    * array -> 'array:<e>', collections -> kind[:pre], box -> 'box:<t>'. 'USER' = 42 fields, idx 19 int,
-   * idx 33 string (SPEC 2.1). `required:false` entries must match only when the type exists.
+   * idx 33 string (SPEC 2.1). `required:false` entries must match only when the type exists. `layouts` lists every
+   * layout the extension can read and write for a type whose shape changed between Cronometer builds (CMA.gwt.LAYOUTS
+   * picks the field indices from the one the registry carries); anything else is refused. Serving and Food: up to
+   * build D4E27627 / from 51CEDDC4 (Ingredient lost its always-0 int, Food one leading int; SPEC Appendix O).
    */
   const EXPECTED_LAYOUTS = [
-    { base: 'com.cronometer.shared.entries.models.Serving', layout: 'ozzoioidiliii' },
+    { base: 'com.cronometer.shared.entries.models.Serving', layouts: ['ozzoioidiliii', 'ozzoioidilii'] },
     { base: 'com.cronometer.shared.entries.models.Day', layout: 'bbh' },
     { base: 'com.cronometer.shared.entries.models.Time', layout: 'bbb' },
     { base: 'com.cronometer.shared.entries.changes.AddEntryChange', layout: 'zzo' },
@@ -1040,7 +1043,7 @@ window.CMA = window.CMA || {};
     { base: 'com.cronometer.shared.entries.models.DayInfo', layout: 'zooozs' },
     { base: 'com.cronometer.shared.foods.models.Measure', layout: 'dziziosood' },
     { base: 'com.cronometer.shared.foods.models.FoodMeasures', layout: 'io' },
-    { base: 'com.cronometer.shared.foods.models.Food', layout: 'izoisiiioolooozsoooi' },
+    { base: 'com.cronometer.shared.foods.models.Food', layouts: ['izoisiiioolooozsoooi', 'izoisiioolooozsoooi'] },
     { base: 'com.cronometer.shared.foods.models.Translation', layout: 'osi' },
     { base: 'com.cronometer.shared.user.models.Language', layout: 'ssss' },
     { base: 'com.cronometer.shared.foods.models.SearchHit', layout: 'iiissisziosioi', required: false },
@@ -1131,6 +1134,8 @@ window.CMA = window.CMA || {};
       if (x.layout === 'USER') {
         const f = e.k === 'class' && Array.isArray(e.f) ? e.f : [];
         check(f.length === 42 && f[19] === 'i' && f[33] === 's', matches[0] + ' layout ' + layoutStr(e) + ' (expected 42 fields with idx 19 int and idx 33 string)');
+      } else if (x.layouts) {
+        check(x.layouts.indexOf(layoutStr(e)) >= 0, matches[0] + ' layout ' + layoutStr(e) + ' (expected ' + x.layouts.join(' or ') + ')');
       } else {
         check(layoutStr(e) === x.layout, matches[0] + ' layout ' + layoutStr(e) + ' (expected ' + x.layout + ')');
       }

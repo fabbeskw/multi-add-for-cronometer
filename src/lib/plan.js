@@ -64,10 +64,11 @@ window.CMA = window.CMA || {};
   // ---------------------------------------------------------------------------
   // Constants (SPEC §3.3 / §4)
   // ---------------------------------------------------------------------------
-  // Type signatures as compiled in build 0A1C16E148676A90CBB128E4829A562F (SPEC §3.3). They are only the
-  // FALLBACK for pages that do not load gwt-stream.js (tests/unit.html): sigOf() prefers CMA.gwt.SIG, which
-  // resolves the CURRENT CRC from the generated registry, so a regenerated registry after a Cronometer deploy
-  // (new Serving/Day CRC) can never leave the Serving value built here stale while rpc.js/gwt-stream move on.
+  // Type signatures and Serving / Food layouts as compiled up to build D4E27627 (SPEC §3.3). They are only the
+  // FALLBACK for pages that load neither gwt-registry.js nor gwt-stream.js (tests/unit.html): the extension always
+  // loads both, and then servingFor() builds the Serving with CMA.gwt.newServing (the CRC AND the field layout of the
+  // ACTIVE registry: 13 fields up to D4E27627, 12 from 51CEDDC4) and F() reads CMA.gwt.F, whose Serving / Food tables
+  // follow the same registry - a regenerated or runtime-rebuilt registry can never leave the values built here stale.
   const SIG = {
     SERVING: 'com.cronometer.shared.entries.models.Serving/2553599101',
     DAY: 'com.cronometer.shared.entries.models.Day/782579793'
@@ -84,6 +85,7 @@ window.CMA = window.CMA || {};
   const DEFAULT_GROUP_NAMES = ['Uncategorized', 'Breakfast', 'Lunch', 'Dinner', 'Snacks', 'Group 6', 'Group 7', 'Group 8'];
   const DEFAULT_GROUPS = DEFAULT_GROUP_NAMES.map((name, id) => ({ id, name, enabled: id <= 4 }));
 
+  // CMA.gwt.F when gwt-stream.js is loaded (the active registry's layouts), else the D4E27627 indices.
   function F() {
     const f = CMA.gwt && CMA.gwt.F;
     return {
@@ -167,7 +169,7 @@ window.CMA = window.CMA || {};
   }
 
   // ---------------------------------------------------------------------------
-  // Food value helpers (Food/2097636843 layout, SPEC §3.3)
+  // Food value helpers (SPEC §3.3: indices from F(), i.e. the active registry's Food layout)
   // ---------------------------------------------------------------------------
   function foodName(food) {
     const f = F();
@@ -724,10 +726,25 @@ window.CMA = window.CMA || {};
     const m = row.pick.measure;
     const foodId = m.foodId != null ? Number(m.foodId) : (row.hit ? Number(row.hit.id) : 0);
     if (row.order == null) throw new Error('row has no position (assignPositions not run)');
+    const day = { $t: sigOf('DAY'), f: [Number(d.day), Number(d.month), Number(d.year)] }; // the viewed diary date
+    if (CMA.gwt && typeof CMA.gwt.newServing === 'function') {
+      // the active registry's CRC and layout (SPEC §3.3: the always-0 `o` exists only up to build D4E27627)
+      return CMA.gwt.newServing({
+        day,
+        order: Number(row.order),                    // group<<16 | position
+        time: null,                                  // Gold time-of-day not set
+        userId: 0,                                   // the dialog path sends 0 (serving-fields-resolved.md §0)
+        grams: Number(row.pick.grams),               // quantity × measure.grams (quantity for Recipe)
+        foodId,                                      // Measure.c of the selected measure
+        measureId: Number(m.id),
+        translationId: Number(row.translationId || 0) // hit's, or 0 when it names the food itself
+      });
+    }
+    // no gwt-stream on the page (tests/unit.html): the D4E27627 layout with the literal CRC above
     return {
       $t: sigOf('SERVING'),
       f: [
-        { $t: sigOf('DAY'), f: [Number(d.day), Number(d.month), Number(d.year)] }, // day (viewed diary date)
+        day,                        // day (viewed diary date)
         true,                       // b (prototype default)
         true,                       // c (prototype default)
         null,                       // offset (java.lang.Short) = null

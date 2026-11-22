@@ -165,19 +165,22 @@
   T.describe('load-all: cross-module contracts', () => {
     T.it('registry layouts behind CMA.gwt.SIG match SPEC 3.3', () => {
       const S = CMA.gwt.SIG;
-      eq(kinds(S.SERVING), 'ozzoioidiliii'); eq(kinds(S.DAY), 'bbh'); eq(kinds(S.TIME), 'bbb');
+      // the bundled registry is build 51CEDDC4's (SPEC 3.3 / Appendix O): Serving 12 fields, Food 19
+      eq(kinds(S.SERVING), 'ozzoioidilii'); eq(kinds(S.DAY), 'bbh'); eq(kinds(S.TIME), 'bbb');
       eq(kinds(S.ADD_ENTRY_CHANGE), 'zzo'); eq(kinds(S.ADD_ENTRY_CHANGE_RESULT), 'o'); eq(kinds(S.ERROR_ENTRY_CHANGE_RESULT), 'oo');
       eq(kinds(S.DAYINFO), 'zooozs'); eq(kinds(S.MEASURE), 'dziziosood'); eq(kinds(S.FOOD_MEASURES), 'io');
-      eq(kinds(S.FOOD).length, 20); eq(kinds(S.FOOD)[4], 's'); eq(kinds(S.FOOD)[7], 'i'); eq(kinds(S.FOOD)[11], 'o');
-      eq(kinds(S.FOOD)[12], 'o'); eq(kinds(S.NUTRIENT_MAP), 'oo'); eq(kinds(S.NUTRIENT), 'dio'); eq(CMA.registry.types[S.FOOD_TYPE].k, 'enum');
+      eq(kinds(S.FOOD), 'izoisiioolooozsoooi'); eq(kinds(S.FOOD)[CMA.gwt.F.FOOD.NAME], 's'); eq(kinds(S.FOOD)[CMA.gwt.F.FOOD.ID], 'i');
+      eq(kinds(S.FOOD)[CMA.gwt.F.FOOD.MEASURES], 'o'); eq(kinds(S.FOOD)[CMA.gwt.F.FOOD.NUTRIENTS], 'o'); eq(kinds(S.FOOD)[CMA.gwt.F.FOOD.TRANSLATIONS], 'o');
+      eq(kinds(S.SERVING)[CMA.gwt.F.SERVING.TRANSLATION], 'i'); eq(CMA.gwt.layoutOf('SERVING').known, true); eq(CMA.gwt.layoutOf('FOOD').known, true);
+      eq(kinds(S.NUTRIENT_MAP), 'oo'); eq(kinds(S.NUTRIENT), 'dio'); eq(CMA.registry.types[S.FOOD_TYPE].k, 'enum');
       eq(kinds(S.USER).length, 42); eq(kinds(S.USER)[19], 'i'); eq(kinds(S.USER)[33], 's');
       eq(CMA.registry.types[S.SINGLETON].k, 'singleton'); eq(CMA.registry.types[S.ARRAYLIST].k, 'list');
       eq(CMA.registry.types[S.MEASURE_TYPE].k, 'enum');
       ok(/^[0-9A-F]{32}$/.test(CMA.registry.permutation) && /^[0-9A-F]{32}$/.test(CMA.registry.policyHash), 'permutation + policy hash recorded');
       deepEq(CMA.gwt.F, {
-        SERVING: { DAY: 0, ORDER: 4, TIME: 5, USER: 6, GRAMS: 7, FOOD: 8, ID: 9, MEASURE: 10, TRANSLATION: 12 },
+        SERVING: { DAY: 0, B: 1, C: 2, OFFSET: 3, ORDER: 4, TIME: 5, USER: 6, GRAMS: 7, FOOD: 8, ID: 9, MEASURE: 10, TRANSLATION: 11 },
         MEASURE: { AMOUNT: 0, FOOD: 2, HIDDEN: 3, ID: 4, ML: 5, NAME: 6, TYPE: 8, GRAMS: 9 },
-        FOOD: { NAME: 4, ID: 7, MEASURES: 11, NUTRIENTS: 12, TRANSLATIONS: 17, TYPE: 18 },
+        FOOD: { NAME: 4, ID: 6, MEASURES: 10, NUTRIENTS: 11, TRANSLATIONS: 16, TYPE: 17 },
         NUTRIENT_MAP: { FILTER: 0, MAP: 1 },
         NUTRIENT: { AMOUNT: 0, ID: 1, TYPE: 2 },
         DAYINFO: { LIST1: 2, LIST2: 3 },
@@ -193,7 +196,8 @@
       eq(CMA.errors.isNetwork(n), true); eq(CMA.errors.isNetwork(new TypeError('Failed to fetch')), true);
       eq(CMA.errors.isNetwork(s), false); eq(CMA.errors.isNetwork(t), false); eq(CMA.errors.isNetwork(new Error('rpc')), false);
     });
-    T.it('parse -> rpc.measuresOf -> units.pickMeasure -> plan.servingFor -> rpc.servingValue -> gwt.Writer is byte-equal to the SPEC 4 template', () => {
+    /** parse -> rpc.measuresOf -> units.pickMeasure -> plan.servingFor -> rpc.servingValue -> gwt.Writer for the SPEC 9 inputs. */
+    function chainBody() {
       const FX = CMA.fixtures;
       const item = CMA.parse.lines('50g chicken breast')[0];
       eq(item.qty, 50); eq(item.unit, 'g'); eq(item.name, 'chicken breast');
@@ -211,17 +215,29 @@
       const serving = CMA.plan.servingFor(row, { day: 4, month: 3, year: 2026 });
       eq(serving.$t, CMA.gwt.SIG.SERVING, 'plan resolves the Serving signature through the registry');
       eq(serving.f[0].$t, CMA.gwt.SIG.DAY);
-      eq(serving.f.length, 13);
+      eq(serving.f.length, CMA.gwt.layoutOf('SERVING').fields, 'plan builds the layout of the active registry');
       eq(CMA.rpc.servingValue(serving), serving, 'rpc accepts the plan value as is');
       const change = { $t: CMA.gwt.SIG.ADD_ENTRY_CHANGE, f: [true, true, serving] };
-      const body = new CMA.gwt.Writer(FX.moduleBase, 'POLICY').call('updateDiary', [CMA.gwt.STRING_SIG, 'I', 'java.util.List'],
+      return new CMA.gwt.Writer(FX.moduleBase, 'POLICY').call('updateDiary', [CMA.gwt.STRING_SIG, 'I', 'java.util.List'],
         ['NONCE', 1234567, { $t: CMA.gwt.SIG.SINGLETON, f: [change] }]);
-      eq(body, FX.updateDiaryTemplate);
-      // and the captured updateDiary response decodes to the id the engine will pass back to removeServing verbatim
-      const r = CMA.gwt.readResponse(FX.updateDiaryResponse);
+    }
+    T.it('parse -> rpc.measuresOf -> units.pickMeasure -> plan.servingFor -> rpc.servingValue -> gwt.Writer is byte-equal to the SPEC 4 template (build 51CEDDC4: 12-field Serving)', () => {
+      const FX = CMA.fixtures;
+      eq(chainBody(), FX.updateDiaryTemplate51);
+      // and the updateDiary response decodes to the id the engine will pass back to removeServing verbatim
+      const r = CMA.gwt.readResponse(FX.updateDiaryResponse51);
       eq(r.ok, true);
       eq(r.value[0].f[0].f[CMA.gwt.F.SERVING.ID], 'D80lp$');
       eq(CMA.gwt.isLongToken('D80lp$'), true);
+    });
+    T.it('the same chain with a registry of an older build (D4E27627 layouts) produces the captured 13-field body', () => {
+      const FX = CMA.fixtures;
+      const bundled = FX.useRegistry(FX.legacyRegistry());
+      try {
+        eq(chainBody(), FX.updateDiaryTemplate);
+        eq(CMA.gwt.readResponse(FX.updateDiaryResponse).value[0].f[0].f[CMA.gwt.F.SERVING.ID], 'D80lp$');
+      } finally { FX.useRegistry(bundled); }
+      eq(CMA.gwt.layoutOf('SERVING').fields, 12, 'back on the bundled registry');
     });
     T.it('parse `300cal almonds` -> decoded Food (NutrientMap) -> rpc.energyKcalOf -> plan.repick / units.pickEnergy -> plan.servingFor (0.3.2)', () => {
       const FX = CMA.fixtures;

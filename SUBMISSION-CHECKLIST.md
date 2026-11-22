@@ -1,4 +1,4 @@
-# Chrome Web Store submission checklist — Multi-Add for Cronometer 0.3.2
+# Chrome Web Store submission checklist — Multi-Add for Cronometer 0.3.3
 
 The short, ordered path from this repository to *Submit for review*. Every text block it mentions is in
 [STORE-LISTING.md](STORE-LISTING.md) (section numbers below); every file is in this repository. Steps marked
@@ -19,7 +19,7 @@ payment, a legal declaration or pressing Submit, and no script or assistant does
 5. **OWNER, required** — Create a **dedicated free Cronometer test account** for the reviewers (never the personal
    account): log about **three weeks** of synthetic food entries and a weigh-in every day, so the TDEE tab shows an
    estimate rather than "log a few days first" (reviewers rarely create third-party accounts, and an empty or broken
-   tab invites a *not working* rejection). Then, with the 0.3.2 package loaded, open that account's TDEE tab, press
+   tab invites a *not working* rejection). Then, with the 0.3.3 package loaded, open that account's TDEE tab, press
    **Enable** and check that it reads the history and shows an estimate and a weekly target; this is also the first
    live check of the TDEE reads (SPEC §12.6). Keep the login out of the repository.
 
@@ -31,9 +31,9 @@ Run from the repository root; every line must end green:
 bash tests/run.sh
 python tools/check_manifest.py
 python tools/gen_tdee.py --check
-python tools/build_zip.py                         # → dist/multi-add-for-cronometer-0.3.2.zip
+python tools/build_zip.py                         # → dist/multi-add-for-cronometer-0.3.3.zip
 python tools/smoke_extension.py --self-test
-python tools/smoke_extension.py dist/multi-add-for-cronometer-0.3.2.zip --self-test   # installs the zip itself
+python tools/smoke_extension.py dist/multi-add-for-cronometer-0.3.3.zip --self-test   # installs the zip itself
 python tools/screenshots.py --dry-run --headless
 python tools/make_graphics.py --verify           # icons + promo tiles: sizes, transparency, 16 px padding (no Chrome)
 python tools/set_repo_url.py https://github.com/fabbeskw/multi-add-for-cronometer --check
@@ -43,25 +43,26 @@ Then:
 
 5a. **Publish the source the policy points to.** The package, the listing and the dashboard link to
     `https://github.com/fabbeskw/multi-add-for-cronometer/blob/HEAD/PRIVACY.md`, and the policy and the reviewer
-    notes say the public source can be checked against the zip. Until the 0.3.2 tree is on the default branch that
-    URL serves an older policy (0.3.0: no Limited Use statement, no first-run notice; 0.3.1: no custom-only search,
-    no calorie amounts).
-    So: `git status` shows nothing uncommitted that belongs to the release (the whole 0.3.2 tree committed, including
+    notes say the public source can be checked against the zip. The policy text is unchanged in 0.3.3 (it changed
+    last in 0.3.2), but until the 0.3.3 tree is on the default branch the public source does not match the zip.
+    So: `git status` shows nothing uncommitted that belongs to the release (the whole 0.3.3 tree committed, including
     `SUBMISSION-CHECKLIST.md`, `graphics/`, `store-assets/promo/`, `icons/icon32.png`, `tools/make_graphics.py`), it is
-    pushed to `main` and tagged `v0.3.2`; then, **logged out of GitHub** (a private window), the policy URL above shows
+    pushed to `main` and tagged `v0.3.3`; then, **logged out of GitHub** (a private window), the policy URL above shows
     the effective date 29 September 2026, section 6 with **Limited Use**, section 8 with the **First-run notice** and
     the 0.3.2 entry in section 11.
-6. Unzip `dist/multi-add-for-cronometer-0.3.2.zip` into a temporary folder, *Load unpacked* it on
+6. Unzip `dist/multi-add-for-cronometer-0.3.3.zip` into a temporary folder, *Load unpacked* it on
    `chrome://extensions`, open `https://cronometer.com/#diary`, reload, open the panel, check that the first-run notice
    appears (with *Remember my last typed list* unticked) and press **Continue**, add two foods and undo them. With a
    custom food in the account, *Find foods* on `<its name> /custom` must preview only custom items (the first live
    check of the custom-only search, SPEC Appendix M); Diagnostics must show no `custom-only search: dropped` line.
    Then *Find foods* on `300cal <some food>` (a plain database food, e.g. `300cal almonds`): the preview must say
    `300 kcal → …` with a sensible amount; **Add all** and confirm that Cronometer's diary shows about 300 kcal for that
-   entry (the first live check of calorie amounts, SPEC Appendix N), then **Undo this batch**. Remove the unpacked
-   extension again.
+   entry (the first live check of calorie amounts, SPEC Appendix N), then **Undo this batch**. On Cronometer build
+   51CEDDC4 (or later) the two-food add and undo above are also the first live check of 0.3.3's new diary-entry and
+   food layouts (SPEC Appendix O): Diagnostics must show the decoder for the live build, no `decode` line and no
+   rebuild failure. Remove the unpacked extension again.
 7. The five screenshots (see STORE-LISTING §1, *The five screenshots*) are the live 0.3.1 set of 28 September 2026
-   (`store-assets/manifest.json`), reused for 0.3.2: none of the five views changed (the cheat-sheet in shot 1 is
+   (`store-assets/manifest.json`), reused for 0.3.2 and 0.3.3: none of the five views changed (the cheat-sheet in shot 1 is
    collapsed, and the preview footer names no search scope while *Search only my custom foods* is off).
    `python tools/screenshots.py --check-store` must still print `STORE SET READY` (exactly the five live shots, the
    TDEE ones on synthetic data, the undo completed, nothing else in the folder; it does not compare the recorded
@@ -75,13 +76,13 @@ Then:
    `05-tdee-checkin.png`), because the live run refuses to start while any picture is in that folder; then
    `--check-store` and the look at every PNG as above, and the new `store-assets/manifest.json` is committed; the PNGs
    stay out of git.
-8. Attach the same zip to a GitHub Release tagged `v0.3.2`, so the README's *From a release zip* install path
+8. Attach the same zip to a GitHub Release tagged `v0.3.3`, so the README's *From a release zip* install path
    matches the store package.
 
 ## C. Developer Dashboard, field by field
 
 *New item* (an update of an item that already exists: its *Package* tab → *Upload new package*) → upload
-`dist/multi-add-for-cronometer-0.3.2.zip`. Name, summary, version, icon and permissions are read from the manifest in
+`dist/multi-add-for-cronometer-0.3.3.zip`. Name, summary, version, icon and permissions are read from the manifest in
 the zip.
 
 | Tab | Field | What to enter |
@@ -116,7 +117,7 @@ the zip.
 
 ## D. Submit (OWNER)
 
-10. **OWNER** — Only when A5 (test account, TDEE checked live), 5a (the public policy URL shows the 0.3.2 text) and 7
+10. **OWNER** — Only when A5 (test account, TDEE checked live), 5a (the public source is the 0.3.3 tree; the policy shows the 0.3.2 text, unchanged in 0.3.3) and 7
     (`--check-store` passed, every PNG looked at) are done: press **Submit for review**. Choose whether to publish automatically after approval (default) or to
     defer; a deferred approval must be published within 30 days or it returns to draft.
 11. Review usually takes a few days and can take a few weeks for a new developer and a new item. Contact developer

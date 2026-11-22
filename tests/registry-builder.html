@@ -232,12 +232,46 @@
       ok(v.ok, 'problems: ' + v.problems.join(' | '));
       ok(v.checked > 40, 'checked ' + v.checked);
     });
-    T.it('Serving with 12 fields fails', () => {
+    // The type keys of the bundled build, resolved by base name like CMA.gwt.sig(): the CRCs change between builds.
+    const keyOf = (base) => Object.keys(REG.types).find((k) => k.startsWith(base + '/'));
+    const SERVING_KEY = keyOf('com.cronometer.shared.entries.models.Serving'), FOOD_KEY = keyOf('com.cronometer.shared.foods.models.Food');
+    const DAY_KEY = keyOf('com.cronometer.shared.entries.models.Day');
+    // SPEC 3.3 / Appendix O: the two Serving and Food layouts the extension reads and writes
+    const SERVING_OLD = 'ozzoioidiliii', SERVING_NEW = 'ozzoioidilii';
+    const FOOD_OLD = 'izoisiiioolooozsoooi', FOOD_NEW = 'izoisiioolooozsoooi';
+    /** REG with the Serving / Food entries replaced by `servingKinds` / `foodKinds` (under the D4E27627 CRCs when old). */
+    function withLayouts(servingKinds, foodKinds) {
       const r = clone(REG);
-      r.types['com.cronometer.shared.entries.models.Serving/2553599101'].f.pop();
+      delete r.types[SERVING_KEY]; delete r.types[FOOD_KEY];
+      r.types[servingKinds === SERVING_OLD ? 'com.cronometer.shared.entries.models.Serving/2553599101' : SERVING_KEY] = { f: servingKinds.split(''), k: 'class' };
+      r.types[foodKinds === FOOD_OLD ? 'com.cronometer.shared.foods.models.Food/2097636843' : FOOD_KEY] = { f: foodKinds.split(''), k: 'class' };
+      return r;
+    }
+    T.it('the bundled registry carries the build 51CEDDC4 layouts (Serving 12 fields, Food 19)', () => {
+      eq(REG.types[SERVING_KEY].f.join(''), SERVING_NEW);
+      eq(REG.types[FOOD_KEY].f.join(''), FOOD_NEW);
+    });
+    T.it('both Serving / Food layouts validate (up to D4E27627 and from 51CEDDC4), in any combination', () => {
+      [[SERVING_OLD, FOOD_OLD], [SERVING_NEW, FOOD_NEW], [SERVING_OLD, FOOD_NEW], [SERVING_NEW, FOOD_OLD]].forEach(([s, f]) => {
+        const v = RB.validate(withLayouts(s, f));
+        ok(v.ok, s + ' / ' + f + ': ' + v.problems.join(' | '));
+      });
+    });
+    T.it('any other Serving or Food layout fails and names both accepted ones', () => {
+      const r = withLayouts(SERVING_NEW, FOOD_NEW);
+      r.types[SERVING_KEY].f.pop();   // 11 fields
       const v = RB.validate(r);
       ok(!v.ok);
-      ok(v.problems.some((p) => /Serving.*ozzoioidilii \(expected ozzoioidiliii\)/.test(p)), v.problems.join(' | '));
+      ok(v.problems.some((p) => /Serving\/\d+ layout ozzoioidili \(expected ozzoioidiliii or ozzoioidilii\)/.test(p)), v.problems.join(' | '));
+      const r2 = withLayouts(SERVING_OLD, FOOD_OLD);
+      r2.types['com.cronometer.shared.entries.models.Serving/2553599101'].f.push('i');   // 14 fields
+      ok(RB.validate(r2).problems.some((p) => /Serving\/2553599101 layout ozzoioidiliiii \(expected/.test(p)), RB.validate(r2).problems.join(' | '));
+      const r3 = withLayouts(SERVING_NEW, FOOD_NEW);
+      r3.types[FOOD_KEY].f.splice(5, 1);   // one more leading int gone: 18 fields
+      ok(RB.validate(r3).problems.some((p) => /Food\/\d+ layout izoisioolooozsoooi \(expected izoisiiioolooozsoooi or izoisiioolooozsoooi\)/.test(p)), RB.validate(r3).problems.join(' | '));
+      const r4 = withLayouts(SERVING_NEW, FOOD_NEW);
+      r4.types[SERVING_KEY].f[11] = 'd';   // same length, other kinds
+      ok(!RB.validate(r4).ok);
     });
     T.it('a large stats.unknown fails; the count must agree with the entries', () => {
       const r = clone(REG);
@@ -264,20 +298,20 @@
     });
     T.it('a required type that is missing, unknown or ambiguous fails; a CRC change alone passes', () => {
       const r = clone(REG);
-      delete r.types['com.cronometer.shared.entries.models.Day/782579793'];
+      delete r.types[DAY_KEY];
       r.stats.types--;
       ok(RB.validate(r).problems.some((p) => /Day is missing/.test(p)));
       const r2 = clone(REG);
-      r2.types['com.cronometer.shared.foods.models.Food/2097636843'] = { k: 'unknown', why: 'x' };
+      r2.types[FOOD_KEY] = { k: 'unknown', why: 'x' };
       r2.stats.unknown = 1;
-      ok(RB.validate(r2).problems.some((p) => /Food.*layout unknown \(expected izoisiiioolooozsoooi\)/.test(p)), RB.validate(r2).problems.join(' | '));
+      ok(RB.validate(r2).problems.some((p) => /Food.*layout unknown \(expected izoisiiioolooozsoooi or izoisiioolooozsoooi\)/.test(p)), RB.validate(r2).problems.join(' | '));
       const r3 = clone(REG);
       r3.types['com.cronometer.shared.entries.models.Day/1'] = { f: ['b', 'b', 'h'], k: 'class' };
       r3.stats.types++;
       ok(RB.validate(r3).problems.some((p) => /Day is ambiguous/.test(p)));
       const r4 = clone(REG);   // same layout under a new CRC: still valid (CMA.gwt.sig resolves by base name)
-      r4.types['com.cronometer.shared.entries.models.Serving/99'] = r4.types['com.cronometer.shared.entries.models.Serving/2553599101'];
-      delete r4.types['com.cronometer.shared.entries.models.Serving/2553599101'];
+      r4.types['com.cronometer.shared.entries.models.Serving/99'] = r4.types[SERVING_KEY];
+      delete r4.types[SERVING_KEY];
       ok(RB.validate(r4).ok, RB.validate(r4).problems.join(' | '));
     });
     T.it('optional feature layouts (Adaptive TDEE) are reported under optional.tdee and never fail the core bar', () => {
@@ -311,7 +345,7 @@
       ok(RB.validate(r).problems.some((p) => /User.*42 fields with idx 19 int and idx 33 string/.test(p)));
     });
     T.it('reader/writer maps, service methods, hashes', () => {
-      const r = clone(REG); delete r.readerMethods._s;
+      const r = clone(REG); Object.keys(r.readerMethods).forEach((m) => { if (r.readerMethods[m] === 'l') delete r.readerMethods[m]; });
       ok(RB.validate(r).problems.some((p) => /no reader method for kind l/.test(p)));
       const r2 = clone(REG); r2.serviceMethods = r2.serviceMethods.filter((m) => m !== 'updateDiary');
       ok(RB.validate(r2).problems.some((p) => /updateDiary not found/.test(p)));

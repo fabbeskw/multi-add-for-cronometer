@@ -119,7 +119,12 @@ material.
 
 `tests/fixtures.js` holds the captured GWT-RPC strings from SPEC §9 and builders for synthetic value graphs
 (`CMA.fixtures.user/food/dayInfo/serving…` and `authenticateResponse/foodResponse/…`). Pages that need real wire
-strings load it after `gwt-stream.js`.
+strings load it after `gwt-stream.js`. The captured strings carry the Serving / Food layouts up to build D4E27627
+(13 / 20 fields); the bundled registry is build 51CEDDC4's (12 / 19, SPEC Appendix O). `serving()` and `food()` build
+the layout of the ACTIVE registry; a page that replays the captured strings installs
+`CMA.fixtures.useRegistry(CMA.fixtures.legacyRegistry())` first (the bundled registry with the two old entries put back:
+gwt.html for its whole suite, capture.html before registry-store.js loads) and switches back to the bundled registry
+for its 51CEDDC4 cases (`updateDiaryTemplate51`, `updateDiaryResponse51` — derived from the captured ones, not captured).
 
 ## Writing a test page
 

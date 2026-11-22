@@ -371,7 +371,8 @@ window.CMA = window.CMA || {};
   // ------------------------------------------------------------------------------------------------
   // getFood / measuresOf
   // ------------------------------------------------------------------------------------------------
-  /** getFood(session, foodId[, opts]) -> Food value (20 fields, SPEC 3.3). */
+  /** getFood(session, foodId[, opts]) -> Food value (SPEC 3.3: 20 fields up to build D4E27627, 19 from 51CEDDC4;
+   *  read it through CMA.gwt.F.FOOD, which follows the active registry). */
   async function getFood(session, foodId, opts) {
     checkSession(session, false);
     const id = Number(foodId);
@@ -446,7 +447,8 @@ window.CMA = window.CMA || {};
     return map && typeof map === 'object' && !Array.isArray(map) ? map[id] : undefined;
   }
   /**
-   * energyKcalOf(food) -> the kcal amount of nutrient 208 in the Food's NutrientMap (Food.f[12], per the Food's own
+   * energyKcalOf(food) -> the kcal amount of nutrient 208 in the Food's NutrientMap (F.FOOD.NUTRIENTS: Food.f[12] up to
+   * build D4E27627, f[11] from 51CEDDC4; per the Food's own
    * basis: per 100 g, or the whole recipe for a serving-based recipe; CMA.units.kcalPerUnit applies the measure), or
    * null when it is missing, not finite, excluded by a PRIMARY filter (the Nutrient's type is not PRIMARY) or `food` is
    * not a Food. A null filter counts as ALL. 0 is returned as 0 (the app reads a missing entry as 0 too; the caller
@@ -467,7 +469,8 @@ window.CMA = window.CMA || {};
     const v = n.f[F.NUTRIENT.AMOUNT];
     return typeof v === 'number' && Number.isFinite(v) ? v : null;
   }
-  /** foodTypeOf(food) -> 'FOOD' | 'RECIPE' | 'MEAL' | 'FORMULATION' | null (Food.f[18], enum FoodType). */
+  /** foodTypeOf(food) -> 'FOOD' | 'RECIPE' | 'MEAL' | 'FORMULATION' | null (F.FOOD.TYPE: Food.f[18], f[17] from build
+   *  51CEDDC4; enum FoodType). */
   function foodTypeOf(food) {
     if (!isType(food, BASE.FOOD)) return null;
     const t = food.f[gwt().F.FOOD.TYPE];
@@ -479,14 +482,16 @@ window.CMA = window.CMA || {};
   // ------------------------------------------------------------------------------------------------
   // updateDiaryAdd / removeServing
   // ------------------------------------------------------------------------------------------------
-  /** Accepts a Serving value ({$t, f:[13]}) or a plain {day, order, grams, foodId, measureId, translationId?, userId?, time?}. */
+  /** Accepts a Serving value ({$t, f}) in the active registry's layout (13 fields up to build D4E27627, 12 from
+   *  51CEDDC4: CMA.gwt.layoutOf('SERVING')) or a plain {day, order, grams, foodId, measureId, translationId?, userId?, time?}. */
   function servingValue(serving) {
     const g = gwt();
     if (isType(serving, BASE.SERVING)) {
-      if (serving.f.length !== 13) throw new Error('CMA.rpc: Serving needs 13 fields (SPEC 3.3), got ' + serving.f.length);
+      const L = g.layoutOf('SERVING');
+      if (serving.f.length !== L.fields) throw new Error('CMA.rpc: Serving needs ' + L.fields + ' fields in this build\'s layout (SPEC 3.3), got ' + serving.f.length);
       // The wire layer is the last line of defence against a malformed updateDiary: Encoder.double would put
       // NaN/Infinity on the wire and the ints are validated only when tokenised, after the day was written.
-      const f = serving.f, S = g.F.SERVING;
+      const f = serving.f, S = L.F;
       if (!isType(f[S.DAY], 'com.cronometer.shared.entries.models.Day/')) throw new Error('CMA.rpc: Serving day must be a Day value');
       if (!Number.isInteger(f[S.ORDER])) throw new Error('CMA.rpc: Serving order must be an integer (got ' + snippet(f[S.ORDER], 40) + ')');
       if (!(Number.isFinite(f[S.GRAMS]) && f[S.GRAMS] >= 0)) throw new Error('CMA.rpc: Serving grams must be a finite number >= 0 (got ' + snippet(f[S.GRAMS], 40) + ')');
@@ -498,12 +503,14 @@ window.CMA = window.CMA || {};
     if (!serving || typeof serving !== 'object') throw new Error('CMA.rpc.updateDiaryAdd: a Serving value is required');
     const grams = Number(serving.grams);
     if (!isPosInt(Number(serving.foodId)) || !isPosInt(Number(serving.measureId)) || !(grams >= 0)) throw new Error('CMA.rpc.updateDiaryAdd: foodId, measureId and grams are required');
-    // Serving/2553599101 wire order (serving-fields-resolved.md section 2): day, b, c, offset, order, time,
-    // userId, grams, foodId, id, measureId, o, translationId; a new entry sends b=c=true, id=0 ('A'), o=0.
-    return { $t: g.SIG.SERVING, f: [
-      dayValue(serving.day), true, true, null, Number(serving.order) || 0, serving.time || null,
-      Number(serving.userId) || 0, grams, Number(serving.foodId), 0, Number(serving.measureId), 0, Number(serving.translationId) || 0,
-    ] };
+    // Serving wire order (serving-fields-resolved.md section 2): day, b, c, offset, order, time, userId, grams,
+    // foodId, id, measureId, [o,] translationId - `o` (always 0) only up to build D4E27627 (SPEC Appendix O); a new
+    // entry sends b=c=true, id=0 ('A'). CMA.gwt.newServing places the values in the active registry's layout.
+    return g.newServing({
+      day: dayValue(serving.day), order: Number(serving.order) || 0, time: serving.time || null,
+      userId: Number(serving.userId) || 0, grams, foodId: Number(serving.foodId), measureId: Number(serving.measureId),
+      translationId: Number(serving.translationId) || 0,
+    });
   }
   /**
    * updateDiaryAdd(session, serving) -> {servingId, serving, results}. Sends updateDiary(nonce, userId,
